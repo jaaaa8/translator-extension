@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body { font-family: "Segoe UI", sans-serif; width: 220px; padding: 10px; }
+      label { display: block; margin: 8px 0 2px; font-size: 12px; color: #555; }
+      select { width: 100%; }
+      #status { margin-top: 10px; font-size: 12px; }
+      .row { display: flex; align-items: center; gap: 6px; }
+    </style>
+  </head>
+  <body>
+    <div class="row">
+      <input type="checkbox" id="enabled" />
+      <b>Bật dịch</b>
+    </div>
+    <label for="srcLang">Ngôn ngữ nguồn</label>
+    <select id="srcLang">
+      <option value="ja">Tiếng Nhật</option>
+      <option value="es">Tiếng Tây Ban Nha</option>
+    </select>
+    <label for="dstLang">Ngôn ngữ đích</label>
+    <select id="dstLang">
+      <option value="vi">Tiếng Việt</option>
+      <option value="en">Tiếng Anh</option>
+    </select>
+    <div id="status">● đang kiểm tra server…</div>
+    <script src="popup.js"></script>
+  </body>
+</html>
