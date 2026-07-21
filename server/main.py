@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from . import config
 from .translator import TranslateError
@@ -35,6 +36,31 @@ def health():
 
 
 # sync def → FastAPI chạy trong threadpool, không chặn /health khi đang xử lý ảnh
+@app.post("/ocr")
+def ocr(image: UploadFile = File(...), src_lang: str = Form(...)):
+    if src_lang not in LANGS:
+        return JSONResponse(status_code=422, content={"error": f"src_lang không hỗ trợ: {src_lang}"})
+    try:
+        return get_pipeline().ocr_image(image.file.read(), src_lang)
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+class TranslateTextsBody(BaseModel):
+    texts: list[str]
+    src_lang: str
+    target_lang: str = "vi"
+
+
+@app.post("/translate-texts")
+def translate_texts(body: TranslateTextsBody):
+    try:
+        translations = get_pipeline().translator.translate(body.texts, body.src_lang, body.target_lang)
+        return {"translations": translations}
+    except TranslateError as e:
+        return JSONResponse(status_code=502, content={"error": f"gemini: {e}"})
+
+
 @app.post("/translate")
 def translate(
     image: UploadFile = File(...),

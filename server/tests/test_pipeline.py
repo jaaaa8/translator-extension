@@ -59,3 +59,8 @@ def test_empty_ocr_blocks_are_dropped_not_translated():
 def test_bad_image_raises():
     with pytest.raises(ValueError):
         make_pipeline().process(b"not an image", "ja", "vi")
+
+
+def test_ocr_image_returns_blocks_without_translation():
+    out = make_pipeline().ocr_image(encode_png(300, 200), "es")
+    assert out["blocks"] == [{"bbox": [10, 10, 100, 50], "src_text": "hola"}]

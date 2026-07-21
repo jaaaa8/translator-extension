@@ -49,4 +49,6 @@ class GeminiTranslator:
                 last_err = f"expected {len(texts)} items, got: {str(out)[:80]}"
             except Exception as e:
                 last_err = str(e)
+                if "429" in last_err:
+                    break  # rate limit/hết quota — retry sau 3s vô ích, còn tốn thêm call
         raise TranslateError(last_err)
