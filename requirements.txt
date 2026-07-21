@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+python-multipart
+python-dotenv
+numpy
+opencv-python
+pillow
+manga-ocr
+paddleocr
+paddlepaddle
+google-genai
+pytest
+httpx
