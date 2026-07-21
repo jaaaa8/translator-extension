@@ -1,0 +1,20 @@
+.mt-overlay {
+  position: absolute;
+  z-index: 2147483000;
+  pointer-events: none;
+}
+.mt-bubble {
+  position: absolute;
+  background: #fff;
+  color: #111;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  overflow: hidden;
+  font-family: "Segoe UI", Arial, sans-serif;
+  line-height: 1.15;
+  padding: 2px;
+  box-sizing: border-box;
+}
