@@ -36,15 +36,15 @@ python -m server.diagnose <ảnh> --lang es [--conf 0.4] [--input-size 1024]
 Chạy đúng pipeline thật (`Detector.detect` → clamp bbox như `pipeline.py` → `engine.read`), xuất cạnh file gốc:
 
 1. **`<ảnh>.diag.png`** — vẽ mọi bbox detector trả về, đánh số; ô **xanh nếu OCR ra chữ / đỏ nếu OCR rỗng**.
-2. **`<ảnh>.diag.txt`** — mỗi block 1 dòng: `#idx  bbox=[x,y,w,h]  conf=…  text="…"` (hoặc `<rỗng>`).
+2. **`<ảnh>.diag.txt`** — mỗi block 1 dòng: `#idx  bbox=[x,y,w,h]  text="…"` (hoặc `<rỗng>`).
 
 Đọc 2 file phân định ngay cho 3 bóng sót:
 - Không ô nào phủ lên bóng → **B2 detector sót**.
 - Có ô đỏ trên bóng → **B3 PaddleOCR rỗng**.
 
-Cờ `--conf` / `--input-size` cho phép A/B knob detector bằng cách chạy lại, không sửa code.
+Cờ `--conf` / `--input-size` cho phép A/B knob detector bằng cách chạy lại, không sửa code — số box hiện ra thay đổi trực tiếp trên ảnh annotate là tín hiệu A/B.
 
-**Thay đổi phụ trợ:** `TextRegion` (`detector.py`) thêm field `conf: float` (lấy từ `blk.confidence`) để diagnostic hiển thị độ tự tin. `Detector.detect` gắn giá trị này. Không ảnh hưởng pipeline hiện tại (chỉ thêm field).
+**Thay đổi phụ trợ:** `Detector.__init__` nhận thêm `conf_thresh`/`input_size` (mặc định `None` → giữ default vendor), truyền xuống `TextDetector` để diagnostic đổi knob được. Không lấy conf per-box: vendor `group_output` vứt bỏ conf của YOLO khi dựng `TextBlock`, lấy ra sẽ phải sửa code vendor (bị cấm) — không đáng.
 
 Script giữ lại làm công cụ tái dùng, không phải code vứt.
 
