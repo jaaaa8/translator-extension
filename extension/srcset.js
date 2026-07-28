@@ -2,22 +2,29 @@
 // hiển thị ảnh trong khung nhỏ → OCR nhận pixel thấp → vỡ chữ. Ưu tiên ứng viên
 // srcset có descriptor lớn nhất; ngược lại img.src (URL gốc, không descriptor).
 function bestSource(img) {
-  const set = img.srcset || (img.getAttribute && img.getAttribute("srcset"));
-  if (set) {
+  const picture = img.parentElement && img.parentElement.tagName === "PICTURE" ? img.parentElement : null;
+  const current = picture && img.currentSrc && new URL(img.currentSrc, img.baseURI || "http://localhost/").href;
+  const elements = picture && picture.querySelectorAll ? [...picture.querySelectorAll("source"), img] : [img];
+  for (const element of elements) {
+    const set = element.srcset || (element.getAttribute && element.getAttribute("srcset"));
+    if (!set) continue;
     let best = null;
     let bestW = -1;
+    let selected = false;
     for (const part of set.split(",")) {
       const [url, desc] = part.trim().split(/\s+/);
       if (!url) continue;
+      const resolved = new URL(url, element.baseURI || img.baseURI || "http://localhost/").href;
+      if (resolved === current) selected = true;
       const wt = desc ? parseFloat(desc) : 1; // "1280w"/"2x" → 1280/2; không desc → 1
       if (wt > bestW) {
         bestW = wt;
-        best = url;
+        best = resolved;
       }
     }
-    if (best) return new URL(best, img.baseURI || "http://localhost/").href;
+    if (best && (!picture || selected)) return best;
   }
-  if (img.parentElement && img.parentElement.tagName === "PICTURE" && img.currentSrc) return img.currentSrc;
+  if (picture && current) return current;
   return img.src || img.currentSrc;
 }
 

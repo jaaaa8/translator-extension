@@ -34,6 +34,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // Both manual actions batch local OCR results into one Gemini request.
 async function translatePage(scope) {
+  const requestSrcLang = srcLang;
+  const requestDstLang = dstLang;
   let jobs;
   try {
     jobs = selectCandidates(
@@ -55,7 +57,7 @@ async function translatePage(scope) {
       chrome.runtime.sendMessage({
         type: "ocrImage",
         url: source,
-        srcLang,
+        srcLang: requestSrcLang,
       })
     )
   );
@@ -81,7 +83,12 @@ async function translatePage(scope) {
     return { ok: true, images, blocks: 0 };
   }
 
-  const tr = await chrome.runtime.sendMessage({ type: "translateTexts", texts, srcLang, dstLang });
+  const tr = await chrome.runtime.sendMessage({
+    type: "translateTexts",
+    texts,
+    srcLang: requestSrcLang,
+    dstLang: requestDstLang,
+  });
   if (!tr || !tr.ok) return { ok: false, error: tr ? tr.error : "mất kết nối background" };
 
   let images = 0;

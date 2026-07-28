@@ -33,6 +33,26 @@ assert.strictEqual(
   "https://x/large.webp"
 );
 
+// A <picture> must keep its selected source set, not switch to the fallback img set.
+const sourceAvif = { srcset: "images/page-640.avif 640w, images/page-1600.avif 1600w" };
+const sourceWebp = { srcset: "images/page-640.webp 640w, images/page-1600.webp 1600w" };
+const picture = { tagName: "PICTURE", querySelectorAll: () => [sourceAvif, sourceWebp] };
+const pictureImage = {
+  src: "fallback.jpg",
+  srcset: "images/page-640.jpg 640w, images/page-4096.jpg 4096w",
+  currentSrc: "https://cdn.example.test/chapter/images/page-640.avif",
+  baseURI: "https://cdn.example.test/chapter/",
+  parentElement: picture,
+  isConnected: true,
+};
+const avifSource = "https://cdn.example.test/chapter/images/page-1600.avif";
+const webpSource = "https://cdn.example.test/chapter/images/page-1600.webp";
+assert.strictEqual(bestSource(pictureImage), avifSource);
+assert.strictEqual(isCurrentSource(pictureImage, avifSource), true);
+pictureImage.currentSrc = "https://cdn.example.test/chapter/images/page-640.webp";
+assert.strictEqual(bestSource(pictureImage), webpSource);
+assert.strictEqual(isCurrentSource(pictureImage, avifSource), false);
+
 const onscreen = { left: 0, top: 0, right: 600, bottom: 500, width: 600, height: 500 };
 
 function fakeImage({
