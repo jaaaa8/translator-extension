@@ -21,4 +21,41 @@ function bestSource(img) {
   return img.src || img.currentSrc;
 }
 
-if (typeof module !== "undefined") module.exports = { bestSource };
+function eligible(img, minSize = 400) {
+  return img.naturalWidth >= minSize && img.naturalHeight >= minSize && Boolean(bestSource(img));
+}
+
+function isViewportVisible(img, viewportWidth, viewportHeight) {
+  const rect = img.getBoundingClientRect();
+  return Boolean(
+    img.getClientRects().length &&
+      rect.width > 0 &&
+      rect.height > 0 &&
+      rect.bottom > 0 &&
+      rect.right > 0 &&
+      rect.top < viewportHeight &&
+      rect.left < viewportWidth
+  );
+}
+
+function isCurrentSource(img, source) {
+  return img.isConnected && bestSource(img) === source;
+}
+
+function selectCandidates(images, scope, translated, viewportWidth, viewportHeight, minSize = 400) {
+  if (scope !== "loaded" && scope !== "visible") throw new Error(`scope khÃƒÂ´ng hÃ¡Â»â€” trÃ¡Â»Â£: ${scope}`);
+
+  const jobs = [];
+  for (const img of images) {
+    if (!img.complete || !eligible(img, minSize)) continue;
+    const source = bestSource(img);
+    if (translated.get(img) === source) continue;
+    if (scope === "visible" && !isViewportVisible(img, viewportWidth, viewportHeight)) continue;
+    jobs.push({ img, source });
+  }
+  return jobs;
+}
+
+if (typeof module !== "undefined") {
+  module.exports = { bestSource, eligible, isViewportVisible, isCurrentSource, selectCandidates };
+}
