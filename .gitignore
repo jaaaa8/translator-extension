@@ -5,3 +5,5 @@ server/models/
 server/vendor/
 *.pt
 *.onnx
+.worktrees/
+.superpowers/sdd/

@@ -1,6 +1,17 @@
 import cv2
 import numpy as np
 
+_MIN_CROP_H = 48
+
+
+def _prep_crop(crop_rgb: np.ndarray) -> np.ndarray:
+    """Upscale short OCR crops, then give text at the edge a white border."""
+    h = crop_rgb.shape[0]
+    if h < _MIN_CROP_H:
+        s = _MIN_CROP_H / h
+        crop_rgb = cv2.resize(crop_rgb, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC)
+    return cv2.copyMakeBorder(crop_rgb, 8, 8, 8, 8, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+
 
 class Pipeline:
     def __init__(self, device: str = "cuda", detector=None, ocr=None, translator=None):
@@ -44,7 +55,7 @@ class Pipeline:
             if x2 <= x or y2 <= y:
                 continue
             crop = cv2.cvtColor(img[y:y2, x:x2], cv2.COLOR_BGR2RGB)
-            text = engine.read(crop).strip()
+            text = engine.read(_prep_crop(crop)).strip()
             if not text:
                 continue
             blocks.append({"bbox": [x, y, x2 - x, y2 - y], "src_text": text})

@@ -4,8 +4,9 @@ let enabled = true;
 let srcLang = "ja";
 let dstLang = "vi";
 
-const done = new WeakSet(); // ảnh đã dịch xong — bấm nút lần nữa sẽ bỏ qua; ảnh LỖI không vào đây nên được thử lại
-const overlays = new Map(); // img -> { container, data }
+const translated = new WeakMap(); // img -> bestSource đã hoàn tất
+const overlays = new Map(); // img -> owned overlay state
+let pruneFrame = 0;
 
 chrome.storage.local.get(["enabled", "srcLang", "dstLang"]).then((v) => {
   enabled = v.enabled !== false;
@@ -26,30 +27,37 @@ chrome.storage.onChanged.addListener((ch) => {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "translatePage") {
-    translatePage().then(sendResponse);
+    translatePage(msg.scope).then(sendResponse);
     return true; // async response
   }
 });
 
-function eligible(img) {
-  return img.naturalWidth >= MIN_SIZE && img.naturalHeight >= MIN_SIZE && (img.currentSrc || img.src);
-}
-
-// Nút "Dịch trang này": OCR mọi ảnh đã load (local, miễn phí) rồi gom toàn bộ
-// text vào MỘT call Gemini duy nhất — không bao giờ chạm rate limit nữa.
-async function translatePage() {
-  const imgs = [...document.querySelectorAll("img")].filter(
-    (img) => img.complete && eligible(img) && !done.has(img)
-  );
-  if (!imgs.length) return { ok: true, images: 0, blocks: 0 };
+// Both manual actions batch local OCR results into one Gemini request.
+async function translatePage(scope) {
+  const requestSrcLang = srcLang;
+  const requestDstLang = dstLang;
+  let jobs;
+  try {
+    jobs = selectCandidates(
+      document.querySelectorAll("img"),
+      scope,
+      translated,
+      innerWidth,
+      innerHeight,
+      MIN_SIZE
+    );
+  } catch (e) {
+    return { ok: false, error: e.message || String(e) };
+  }
+  if (!jobs.length) return { ok: true, images: 0, blocks: 0 };
 
   // background giới hạn 2 request /ocr đồng thời
   const ocrResults = await Promise.all(
-    imgs.map((img) =>
+    jobs.map(({ source }) =>
       chrome.runtime.sendMessage({
         type: "ocrImage",
-        url: img.currentSrc || img.src,
-        srcLang,
+        url: source,
+        srcLang: requestSrcLang,
       })
     )
   );
@@ -62,44 +70,95 @@ async function translatePage() {
       return; // không done → lần bấm sau thử lại
     }
     const indices = res.blocks.map((b) => texts.push(b.src_text) - 1);
-    slots.push({ img: imgs[i], data: res, indices });
+    slots.push({ ...jobs[i], data: res, indices });
   });
 
   if (!texts.length) {
-    for (const s of slots) done.add(s.img); // ảnh không có chữ — xong luôn
-    return { ok: true, images: slots.length, blocks: 0 };
+    let images = 0;
+    for (const slot of slots) {
+      if (!isCurrentSource(slot.img, slot.source)) continue;
+      translated.set(slot.img, slot.source);
+      images++;
+    }
+    return { ok: true, images, blocks: 0 };
   }
 
-  const tr = await chrome.runtime.sendMessage({ type: "translateTexts", texts, srcLang, dstLang });
+  const tr = await chrome.runtime.sendMessage({
+    type: "translateTexts",
+    texts,
+    srcLang: requestSrcLang,
+    dstLang: requestDstLang,
+  });
   if (!tr || !tr.ok) return { ok: false, error: tr ? tr.error : "mất kết nối background" };
 
-  for (const s of slots) {
-    s.data.blocks.forEach((b, j) => (b.trans_text = tr.translations[s.indices[j]]));
-    if (s.data.blocks.length) renderOverlay(s.img, s.data);
-    done.add(s.img);
+  let images = 0;
+  let blocks = 0;
+  for (const slot of slots) {
+    if (!isCurrentSource(slot.img, slot.source)) continue;
+    slot.data.blocks.forEach((block, i) => (block.trans_text = tr.translations[slot.indices[i]]));
+    if (slot.data.blocks.length) renderOverlay(slot.img, slot.data, slot.source, scope);
+    translated.set(slot.img, slot.source);
+    images++;
+    blocks += slot.data.blocks.length;
   }
-  return { ok: true, images: slots.length, blocks: texts.length };
+  return { ok: true, images, blocks };
 }
 
 // ---- overlay ----
 
-function renderOverlay(img, data) {
-  const old = overlays.get(img);
-  if (old) old.container.remove();
+function removeOverlay(img) {
+  const overlay = overlays.get(img);
+  if (!overlay) return;
+  overlay.resizeObserver.disconnect();
+  if (overlay.intersectionObserver) overlay.intersectionObserver.disconnect();
+  overlay.container.remove();
+  overlays.delete(img);
+  translated.delete(img);
+}
+
+function pruneOverlays() {
+  for (const [img, overlay] of overlays) {
+    if (!isCurrentSource(img, overlay.source)) removeOverlay(img);
+  }
+}
+
+function schedulePrune() {
+  if (pruneFrame) return;
+  pruneFrame = requestAnimationFrame(() => {
+    pruneFrame = 0;
+    pruneOverlays();
+  });
+}
+
+function renderOverlay(img, data, source, scope) {
+  removeOverlay(img);
 
   const container = document.createElement("div");
   container.className = "mt-overlay";
   if (!enabled) container.style.display = "none";
-  for (const b of data.blocks) {
-    const el = document.createElement("div");
-    el.className = "mt-bubble";
-    el.textContent = b.trans_text;
-    container.appendChild(el);
+  for (const block of data.blocks) {
+    const element = document.createElement("div");
+    element.className = "mt-bubble";
+    element.textContent = block.trans_text;
+    container.appendChild(element);
   }
   document.body.appendChild(container);
-  overlays.set(img, { container, data });
+
+  const resizeObserver = new ResizeObserver(() => position(img));
+  const intersectionObserver =
+    scope === "visible"
+      ? new IntersectionObserver(([entry]) => {
+          if (
+            overlays.get(img)?.intersectionObserver === intersectionObserver &&
+            !entry.isIntersecting
+          ) removeOverlay(img);
+        })
+      : null;
+
+  overlays.set(img, { container, data, source, scope, resizeObserver, intersectionObserver });
   position(img);
-  new ResizeObserver(() => position(img)).observe(img);
+  resizeObserver.observe(img);
+  if (intersectionObserver) intersectionObserver.observe(img);
 }
 
 // Định vị theo TỌA ĐỘ TÀI LIỆU (spec): container absolute với top/left = vị trí
@@ -135,10 +194,17 @@ function fitText(el) {
   }
 }
 
-// Layout trang xê dịch (trang chèn nội dung, đổi cỡ cửa sổ) → reposition tất cả
-new ResizeObserver(() => {
+function repositionOverlays() {
+  schedulePrune();
   for (const img of overlays.keys()) position(img);
-}).observe(document.documentElement);
-window.addEventListener("resize", () => {
-  for (const img of overlays.keys()) position(img);
+}
+
+new MutationObserver(schedulePrune).observe(document.body, {
+  subtree: true,
+  childList: true,
+  attributes: true,
+  attributeFilter: ["src", "srcset", "sizes", "media", "type"],
 });
+
+new ResizeObserver(repositionOverlays).observe(document.documentElement);
+window.addEventListener("resize", repositionOverlays);
