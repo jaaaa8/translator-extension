@@ -1,10 +1,55 @@
 <!doctype html>
 <html>
-  <head><meta charset="utf-8" /><title>MangaTranslator fixture</title></head>
-  <body style="margin: 0">
-    <div style="height: 1500px; background: #eee">cuộn xuống để test lazy-trigger</div>
-    <img src="ja_page.png" style="width: 60%; display: block; margin: 20px auto" />
-    <img src="es_page.png" style="width: 90%; display: block; margin: 20px auto" />
-    <div style="height: 800px"></div>
+  <head>
+    <meta charset="utf-8" />
+    <title>MangaTranslator layout fixture</title>
+    <style>
+      body { margin: 0; font-family: sans-serif; }
+      h2, .controls { margin: 12px; }
+      #webtoon img { width: 70%; display: block; margin: 20px auto; }
+      .spacer { height: 900px; background: #eee; }
+      #readerFrame { width: 80vw; height: 80vh; margin: 20px auto; overflow: hidden; }
+      #readerPage { width: 100%; height: 100%; object-fit: contain; transition: transform 0.2s; }
+      #readerPage.out { transform: translateX(120vw); }
+    </style>
+  </head>
+  <body>
+    <h2>Webtoon: loaded scope should translate both images</h2>
+    <section id="webtoon">
+      <img src="ja_page.png" />
+      <img src="es_page.png" />
+    </section>
+
+    <div class="spacer">Scroll to the reader fixture below.</div>
+
+    <h2>Reader: visible scope should translate only this page</h2>
+    <div class="controls">
+      <button id="swapSource">Đổi src cùng img</button>
+      <button id="replacePage">Thay img node</button>
+      <button id="moveViewport">Đẩy vào/ra viewport</button>
+    </div>
+    <div id="readerFrame">
+      <img id="readerPage" src="ja_page.png" />
+    </div>
+
+    <script>
+      const page = () => document.getElementById("readerPage");
+      const otherSource = (img) => (img.src.endsWith("ja_page.png") ? "es_page.png" : "ja_page.png");
+
+      document.getElementById("swapSource").onclick = () => {
+        const img = page();
+        img.src = otherSource(img);
+      };
+
+      document.getElementById("replacePage").onclick = () => {
+        const img = page();
+        const replacement = img.cloneNode();
+        replacement.src = otherSource(img);
+        replacement.classList.remove("out");
+        img.replaceWith(replacement);
+      };
+
+      document.getElementById("moveViewport").onclick = () => page().classList.toggle("out");
+    </script>
   </body>
 </html>

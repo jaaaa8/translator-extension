@@ -5,7 +5,8 @@ let srcLang = "ja";
 let dstLang = "vi";
 
 const translated = new WeakMap(); // img -> bestSource đã hoàn tất
-const overlays = new Map(); // img -> { container, data }
+const overlays = new Map(); // img -> owned overlay state
+let pruneFrame = 0;
 
 chrome.storage.local.get(["enabled", "srcLang", "dstLang"]).then((v) => {
   enabled = v.enabled !== false;
@@ -99,23 +100,56 @@ async function translatePage(scope) {
 
 // ---- overlay ----
 
-function renderOverlay(img, data) {
-  const old = overlays.get(img);
-  if (old) old.container.remove();
+function removeOverlay(img) {
+  const overlay = overlays.get(img);
+  if (!overlay) return;
+  overlay.resizeObserver.disconnect();
+  if (overlay.intersectionObserver) overlay.intersectionObserver.disconnect();
+  overlay.container.remove();
+  overlays.delete(img);
+  translated.delete(img);
+}
+
+function pruneOverlays() {
+  for (const [img, overlay] of overlays) {
+    if (!isCurrentSource(img, overlay.source)) removeOverlay(img);
+  }
+}
+
+function schedulePrune() {
+  if (pruneFrame) return;
+  pruneFrame = requestAnimationFrame(() => {
+    pruneFrame = 0;
+    pruneOverlays();
+  });
+}
+
+function renderOverlay(img, data, source, scope) {
+  removeOverlay(img);
 
   const container = document.createElement("div");
   container.className = "mt-overlay";
   if (!enabled) container.style.display = "none";
-  for (const b of data.blocks) {
-    const el = document.createElement("div");
-    el.className = "mt-bubble";
-    el.textContent = b.trans_text;
-    container.appendChild(el);
+  for (const block of data.blocks) {
+    const element = document.createElement("div");
+    element.className = "mt-bubble";
+    element.textContent = block.trans_text;
+    container.appendChild(element);
   }
   document.body.appendChild(container);
-  overlays.set(img, { container, data });
+
+  const resizeObserver = new ResizeObserver(() => position(img));
+  const intersectionObserver =
+    scope === "visible"
+      ? new IntersectionObserver(([entry]) => {
+          if (!entry.isIntersecting) removeOverlay(img);
+        })
+      : null;
+
+  overlays.set(img, { container, data, source, scope, resizeObserver, intersectionObserver });
   position(img);
-  new ResizeObserver(() => position(img)).observe(img);
+  resizeObserver.observe(img);
+  if (intersectionObserver) intersectionObserver.observe(img);
 }
 
 // Định vị theo TỌA ĐỘ TÀI LIỆU (spec): container absolute với top/left = vị trí
@@ -151,10 +185,17 @@ function fitText(el) {
   }
 }
 
-// Layout trang xê dịch (trang chèn nội dung, đổi cỡ cửa sổ) → reposition tất cả
-new ResizeObserver(() => {
+function repositionOverlays() {
+  schedulePrune();
   for (const img of overlays.keys()) position(img);
-}).observe(document.documentElement);
-window.addEventListener("resize", () => {
-  for (const img of overlays.keys()) position(img);
+}
+
+new MutationObserver(schedulePrune).observe(document.body, {
+  subtree: true,
+  childList: true,
+  attributes: true,
+  attributeFilter: ["src", "srcset", "sizes", "media", "type"],
 });
+
+new ResizeObserver(repositionOverlays).observe(document.documentElement);
+window.addEventListener("resize", repositionOverlays);
