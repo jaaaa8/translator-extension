@@ -4,7 +4,7 @@ let enabled = true;
 let srcLang = "ja";
 let dstLang = "vi";
 
-const done = new WeakSet(); // ảnh đã dịch xong — bấm nút lần nữa sẽ bỏ qua; ảnh LỖI không vào đây nên được thử lại
+const translated = new WeakMap(); // img -> bestSource đã hoàn tất
 const overlays = new Map(); // img -> { container, data }
 
 chrome.storage.local.get(["enabled", "srcLang", "dstLang"]).then((v) => {
@@ -26,29 +26,35 @@ chrome.storage.onChanged.addListener((ch) => {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "translatePage") {
-    translatePage().then(sendResponse);
+    translatePage(msg.scope).then(sendResponse);
     return true; // async response
   }
 });
 
-function eligible(img) {
-  return img.naturalWidth >= MIN_SIZE && img.naturalHeight >= MIN_SIZE && (img.currentSrc || img.src);
-}
-
 // Nút "Dịch trang này": OCR mọi ảnh đã load (local, miễn phí) rồi gom toàn bộ
 // text vào MỘT call Gemini duy nhất — không bao giờ chạm rate limit nữa.
-async function translatePage() {
-  const imgs = [...document.querySelectorAll("img")].filter(
-    (img) => img.complete && eligible(img) && !done.has(img)
-  );
-  if (!imgs.length) return { ok: true, images: 0, blocks: 0 };
+async function translatePage(scope) {
+  let jobs;
+  try {
+    jobs = selectCandidates(
+      document.querySelectorAll("img"),
+      scope,
+      translated,
+      innerWidth,
+      innerHeight,
+      MIN_SIZE
+    );
+  } catch (e) {
+    return { ok: false, error: e.message || String(e) };
+  }
+  if (!jobs.length) return { ok: true, images: 0, blocks: 0 };
 
   // background giới hạn 2 request /ocr đồng thời
   const ocrResults = await Promise.all(
-    imgs.map((img) =>
+    jobs.map(({ source }) =>
       chrome.runtime.sendMessage({
         type: "ocrImage",
-        url: bestSource(img),
+        url: source,
         srcLang,
       })
     )
@@ -62,23 +68,33 @@ async function translatePage() {
       return; // không done → lần bấm sau thử lại
     }
     const indices = res.blocks.map((b) => texts.push(b.src_text) - 1);
-    slots.push({ img: imgs[i], data: res, indices });
+    slots.push({ ...jobs[i], data: res, indices });
   });
 
   if (!texts.length) {
-    for (const s of slots) done.add(s.img); // ảnh không có chữ — xong luôn
-    return { ok: true, images: slots.length, blocks: 0 };
+    let images = 0;
+    for (const slot of slots) {
+      if (!isCurrentSource(slot.img, slot.source)) continue;
+      translated.set(slot.img, slot.source);
+      images++;
+    }
+    return { ok: true, images, blocks: 0 };
   }
 
   const tr = await chrome.runtime.sendMessage({ type: "translateTexts", texts, srcLang, dstLang });
   if (!tr || !tr.ok) return { ok: false, error: tr ? tr.error : "mất kết nối background" };
 
-  for (const s of slots) {
-    s.data.blocks.forEach((b, j) => (b.trans_text = tr.translations[s.indices[j]]));
-    if (s.data.blocks.length) renderOverlay(s.img, s.data);
-    done.add(s.img);
+  let images = 0;
+  let blocks = 0;
+  for (const slot of slots) {
+    if (!isCurrentSource(slot.img, slot.source)) continue;
+    slot.data.blocks.forEach((block, i) => (block.trans_text = tr.translations[slot.indices[i]]));
+    if (slot.data.blocks.length) renderOverlay(slot.img, slot.data, slot.source, scope);
+    translated.set(slot.img, slot.source);
+    images++;
+    blocks += slot.data.blocks.length;
   }
-  return { ok: true, images: slots.length, blocks: texts.length };
+  return { ok: true, images, blocks };
 }
 
 // ---- overlay ----
