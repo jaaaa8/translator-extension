@@ -31,17 +31,23 @@ class TextRegion:
 
 
 class Detector:
-    def __init__(self, device: str = "cuda"):
+    def __init__(self, device: str = "cuda", conf_thresh: float | None = None, input_size: int | None = None):
         # ponytail: vendor dùng absolute import nội bộ nên phải chèn sys.path;
         # nếu sau này vendor lên PyPI thì thay bằng import thường
         sys.path.insert(0, str(VENDOR))
         from inference import TextDetector
 
+        # knob None → keep vendor defaults (conf_thresh=0.4, input_size=1024)
+        kw = {"model_path": str(MODEL)}
+        if conf_thresh is not None:
+            kw["conf_thresh"] = conf_thresh
+        if input_size is not None:
+            kw["input_size"] = input_size
         try:
-            self._model = TextDetector(model_path=str(MODEL), device=device)
+            self._model = TextDetector(device=device, **kw)
         except Exception as e:
             print(f"[detector] CUDA init lỗi ({e}), fallback CPU")
-            self._model = TextDetector(model_path=str(MODEL), device="cpu")
+            self._model = TextDetector(device="cpu", **kw)
 
     def detect(self, image_bgr: np.ndarray) -> list[TextRegion]:
         _, _, blk_list = self._model(image_bgr)
