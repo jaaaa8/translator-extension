@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from server.detector import TextRegion
-from server.pipeline import Pipeline
+from server.pipeline import Pipeline, _prep_crop
 
 
 class FakeDetector:
@@ -41,6 +41,16 @@ def encode_png(w, h):
 
 def make_pipeline():
     return Pipeline(detector=FakeDetector(), ocr=FakeOcr(), translator=FakeTranslator())
+
+
+def test_prep_crop_upscales_small():
+    out = _prep_crop(np.zeros((20, 100, 3), np.uint8))
+    assert out.shape[0] >= 48  # small crop is enlarged
+
+
+def test_prep_crop_pads_large_only():
+    out = _prep_crop(np.zeros((80, 200, 3), np.uint8))
+    assert out.shape[:2] == (96, 216)  # 8px border only; no upscale
 
 
 def test_process_returns_schema():
