@@ -4,7 +4,7 @@
 
 **Goal:** Cải thiện độ chính xác/recall OCR bóng thoại cho path Latin (PaddleOCR) — sửa vỡ chữ do capture độ phân giải thấp và sót bóng sạch.
 
-**Architecture:** Trước hết dựng công cụ chẩn đoán tách B2 (detector sót) vs B3 (OCR rỗng) trên trang thật. Sửa nguồn capture full-res (chọn ứng viên `srcset` lớn nhất thay `currentSrc`) và pad+upscale crop server-side. Task knob detector (`.env`) là nhánh có điều kiện, chỉ làm nếu chẩn đoán cho thấy B2.
+**Architecture:** Trước hết dựng công cụ chẩn đoán tách B2 (detector sót) vs B3 (OCR rỗng) trên trang thật, dùng cùng `_prep_crop` như pipeline. Sửa nguồn capture full-res (chọn ứng viên `img.srcset` lớn nhất; `<picture>` không có `img.srcset` dùng `currentSrc`) và pad+upscale crop server-side. Task knob detector (`.env`) là nhánh có điều kiện, chỉ làm nếu chẩn đoán cho thấy B2.
 
 **Tech Stack:** Python 3.12 · FastAPI · OpenCV · comic-text-detector (vendored) · manga-ocr / PaddleOCR · Chrome MV3 (vanilla JS) · pytest · node self-check (không framework).
 
@@ -26,7 +26,7 @@
 - Test: `server/tests/test_diagnose.py`
 
 **Interfaces:**
-- Consumes: `Detector.detect(img_bgr) -> list[TextRegion]` (đã có; `TextRegion.bbox = (x,y,w,h)`), engine `.read(crop_rgb) -> str`.
+- Consumes: `Detector.detect(img_bgr) -> list[TextRegion]` (đã có; `TextRegion.bbox = (x,y,w,h)`), `_prep_crop(crop_rgb) -> np.ndarray`, engine `.read(prepared_crop_rgb) -> str`.
 - Produces:
   - `Detector(device="cuda", conf_thresh: float|None=None, input_size: int|None=None)`
   - `diagnose_image(img_bgr, detector, engine) -> (annotated_bgr: np.ndarray, rows: list[dict])` với mỗi row `{"idx": int, "bbox": [x,y,w,h], "text": str}`; `bbox` luôn giữ nguyên bbox gốc từ detector, còn crop/vẽ được clamp riêng theo biên ảnh.
@@ -53,8 +53,10 @@ class _FakeDetector:
 class _FakeEngine:
     def __init__(self, outs):
         self._outs = list(outs)
+        self.crops = []
 
     def read(self, crop_rgb):
+        self.crops.append(crop_rgb)
         return self._outs.pop(0)
 
 
@@ -76,6 +78,15 @@ def test_diagnose_preserves_raw_bbox_when_crop_is_clamped():
     _, rows = diagnose_image(img, detector, _FakeEngine(["Hola"]))
 
     assert rows[0]["bbox"] == [-10, 10, 40, 20]
+
+
+def test_diagnose_prepares_crop_before_ocr():
+    engine = _FakeEngine(["Hola"])
+    detector = type("Detector", (), {"detect": lambda self, _: [_FakeRegion((10, 10, 40, 20))]})()
+
+    diagnose_image(np.full((100, 100, 3), 255, np.uint8), detector, engine)
+
+    assert engine.crops[0].shape == (64, 112, 3)
 ```
 
 - [ ] **Step 2: Chạy test — xác nhận FAIL**
@@ -115,6 +126,8 @@ import sys
 import cv2
 import numpy as np
 
+from server.pipeline import _prep_crop
+
 
 def diagnose_image(img_bgr, detector, engine):
     """Chạy detect + OCR như pipeline thật, trả (ảnh annotate, rows).
@@ -129,7 +142,7 @@ def diagnose_image(img_bgr, detector, engine):
         text = ""
         if crop_x2 > crop_x1 and crop_y2 > crop_y1:
             crop = cv2.cvtColor(img_bgr[crop_y1:crop_y2, crop_x1:crop_x2], cv2.COLOR_BGR2RGB)
-            text = engine.read(crop).strip()
+            text = engine.read(_prep_crop(crop)).strip()
         color = (0, 180, 0) if text else (0, 0, 220)  # BGR
         cv2.rectangle(annotated, (crop_x1, crop_y1), (crop_x2, crop_y2), color, 2)
         cv2.putText(annotated, str(i), (crop_x1, max(12, crop_y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
@@ -203,7 +216,7 @@ Ghi kết luận vào note Obsidian tiến độ.
 
 ---
 
-### Task 2: Nguồn capture full-res (chọn srcset lớn nhất)
+### Task 2: Nguồn capture full-res (chọn `img.srcset` lớn nhất, hỗ trợ `<picture>`)
 
 **Files:**
 - Create: `extension/srcset.js`
@@ -212,7 +225,7 @@ Ghi kết luận vào note Obsidian tiến độ.
 - Test: `extension/test/srcset.test.js`
 
 **Interfaces:**
-- Produces: `bestSource(img) -> string` — URL nguồn độ phân giải cao nhất. `img` cần các thuộc tính `srcset`, `src`, `currentSrc`, `baseURI`.
+- Produces: `bestSource(img) -> string` — URL nguồn độ phân giải cao nhất từ `img.srcset`; nếu `img` không có `srcset` và parent trực tiếp là `<picture>`, dùng `currentSrc` do browser chọn; ảnh thường vẫn ưu tiên `src` trước `currentSrc`. `img` cần các thuộc tính `srcset`, `src`, `currentSrc`, `baseURI`, `parentElement`.
 
 - [ ] **Step 1: Viết test thất bại** — `extension/test/srcset.test.js`
 
@@ -236,6 +249,16 @@ assert.strictEqual(
   "https://x/orig.jpg"
 );
 
+// <picture> có candidate trên <source>, dùng URL browser đã chọn
+assert.strictEqual(
+  bestSource({
+    src: "https://x/fallback.jpg",
+    currentSrc: "https://x/large.webp",
+    parentElement: { tagName: "PICTURE" },
+  }),
+  "https://x/large.webp"
+);
+
 console.log("srcset.test.js OK");
 ```
 
@@ -249,7 +272,8 @@ Expected: FAIL — `Cannot find module '../srcset.js'`
 ```javascript
 // Chọn nguồn ảnh full-res. currentSrc có thể trỏ biến thể srcset NHỎ khi trang
 // hiển thị ảnh trong khung nhỏ → OCR nhận pixel thấp → vỡ chữ. Ưu tiên ứng viên
-// srcset có descriptor lớn nhất; ngược lại img.src (URL gốc, không descriptor).
+// srcset có descriptor lớn nhất; <picture> không có img.srcset dùng currentSrc;
+// ngược lại img.src (URL gốc, không descriptor).
 function bestSource(img) {
   const set = img.srcset || (img.getAttribute && img.getAttribute("srcset"));
   if (set) {
@@ -266,6 +290,7 @@ function bestSource(img) {
     }
     if (best) return new URL(best, img.baseURI || "http://localhost/").href;
   }
+  if (img.parentElement && img.parentElement.tagName === "PICTURE" && img.currentSrc) return img.currentSrc;
   return img.src || img.currentSrc;
 }
 

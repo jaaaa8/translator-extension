@@ -17,4 +17,14 @@ assert.strictEqual(
   "https://x/orig.jpg"
 );
 
+// <picture> candidates live on <source>; use the browser's selected candidate.
+assert.strictEqual(
+  bestSource({
+    src: "https://x/fallback.jpg",
+    currentSrc: "https://x/large.webp",
+    parentElement: { tagName: "PICTURE" },
+  }),
+  "https://x/large.webp"
+);
+
 console.log("srcset.test.js OK");

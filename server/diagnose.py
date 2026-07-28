@@ -3,6 +3,8 @@ import sys
 import cv2
 import numpy as np
 
+from .pipeline import _prep_crop
+
 
 def diagnose_image(img_bgr, detector, engine):
     """Run detection and OCR, returning an annotated image and diagnostic rows."""
@@ -16,7 +18,7 @@ def diagnose_image(img_bgr, detector, engine):
         text = ""
         if crop_x2 > crop_x1 and crop_y2 > crop_y1:
             crop = cv2.cvtColor(img_bgr[crop_y1:crop_y2, crop_x1:crop_x2], cv2.COLOR_BGR2RGB)
-            text = engine.read(crop).strip()
+            text = engine.read(_prep_crop(crop)).strip()
         color = (0, 180, 0) if text else (0, 0, 220)
         cv2.rectangle(annotated, (crop_x1, crop_y1), (crop_x2, crop_y2), color, 2)
         cv2.putText(annotated, str(i), (crop_x1, max(12, crop_y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)

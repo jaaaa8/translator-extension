@@ -17,8 +17,10 @@ class _FakeDetector:
 class _FakeEngine:
     def __init__(self, outs):
         self._outs = list(outs)
+        self.crops = []
 
     def read(self, crop_rgb):
+        self.crops.append(crop_rgb)
         return self._outs.pop(0)
 
 
@@ -39,3 +41,12 @@ def test_diagnose_preserves_raw_bbox_when_crop_is_clamped():
     _, rows = diagnose_image(img, detector, _FakeEngine(["Hola"]))
 
     assert rows[0]["bbox"] == [-10, 10, 40, 20]
+
+
+def test_diagnose_prepares_crop_before_ocr():
+    engine = _FakeEngine(["Hola"])
+    detector = type("Detector", (), {"detect": lambda self, _: [_FakeRegion((10, 10, 40, 20))]})()
+
+    diagnose_image(np.full((100, 100, 3), 255, np.uint8), detector, engine)
+
+    assert engine.crops[0].shape == (64, 112, 3)

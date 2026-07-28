@@ -17,6 +17,7 @@ function bestSource(img) {
     }
     if (best) return new URL(best, img.baseURI || "http://localhost/").href;
   }
+  if (img.parentElement && img.parentElement.tagName === "PICTURE" && img.currentSrc) return img.currentSrc;
   return img.src || img.currentSrc;
 }
 
