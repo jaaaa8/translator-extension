@@ -56,7 +56,7 @@ def main(argv):
     cv2.imencode(".png", annotated)[1].tofile(out_png)
     _write_report(out_txt, rows)
     empty = sum(1 for r in rows if not r["text"])
-    print(f"{len(rows)} block, {empty} rỗng → {out_png} / {out_txt}")
+    print(f"{len(rows)} blocks, {empty} empty -> {out_png} / {out_txt}")
 
 
 if __name__ == "__main__":
