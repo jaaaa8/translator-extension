@@ -30,3 +30,12 @@ def test_diagnose_rows_and_colors():
     assert rows[0]["bbox"] == [10, 10, 40, 20]
     assert (annotated == [0, 180, 0]).all(axis=2).any()
     assert (annotated == [0, 0, 220]).all(axis=2).any()
+
+
+def test_diagnose_preserves_raw_bbox_when_crop_is_clamped():
+    img = np.full((50, 50, 3), 255, np.uint8)
+    detector = type("Detector", (), {"detect": lambda self, _: [_FakeRegion((-10, 10, 40, 20))]})()
+
+    _, rows = diagnose_image(img, detector, _FakeEngine(["Hola"]))
+
+    assert rows[0]["bbox"] == [-10, 10, 40, 20]

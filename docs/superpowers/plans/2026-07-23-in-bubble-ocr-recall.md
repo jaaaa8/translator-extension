@@ -29,7 +29,7 @@
 - Consumes: `Detector.detect(img_bgr) -> list[TextRegion]` (đã có; `TextRegion.bbox = (x,y,w,h)`), engine `.read(crop_rgb) -> str`.
 - Produces:
   - `Detector(device="cuda", conf_thresh: float|None=None, input_size: int|None=None)`
-  - `diagnose_image(img_bgr, detector, engine) -> (annotated_bgr: np.ndarray, rows: list[dict])` với mỗi row `{"idx": int, "bbox": [x,y,w,h], "text": str}`
+  - `diagnose_image(img_bgr, detector, engine) -> (annotated_bgr: np.ndarray, rows: list[dict])` với mỗi row `{"idx": int, "bbox": [x,y,w,h], "text": str}`; `bbox` luôn giữ nguyên bbox gốc từ detector, còn crop/vẽ được clamp riêng theo biên ảnh.
 
 - [ ] **Step 1: Viết test thất bại** — `server/tests/test_diagnose.py`
 
@@ -67,6 +67,15 @@ def test_diagnose_rows_and_colors():
     # ô có chữ tô xanh, ô rỗng tô đỏ (BGR)
     assert (annotated == [0, 180, 0]).all(axis=2).any()
     assert (annotated == [0, 0, 220]).all(axis=2).any()
+
+
+def test_diagnose_preserves_raw_bbox_when_crop_is_clamped():
+    img = np.full((50, 50, 3), 255, np.uint8)
+    detector = type("Detector", (), {"detect": lambda self, _: [_FakeRegion((-10, 10, 40, 20))]})()
+
+    _, rows = diagnose_image(img, detector, _FakeEngine(["Hola"]))
+
+    assert rows[0]["bbox"] == [-10, 10, 40, 20]
 ```
 
 - [ ] **Step 2: Chạy test — xác nhận FAIL**
@@ -115,16 +124,16 @@ def diagnose_image(img_bgr, detector, engine):
     rows = []
     for i, region in enumerate(detector.detect(img_bgr)):
         x, y, bw, bh = region.bbox
-        x, y = max(0, x), max(0, y)
-        x2, y2 = min(w, x + bw), min(h, y + bh)
+        crop_x1, crop_y1 = min(w, max(0, x)), min(h, max(0, y))
+        crop_x2, crop_y2 = max(0, min(w, x + bw)), max(0, min(h, y + bh))
         text = ""
-        if x2 > x and y2 > y:
-            crop = cv2.cvtColor(img_bgr[y:y2, x:x2], cv2.COLOR_BGR2RGB)
+        if crop_x2 > crop_x1 and crop_y2 > crop_y1:
+            crop = cv2.cvtColor(img_bgr[crop_y1:crop_y2, crop_x1:crop_x2], cv2.COLOR_BGR2RGB)
             text = engine.read(crop).strip()
         color = (0, 180, 0) if text else (0, 0, 220)  # BGR
-        cv2.rectangle(annotated, (x, y), (x2, y2), color, 2)
-        cv2.putText(annotated, str(i), (x, max(12, y - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        rows.append({"idx": i, "bbox": [x, y, x2 - x, y2 - y], "text": text})
+        cv2.rectangle(annotated, (crop_x1, crop_y1), (crop_x2, crop_y2), color, 2)
+        cv2.putText(annotated, str(i), (crop_x1, max(12, crop_y1 - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        rows.append({"idx": i, "bbox": [x, y, bw, bh], "text": text})
     return annotated, rows
 
 
@@ -160,7 +169,7 @@ def main(argv):
     cv2.imencode(".png", annotated)[1].tofile(out_png)
     _write_report(out_txt, rows)
     empty = sum(1 for r in rows if not r["text"])
-    print(f"{len(rows)} block, {empty} rỗng → {out_png} / {out_txt}")
+    print(f"{len(rows)} blocks, {empty} empty -> {out_png} / {out_txt}")
 
 
 if __name__ == "__main__":
