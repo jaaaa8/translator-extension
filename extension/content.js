@@ -142,7 +142,10 @@ function renderOverlay(img, data, source, scope) {
   const intersectionObserver =
     scope === "visible"
       ? new IntersectionObserver(([entry]) => {
-          if (!entry.isIntersecting) removeOverlay(img);
+          if (
+            overlays.get(img)?.intersectionObserver === intersectionObserver &&
+            !entry.isIntersecting
+          ) removeOverlay(img);
         })
       : null;
 
