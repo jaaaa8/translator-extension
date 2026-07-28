@@ -48,7 +48,7 @@ async function translatePage() {
     imgs.map((img) =>
       chrome.runtime.sendMessage({
         type: "ocrImage",
-        url: img.currentSrc || img.src,
+        url: bestSource(img),
         srcLang,
       })
     )
