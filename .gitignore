@@ -6,3 +6,4 @@ server/vendor/
 *.pt
 *.onnx
 .worktrees/
+.superpowers/sdd/
