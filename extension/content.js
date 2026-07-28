@@ -32,8 +32,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
-// Nút "Dịch trang này": OCR mọi ảnh đã load (local, miễn phí) rồi gom toàn bộ
-// text vào MỘT call Gemini duy nhất — không bao giờ chạm rate limit nữa.
+// Both manual actions batch local OCR results into one Gemini request.
 async function translatePage(scope) {
   let jobs;
   try {

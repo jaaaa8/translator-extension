@@ -43,7 +43,7 @@ function isCurrentSource(img, source) {
 }
 
 function selectCandidates(images, scope, translated, viewportWidth, viewportHeight, minSize = 400) {
-  if (scope !== "loaded" && scope !== "visible") throw new Error(`scope khÃƒÂ´ng hÃ¡Â»â€” trÃ¡Â»Â£: ${scope}`);
+  if (scope !== "loaded" && scope !== "visible") throw new Error(`scope không hỗ trợ: ${scope}`);
 
   const jobs = [];
   for (const img of images) {

@@ -111,7 +111,7 @@ assert.strictEqual(isCurrentSource(currentImage, currentImage.src), false);
 
 assert.throws(
   () => selectCandidates([], "auto", new WeakMap(), 800, 600),
-  /scope khÃƒÂ´ng hÃ¡Â»â€” trÃ¡Â»Â£/
+  /scope không hỗ trợ/
 );
 
 console.log("srcset.test.js OK");
