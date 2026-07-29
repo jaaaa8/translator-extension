@@ -14,6 +14,49 @@ Nguyên tắc triển khai:
 
 ---
 
+## 0. Kết quả kiểm chứng bằng đo thực tế (2026-07-29)
+
+Roadmap này được viết **trước** khi có số đo. Sau khi profiling thật trên hai trang mẫu (`mangadex.jpeg` — `es`, 13 bóng; `AisazuNihaIrarenai-003.jpg` — `ja`, 24 bóng), phần mô tả kiến trúc gần như đúng hoàn toàn, nhưng **thứ tự ưu tiên P0 thì sai**. Số đo warm, cùng máy, cùng GPU:
+
+| Stage | `ja` (24 bóng) | `es` (13 bóng) |
+|---|---|---|
+| decode | ~0.01s | ~0.01s |
+| detector | 0.18s | 0.67s |
+| **vòng lặp OCR** | **7.18s** | **13.15s** |
+| end-to-end | 11.8s | 14.7s |
+
+**Vòng lặp OCR chiếm 91–99% tổng thời gian.** Mỗi crop: manga-ocr (GPU) trung vị 0.179s; PaddleOCR (**wheel CPU**) trung vị 1.068s cộng 0.237s overhead cố định mỗi call. Mọi stage khác là nhiễu đo.
+
+### 0.1 Nhận định đúng, giữ nguyên
+
+- Toàn bộ mục 1 (mô tả kiến trúc) khớp code hiện tại, kể cả `MAX_CONCURRENT=2`, single-flight, timeout 60s/300s, một call Gemini + retry + failover 429, `fitText` 18→10px, và cả bốn cơ chế chống race ở 1.7.
+- §2 P0 “Chờ OCR xong toàn scope rồi mới dịch” — **đây mới là điểm nghẽn số 1 về cảm nhận**, không phải lock. Đo thực tế: scope `visible` (1 ảnh) màn hình trắng 12–15s; scope `loaded` (5 ảnh) trắng 40–60s.
+- §2 P0 `Promise.all` bắn toàn bộ ảnh — đúng, `content.js` vẫn tạo mọi job cùng lúc.
+- §2 P1 cache RAM của MV3 worker mất khi worker ngủ — đúng.
+- §3.4 thiếu `dstLang` trong key — **đã xác nhận là bug sống**. `extension/srcset.js` `jobKey()` chỉ gồm `source|srcLang|crop`, còn `selectCandidates()` bỏ qua ảnh khi `translated.get(img) === key`; đổi đích vi→en rồi bấm lại thì ảnh đã dịch bị **bỏ qua sai**.
+
+### 0.2 Nhận định sai hoặc đặt sai ưu tiên
+
+- **§2 P0 hàng 1 + §3.1 (thu hẹp `_ocr_lock` theo stage): gần như vô giá trị.** Phần chạy được ngoài lock (decode + crop) đo được 0.01–0.02s, so với 7–13s của vòng OCR. Thu hẹp lock lấy về ~0.02s. Đây không phải P0; nó thậm chí không đáng làm cho tới khi vòng OCR nhanh hơn một bậc.
+- **§3.2 (batch recognition) + §2 P1 “recognize từng bbox thay vì batch”: đã đo và chết.** Truyền list vào `PaddleOCR.predict()` cho 13.32s so với 12.94s khi loop — nó loop nội bộ. Gọi riêng `paddleocr.TextRecognition` nhanh hơn 53× nhưng trả rác (`['T','TA','E','AP']`) vì một crop của detector là **cả bóng thoại nhiều dòng**, còn line recognizer chỉ đọc một dòng; chính phần detect bên trong `predict()` mới tách bóng thành dòng. manga-ocr không có API batch. Một call full-page rồi gom dòng lại thành bóng thì **chậm hơn** (16.84s so với 12.62s) và đổi cả text.
+- **§2 thiếu hẳn mục đáng lẽ đứng đầu bảng: `es` chạy PaddleOCR trên CPU.** Sự thật này *có* nằm ở §1.4 nhưng không được nối vào bảng điểm nghẽn, nên nó biến mất khỏi mọi quyết định ưu tiên. Đây là lý do duy nhất khiến `es` với 13 bóng (13.15s) chậm hơn `ja` với 24 bóng (7.18s) — chậm hơn **6×/crop**.
+- **§2 P1 nhìn “nhiều vùng cho cùng một ảnh” như cơ hội batch, nhưng vấn đề thật là box trùng.** Detector trả hai box gần trùng cho cùng một bóng (đo được IoU 0.99 và 0.93 trên `mangadex.jpeg`) → OCR hai lần, chữ trùng gửi lên Gemini, overlay vẽ đè. Roadmap không hề nhắc tới. Sửa xong lấy về 23% trên `es` — nhiều hơn mọi hạng mục P0 trong roadmap cộng lại.
+- **§7 (trace 14 stage kiểu OpenTelemetry) là over-engineering.** Khi một số hạng chiếm 91–99%, một `time.perf_counter()` quanh vòng OCR đã trả lời xong câu hỏi.
+- **§3.10 tiling: không liên quan tới mục tiêu hiện tại.** Nó là hạng mục *accuracy*, mà user đã chốt độ chính xác hiện đã ổn.
+
+### 0.3 Đã làm trong phiên 2026-07-29
+
+- **Dedupe box trùng** (`server/pipeline.py`, commit `9eeb19f`): loại box có IoU > 0.5, giữ box to hơn. `es` 13→11 box, OCR **12.62s → 9.77s (−23%)**; `ja` 24→24 box, 7.12s→6.88s, không mất chữ nào. Ngưỡng 0.5 vì box **lồng nhau** của chữ dọc `ja` chỉ tới ~0.36 và phải giữ nguyên. Độ chính xác trên hai box trùng của `es` là hoà: một bóng đọc kém đi (`MEL` thay vì `MEU`), một bóng tốt lên (`EU NÃO VOU` thay vì `ELI NÃO VOUI`) — nhưng mỗi bóng giờ chỉ còn đúng một overlay thay vì hai cái chồng nhau.
+- **Phương án PaddleOCR GPU: tạm gác.** `paddle 3.3.1` đang cài có `is_compiled_with_cuda() == False`. Cần cài `paddlepaddle-gpu`, mà import `paddle` trước `torch` trên Windows làm hỏng `torch/lib/shm.dll` (`WinError 127` — đã gặp thật). Server sống được chỉ vì `paddleocr` được import lazy trong `PaddleLatinEngine.__init__`. Nếu hồi sinh: dựng **venv riêng dùng một lần** để chứng minh trước, không cài đè lên venv đang chạy.
+
+### 0.4 Hướng đã chốt
+
+**B2 — stream kết quả và vẽ dần** (xem 3.3/3.9): server trả NDJSON theo block, background nối bằng `chrome.runtime.connect` port, `content.js` vẽ overlay theo từng chunk thay vì chờ `Promise.all` toàn scope. Đây là hạng mục P0 thật, vì nó tấn công đúng thứ người dùng cảm nhận: khoảng trắng 12–60s.
+
+Về **DeepL thay cho Gemini**: đã xác minh DeepL hỗ trợ `VI` làm ngôn ngữ đích (`ja`/`es` đều là source hợp lệ), nên không bị chặn kỹ thuật. Nhưng DeepL dịch trung thành cả lỗi OCR (`MELI PÉ FEDIA` → rác, trong khi LLM tự sửa thành `MEU PÉ`), và mất ngữ cảnh xuyên bóng thoại. Hướng hợp lý là **hybrid draft-then-refine**: DeepL dịch nháp từng chunk để vẽ ngay (~200ms), hết trang thì một call Gemini duy nhất tinh chỉnh toàn bộ và thay chữ. Dù chọn DeepL hay không, **B2 vẫn phải làm trước** — cơ chế streaming là điều kiện cần của cả hai.
+
+---
+
 ## 1. Cấu trúc hiện tại
 
 ```text
@@ -101,13 +144,17 @@ decode bytes
 
 ## 2. Các điểm nghẽn hiệu năng chính
 
-| Mức ưu tiên | Điểm nghẽn | Tác động | Nhận định |
+> [!warning] Bảng này viết trước khi đo. Cột cuối đã được sửa lại theo số đo 2026-07-29 — xem §0.
+
+| Mức ưu tiên | Điểm nghẽn | Tác động | Nhận định sau khi đo |
 |---|---|---|---|
-| P0 | `_ocr_lock` khóa cả decode, detect, prep và recognition | Hai request client không tạo concurrency ML thật | `MAX_CONCURRENT=2` chủ yếu chỉ overlap fetch/upload/chờ, inference vẫn nối đuôi |
-| P0 | Chờ OCR xong toàn scope rồi mới dịch | Time-to-first-translation cao | Mất lợi ích của việc ảnh/vùng đầu đã xử lý xong |
-| P0 | `Promise.all` bắn toàn bộ ảnh | Queue/message/promise lớn ở webtoon dài | Worker có giới hạn chạy nhưng content script vẫn tạo toàn bộ công việc ngay |
-| P1 | Recognize từng bbox thay vì batch | GPU/CPU sử dụng chưa hiệu quả | Detector thường trả nhiều vùng cho cùng một ảnh/tile |
-| P1 | OCR cache trong RAM service worker | Cache mất khi Manifest V3 worker ngủ | Prewarm và lần dịch sau không ổn định |
+| ~~P0~~ → **P3** | Thiếu hẳn: `es` chạy PaddleOCR trên **CPU** (nêu ở §1.4 nhưng không đưa vào bảng này) | 1.068s/crop so với 0.179s của manga-ocr GPU — chậm hơn 6× | **Đây mới là hàng đầu bảng.** Chỉ gỡ được bằng `paddlepaddle-gpu`; đang gác vì rủi ro DLL trên Windows |
+| ~~P0~~ → **P2** | Detector trả **box gần trùng** cho cùng một bóng (đo IoU 0.99 và 0.93) | OCR hai lần, chữ trùng lên Gemini, overlay vẽ đè | Roadmap bỏ sót. **Đã sửa** ngày 2026-07-29: `es` −23% |
+| P0 | Chờ OCR xong toàn scope rồi mới dịch | Time-to-first-translation cao | **Đúng, và là điểm nghẽn cảm nhận số 1.** Đo được: `visible` trắng 12–15s, `loaded` trắng 40–60s → hạng mục B2 |
+| P0 | `Promise.all` bắn toàn bộ ảnh | Queue/message/promise lớn ở webtoon dài | Đúng: content script vẫn tạo toàn bộ công việc ngay |
+| ~~P0~~ → **bỏ** | `_ocr_lock` khóa cả decode, detect, prep và recognition | Hai request client không tạo concurrency ML thật | **Sai ưu tiên.** Phần chạy được ngoài lock đo được 0.01–0.02s so với 7–13s vòng OCR. Thu hẹp lock lấy về ~0.02s |
+| ~~P1~~ → **bỏ** | Recognize từng bbox thay vì batch | GPU/CPU sử dụng chưa hiệu quả | **Đã đo và chết.** Paddle list-`predict()` 13.32s vs 12.94s (loop nội bộ); rec-only trả rác; manga-ocr không có API batch |
+| P1 | OCR cache trong RAM service worker | Cache mất khi Manifest V3 worker ngủ | Đúng: prewarm và lần dịch sau không ổn định |
 | P1 | Reposition mọi overlay theo scroll | Có thể gây jank khi nhiều bubble | Tọa độ document không đổi chỉ vì scroll thông thường |
 | P1 | `fitText()` giảm từng pixel | Layout thrashing | Nhiều lần đo layout cho mỗi bubble |
 | P2 | Một request Gemini cho scope rất lớn | Payload/rate-limit/retry có failure domain lớn | Tối ưu context tốt nhưng sẽ gãy ở chapter dài |
@@ -120,7 +167,9 @@ decode bytes
 
 ### P0 — làm trước
 
-#### 3.1 Thu hẹp lock OCR theo stage
+#### 3.1 Thu hẹp lock OCR theo stage ❌ đã đo, không đáng làm
+
+> [!failure] Đo 2026-07-29: decode+crop chỉ 0.01–0.02s, vòng OCR 7–13s. Toàn bộ mục này lấy về ~0.02s. Không làm cho tới khi vòng OCR nhanh hơn một bậc.
 
 Thay `_ocr_lock` cho toàn pipeline bằng lock tối thiểu:
 
@@ -132,7 +181,9 @@ recognizer inference: lock riêng theo engine/language
 
 Mục tiêu là để request B có thể decode/crop/prep trong khi GPU đang infer request A. Chỉ tăng concurrency inference sau khi benchmark VRAM, độ ổn định và throughput; lock hiện tại có thể là điều kiện đúng nếu model không thread-safe.
 
-#### 3.2 Batch recognition trong một ảnh hoặc tile
+#### 3.2 Batch recognition trong một ảnh hoặc tile ❌ đã đo, không khả thi
+
+> [!failure] Đo 2026-07-29: PaddleOCR loop nội bộ nên truyền list không nhanh hơn (13.32s vs 12.94s); `TextRecognition` rec-only nhanh 53× nhưng trả rác vì crop là cả bóng nhiều dòng; manga-ocr không có API batch. Thay bằng **dedupe box trùng** — cùng mục tiêu “bớt crop phải OCR”, và đã lấy về 23% trên `es`.
 
 Sau detector:
 
@@ -156,7 +207,9 @@ Thay `Promise.all` không giới hạn bằng scheduler nhỏ phía content scri
 
 Việc này không đổi accuracy, nhưng cải thiện rõ rệt cảm giác phản hồi.
 
-#### 3.4 Tách key OCR, key bản dịch và version
+#### 3.4 Tách key OCR, key bản dịch và version ✅ bug đã xác nhận, chưa sửa
+
+> [!bug] `extension/srcset.js` `jobKey()` chỉ gồm `source|srcLang|crop`, không có `dstLang`; `selectCandidates()` lại bỏ qua ảnh khi `translated.get(img) === key`. Đổi đích vi→en rồi bấm lại thì ảnh đã dịch bị bỏ qua sai. Sửa nhỏ, chưa làm.
 
 Khóa hiện tại phải phản ánh đúng đầu ra:
 
@@ -402,16 +455,16 @@ end-to-end
 
 ## 8. Các câu hỏi còn bỏ ngỏ
 
-1. `_ocr_lock` đang bảo vệ thành phần nào cụ thể: detector, Manga OCR, PaddleOCR, CUDA context hay dữ liệu dùng chung? Các engine có thực sự không thread-safe không?
-2. Thời gian thực tế hiện phân bổ thế nào giữa download, detector, recognizer, chờ queue, Gemini và render overlay?
+1. ~~`_ocr_lock` đang bảo vệ thành phần nào?~~ **Không còn quan trọng** — kể cả trả lời đúng thì phần thu được cũng chỉ ~0.02s (xem §0.2).
+2. ~~Thời gian thực tế phân bổ thế nào?~~ **Đã trả lời (2026-07-29):** vòng OCR 91–99%; detector 0.18–0.67s; decode ~0.01s; Gemini 2–4s. Bảng đầy đủ ở §0.
 3. Dữ liệu người dùng chủ yếu là manga page thường hay webtoon ảnh rất cao? Kích thước ảnh p50/p95 và số block p50/p95 là bao nhiêu?
 4. `MAX_CONCURRENT=2` được chọn từ benchmark VRAM/throughput hay chỉ là giới hạn an toàn? Tối ưu cho CPU-only và CUDA có cần profile khác nhau không?
-5. Recognizer hiện có hỗ trợ `read_batch()` hay API tương đương không? Nếu không, batch ở mức engine có thực tế/đáng conversion không?
-6. Người dùng thường bấm `loaded` hay `visible`? Có cần progressive render trong scope loaded trước khi toàn scope hoàn tất không?
-7. Cần hỗ trợ những ngôn ngữ nguồn/đích nào ngoài `ja` và `es`? Có thể để người dùng chọn source language theo chapter để tránh classifier tự động không?
+5. ~~Recognizer có hỗ trợ `read_batch()` không?~~ **Đã trả lời: không, và cũng không đáng.** Chi tiết ở §0.2.
+6. ~~Người dùng thường bấm `loaded` hay `visible`?~~ **Đã trả lời: cả hai đều đau như nhau**, nên progressive render (B2) cần cho cả hai scope, không chỉ `loaded`.
+7. Cần hỗ trợ những ngôn ngữ nguồn/đích nào ngoài `ja` và `es`? Có thể để người dùng chọn source language theo chapter để tránh classifier tự động không? *(Đích hiện chỉ có `vi` và `en` trong `popup.html`.)*
 8. Có site nào dùng `object-fit`, CSS transform, canvas, tile ảnh, anti-hotlink hoặc virtualized DOM làm crop/position/fetch hiện tại sai không?
 9. OCR cache có chứa nội dung nhạy cảm không? Chính sách lưu local, TTL, giới hạn dung lượng và chế độ private cần như thế nào?
-10. Số block/tổng ký tự nào bắt đầu làm một Gemini call chậm hoặc lỗi? Giới hạn model/API hiện tại là gì?
+10. ~~Số block nào làm một Gemini call chậm hoặc lỗi?~~ **Trả lời một phần: 24 block vẫn ổn** cho một call. Ngưỡng trên chưa đo; §3.9 vẫn còn giá trị cho chapter dài.
 11. Cần consistency dịch ở mức cả chapter hay chỉ page/viewport? Điều này quyết định chiến lược chunk + glossary.
 12. Overlay mong muốn là thay thế text, subtitle, tooltip hay selectable/copyable text? Bản dịch dài hơn bbox được phép tràn/mở rộng đến đâu?
 13. Có yêu cầu offline/privacy-first không? Nếu có, mức chấp nhận model download, RAM và WebGPU compatibility là bao nhiêu?
@@ -422,4 +475,15 @@ end-to-end
 
 ## Kết luận ngắn
 
-Không cần rewrite toàn bộ. Đường ngắn nhất để tăng tốc mà giữ độ chính xác là: **đo timing → ưu tiên/cancel công việc theo viewport → batch recognizer và thu hẹp lock → persistent cache → chỉ sau đó mới cân nhắc tiling, streaming và ONNX/WebGPU**. Kiến trúc tách OCR local khỏi dịch cloud, bbox theo ảnh gốc và cơ chế chống stale result hiện tại là các phần nên giữ nguyên.
+> [!note] Bản gốc (viết trước khi đo)
+> Không cần rewrite toàn bộ. Đường ngắn nhất để tăng tốc mà giữ độ chính xác là: **đo timing → ưu tiên/cancel công việc theo viewport → batch recognizer và thu hẹp lock → persistent cache → chỉ sau đó mới cân nhắc tiling, streaming và ONNX/WebGPU**.
+
+**Sửa lại sau khi đo (2026-07-29).** Hai vế đầu đúng và đã làm; hai vế “batch recognizer” và “thu hẹp lock” thì đã đo và bỏ. Thứ tự thật là:
+
+1. ~~Đo timing~~ **xong** — vòng OCR là 91–99%.
+2. ~~Bớt crop phải OCR~~ **xong** — dedupe box trùng, `es` −23%.
+3. **Vẽ dần thay vì chờ toàn scope (B2)** ← đang làm. Không làm OCR nhanh hơn, nhưng xoá khoảng trắng 12–60s, tức là toàn bộ phần người dùng thực sự cảm nhận.
+4. Đưa `es` lên GPU (`paddlepaddle-gpu`, venv riêng) — phần thắng lớn nhất còn lại, nhưng có rủi ro DLL.
+5. Persistent cache, cancellation, `dstLang` trong key — việc nhỏ, làm khi tiện.
+
+Phần kiến trúc **giữ nguyên**: tách OCR local khỏi dịch cloud, bbox theo hệ toạ độ ảnh gốc, và bốn cơ chế chống stale result ở §1.7.

@@ -434,3 +434,103 @@ es: [0](379,141,500,230) vs [1](379,141,501,230)  IoU=0.99  ← lệch 1 pixel
 2/13 bóng bị OCR **hai lần**: ~2.0s trong 13.15s là công toi, chữ trùng gửi lên Gemini, overlay vẽ đè cùng một câu hai lần.
 
 Trang `ja` khác kiểu: 7 cặp **lồng nhau** (contain≈1.0 nhưng IoU thấp — box nhỏ nằm trong box lớn, chữ dọc). Với ngưỡng IoU 0.5 thì `ja` không mất box nào. **Không đụng phần lồng nhau** vì nó có thể là hiệu ứng âm thanh riêng, và user đã chốt giữ nguyên độ chính xác.
+
+---
+
+## Dedupe box trùng — xong ✅ (2026-07-29)
+
+Commit `9eeb19f` trên `feat/v2`. `server/pipeline.py`: `_iou()` + `_dedupe_regions()` bỏ box có IoU > `_DEDUPE_IOU = 0.5`, **giữ box to hơn** (box to không cắt cụt chữ), gọi ngay trong vòng lặp của `ocr_image()`.
+
+| Trang | Box | OCR trước | OCR sau | Chữ mất |
+|---|---|---|---|---|
+| `es` mangadex | 13 → 11 | 12.62s | **9.77s (−23%)** | không |
+| `ja` Aisazu | 24 → 24 | 7.12s | 6.88s | không |
+
+> [!warning] Độ chính xác trên hai box trùng là **hoà, không phải thắng**
+> Heuristic "giữ box to hơn" cho kết quả lẫn lộn trên đúng hai bóng bị trùng của `es`:
+> - bóng 1 **kém đi**: `MEL` (đúng phải là `MEU`)
+> - bóng 7 **tốt lên**: `EU NÃO VOU` thay vì `ELI NÃO VOUI`
+>
+> Cái thắng chắc chắn là **mỗi bóng giờ chỉ còn một overlay** thay vì hai cái chồng nhau, cộng 23% thời gian.
+
+4 test mới trong `server/tests/test_pipeline.py` dùng **toạ độ đo thật**, trong đó có test giữ nguyên box lồng nhau của `ja`. Toàn bộ: 47 pytest pass, 4 suite node OK, `git diff --check` sạch.
+
+Commit thứ hai `fde9ca5` — ghi lại số đo latency vào docs.
+
+---
+
+## Kiểm chứng lại `ocr-manga-extension-roadmap.md` (2026-07-29)
+
+Đã đối chiếu từng nhận định của roadmap với code + số đo thật, và ghi thẳng kết quả vào file đó (mục `## 0` mới, cộng annotation tại chỗ ở §2, §3.1, §3.2, §3.4, §8 và Kết luận).
+
+**Đúng, giữ nguyên:** toàn bộ mô tả kiến trúc ở mục 1; `MAX_CONCURRENT=2`, single-flight, timeout 60s/300s; một call Gemini + retry + failover 429; `fitText` 18→10px; cả 4 cơ chế chống race ở §1.7. Và quan trọng nhất: **"chờ OCR xong toàn scope rồi mới dịch" đúng là điểm nghẽn số 1** — đó chính là B2.
+
+**Sai hoặc đặt sai ưu tiên:**
+
+| Roadmap nói | Thực tế đo được |
+|---|---|
+| P0: thu hẹp `_ocr_lock` theo stage (§3.1) | Phần chạy ngoài lock là 0.01–0.02s / vòng OCR 7–13s ⇒ lấy về ~0.02s. **Bỏ** |
+| P0: batch recognition (§3.2) | Paddle list-`predict()` 13.32s vs 12.94s; rec-only trả rác; manga-ocr không có API batch. **Bỏ** |
+| P1: "detector trả nhiều vùng" = cơ hội batch | Vấn đề thật là **box trùng** (IoU 0.99/0.93) — roadmap bỏ sót hoàn toàn. Sửa xong được 23% |
+| §1.4 có nói `es` dùng PaddleOCR CPU… | …nhưng **không đưa vào bảng điểm nghẽn §2**, nên biến mất khỏi mọi quyết định ưu tiên. Đây mới là hàng đầu bảng: 6× chậm hơn/crop |
+| §7: trace 14 stage kiểu OpenTelemetry | Over-engineering khi một số hạng chiếm 91–99%. Một `perf_counter()` là đủ |
+| §3.10 tiling | Hạng mục *accuracy* — user đã chốt độ chính xác hiện ổn, không liên quan |
+
+**Bug được roadmap đoán đúng, chưa sửa:** §3.4 thiếu `dstLang` trong cache key. `extension/srcset.js` `jobKey()` = `source|srcLang|crop`, còn `selectCandidates()` bỏ qua ảnh khi `translated.get(img) === key` ⇒ đổi đích vi→en rồi bấm lại thì **ảnh đã dịch bị bỏ qua sai**. Sửa nhỏ, để dành.
+
+**Câu hỏi mở đã trả lời:** #2 (phân bổ thời gian), #5 (không có API batch dùng được), #6 (cả hai scope đều đau ⇒ B2 phải phục vụ cả hai), #10 (24 block vẫn ổn cho một call Gemini). #1 thành vô nghĩa.
+
+---
+
+## DeepL thay Gemini? — phân tích (2026-07-29)
+
+### Cái DeepL sửa được
+
+| Vấn đề API hiện tại | DeepL |
+|---|---|
+| Rate limit 429 (đang phải nuôi 2 project key để xoay vòng) | Free ~500k ký tự/tháng ≈ **690 trang** ở mức ~720 ký tự/trang. Hết hạn mức thì trả tiền theo ký tự, không phải theo request |
+| Gemini 2–4s/call | **~200ms** |
+| JSON trả về lệch số phần tử → cả bộ máy retry 2 lần trong `translator.py` | DeepL trả **đúng N chuỗi cho N chuỗi vào**. Bỏ được toàn bộ retry + validate |
+| Một call hỏng làm hỏng cả trang | Mỗi chunk độc lập |
+
+Đã xác minh: DeepL hỗ trợ **`VI` làm ngôn ngữ đích** (`translation:true`, có glossary), `JA`/`ES` đều là source hợp lệ. Không bị chặn kỹ thuật.
+
+### Cái DeepL làm hỏng
+
+> [!danger] DeepL dịch trung thành **cả lỗi OCR**
+> Text thật lấy từ log phiên này:
+> - OCR ra `MELI PÉ FEDIA` — đúng phải là `MEU PÉ`
+> - OCR ra `ELI NÃO VOUI CONTAR PRA NINGLIÉM` — đúng phải là `EU NÃO VOU CONTAR PRA NINGUÉM`
+>
+> LLM **âm thầm sửa** những chữ này vì nó hiểu câu. DeepL sẽ dịch nguyên rác. Với PaddleOCR CPU đang có tỉ lệ lỗi như trên, đây không phải rủi ro lý thuyết — nó xảy ra ở phần lớn bóng thoại.
+
+Ngoài ra mất ngữ cảnh xuyên bóng: đại từ (`you` → *anh/em/mày/ngài*), mức lịch sự, SFX. Đây đúng là lý do §1.5 chọn gộp cả scope vào **một** call.
+
+### Hybrid H1 — "dịch nháp rồi tinh chỉnh" ⭐ khuyến nghị
+
+```text
+block OCR xong → DeepL dịch ngay (~200ms) → VẼ LUÔN (bản nháp)
+   ...
+hết trang → 1 call Gemini cho TOÀN BỘ block → thay chữ tại chỗ (bản chuẩn)
+```
+
+- Chữ đầu tiên hiện sau **~2s** thay vì 12–60s.
+- Vẫn đúng **1 call Gemini/trang** ⇒ rate limit không đổi so với hôm nay.
+- Gemini vẫn thấy toàn trang ⇒ giữ nguyên nhất quán đại từ và khả năng sửa lỗi OCR.
+- Rủi ro: chữ **nhảy** khi thay bản nháp bằng bản chuẩn. Giảm bằng cách chỉ thay khi text khác nhau, và cho fade.
+
+### Kết luận
+
+**Không thay Gemini bằng DeepL.** DeepL đóng vai *bản nháp hiện ngay*, Gemini giữ vai *bản chuẩn*. Và dù cuối cùng có làm DeepL hay không, **B2 vẫn phải làm trước** — cả hai đều cần đúng một thứ: cơ chế stream block ra và vẽ dần.
+
+---
+
+## Trạng thái khi đóng phiên (2026-07-29)
+
+- Nhánh: **`feat/v2`**, **7 commit ahead của `origin/feat/v2`, CHƯA push** (user dặn đừng push).
+- Đã chốt: **B2 — stream + vẽ dần**. Chưa viết code.
+- B2 cần làm: server trả NDJSON theo block (`StreamingResponse`) → background nối bằng `chrome.runtime.connect` port → `content.js` vẽ theo chunk thay vì `Promise.all` toàn scope.
+- Việc để dành: `dstLang` vào `jobKey()` trong `srcset.js`; test tay viewport OCR prewarming trên trình duyệt; phương án A (paddle GPU, venv riêng).
+
+> [!danger] Bảo mật — còn nợ
+> Hai Gemini API key đã bị dán vào chat trong phiên này. Cả hai **chưa từng** được ghi vào source, test, log, `.env.example` hay note nào. **Cả hai đều nằm trong transcript trên đĩa và phải được xoay/thu hồi.** `.env` chưa từng được đọc hay sửa — chỉ biết *tên biến* và độ dài.
