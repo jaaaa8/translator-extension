@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from server.detector import TextRegion
-from server.pipeline import Pipeline, _prep_crop
+from server.pipeline import Pipeline, _dedupe_regions, _prep_crop
 
 
 class FakeDetector:
@@ -116,6 +116,60 @@ def test_process_returns_schema():
 def test_empty_ocr_blocks_are_dropped_not_translated():
     out = make_pipeline().process(encode_png(300, 200), "es", "en")
     assert len(out["blocks"]) == 1  # block OCR rỗng không xuất hiện
+
+
+def regions(*bboxes):
+    return [TextRegion(bbox=b, vertical=False) for b in bboxes]
+
+
+def bboxes(regs):
+    return [r.bbox for r in regs]
+
+
+def test_dedupe_drops_near_duplicate_boxes_keeping_the_larger():
+    # toạ độ thật từ mangadex.jpeg: detector trả hai box lệch nhau 1 pixel
+    kept = _dedupe_regions(regions((379, 141, 121, 89), (379, 141, 122, 89)))
+    assert bboxes(kept) == [(379, 141, 122, 89)]
+
+
+def test_dedupe_keeps_nested_boxes_with_small_overlap():
+    # trang ja: box nhỏ nằm TRỌN trong box lớn nhưng IoU chỉ ~0.02 — có thể là
+    # hiệu ứng âm thanh riêng, giữ cả hai để không mất chữ
+    inner, outer = (1293, 770, 29, 57), (1070, 770, 277, 307)
+    assert set(bboxes(_dedupe_regions(regions(inner, outer)))) == {inner, outer}
+
+
+def test_dedupe_keeps_partially_overlapping_boxes():
+    # hai vùng chữ dọc chồng nhau IoU ~0.35 — dưới ngưỡng, giữ cả hai
+    a, b = (1208, 772, 234, 331), (1070, 770, 277, 307)
+    assert len(_dedupe_regions(regions(a, b))) == 2
+
+
+class DupeDetector:
+    def detect(self, img):
+        return regions((10, 10, 100, 50), (10, 10, 101, 50))
+
+
+def test_duplicate_regions_are_ocred_once():
+    engine = CountingEngine()
+    pipeline = Pipeline(
+        detector=DupeDetector(),
+        ocr=SharedOcr(engine),
+        translator=FakeTranslator(),
+    )
+
+    out = pipeline.ocr_image(encode_png(300, 200), "es")
+    assert engine.calls == 1
+    assert out["blocks"] == [{"bbox": [10, 10, 101, 50], "src_text": "hola"}]
+
+
+class CountingEngine:
+    def __init__(self):
+        self.calls = 0
+
+    def read(self, crop):
+        self.calls += 1
+        return "hola"
 
 
 def test_bad_image_raises():

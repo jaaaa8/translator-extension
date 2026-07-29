@@ -5,6 +5,30 @@ import cv2
 import numpy as np
 
 _MIN_CROP_H = 48
+# Detector trả hai box gần trùng cho cùng một bóng (đo được IoU 0.99 và 0.93 trên
+# mangadex.jpeg) → OCR hai lần, chữ trùng lên Gemini, overlay vẽ đè. Ngưỡng để rộng
+# vì box lồng nhau của chữ dọc chỉ tới ~0.36 và phải giữ nguyên.
+_DEDUPE_IOU = 0.5
+
+
+def _iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    iw = min(ax + aw, bx + bw) - max(ax, bx)
+    ih = min(ay + ah, by + bh) - max(ay, by)
+    if iw <= 0 or ih <= 0:
+        return 0.0
+    inter = iw * ih
+    return inter / (aw * ah + bw * bh - inter)
+
+
+def _dedupe_regions(regions: list) -> list:
+    """Bỏ box gần trùng, giữ box to hơn — box to không cắt cụt chữ."""
+    kept = []
+    for region in sorted(regions, key=lambda r: -r.bbox[2] * r.bbox[3]):
+        if not any(_iou(region.bbox, k.bbox) > _DEDUPE_IOU for k in kept):
+            kept.append(region)
+    return kept
 
 
 def _prep_crop(crop_rgb: np.ndarray) -> np.ndarray:
@@ -71,7 +95,7 @@ class Pipeline:
             work_h, work_w = work.shape[:2]
             engine = self.ocr.get(src_lang)
             blocks = []
-            for region in self.detector.detect(work):
+            for region in _dedupe_regions(self.detector.detect(work)):
                 x, y, bw, bh = region.bbox
                 # clamp vào biên ảnh — detector có thể trả box chạm/vượt mép
                 x, y = max(0, x), max(0, y)
