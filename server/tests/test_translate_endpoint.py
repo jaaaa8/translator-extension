@@ -24,15 +24,17 @@ class FakePipeline:
     def __init__(self, error=None):
         self.error = error
         self.translator = FakeTranslator(error)
+        self.last_crop = None
 
     def process(self, data, src, dst):
         if self.error:
             raise self.error
         return {"image_w": 100, "image_h": 100, "blocks": []}
 
-    def ocr_image(self, data, src):
+    def ocr_image(self, data, src, crop=None):
         if self.error:
             raise self.error
+        self.last_crop = crop
         return {"image_w": 100, "image_h": 100, "blocks": [{"bbox": [1, 2, 3, 4], "src_text": "hola"}]}
 
 
@@ -83,6 +85,30 @@ def test_ocr_unsupported_lang_422(monkeypatch):
     monkeypatch.setattr(main, "_pipeline", FakePipeline())
     r = TestClient(main.app).post(
         "/ocr", files={"image": ("p.png", PNG, "image/png")}, data={"src_lang": "fr"}
+    )
+    assert r.status_code == 422
+
+
+def test_ocr_forwards_complete_crop(monkeypatch):
+    pipeline = FakePipeline()
+    monkeypatch.setattr(main, "_pipeline", pipeline)
+
+    r = TestClient(main.app).post(
+        "/ocr",
+        files={"image": ("p.png", PNG, "image/png")},
+        data={"src_lang": "es", "crop_left": 0.1, "crop_top": 0.2, "crop_right": 0.8, "crop_bottom": 0.9},
+    )
+
+    assert r.status_code == 200
+    assert pipeline.last_crop == (0.1, 0.2, 0.8, 0.9)
+
+
+def test_ocr_rejects_partial_crop(monkeypatch):
+    monkeypatch.setattr(main, "_pipeline", FakePipeline())
+    r = TestClient(main.app).post(
+        "/ocr",
+        files={"image": ("p.png", PNG, "image/png")},
+        data={"src_lang": "es", "crop_left": 0.1},
     )
     assert r.status_code == 422
 

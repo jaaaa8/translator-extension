@@ -5,6 +5,7 @@ let srcLang = "ja";
 let dstLang = "vi";
 
 const translated = new WeakMap(); // img -> bestSource đã hoàn tất
+const manualRequests = new WeakMap(); // img -> newest manual action token
 const overlays = new Map(); // img -> owned overlay state
 let pruneFrame = 0;
 
@@ -30,37 +31,71 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     translatePage(msg.scope).then(sendResponse);
     return true; // async response
   }
+  if (msg.type === "prewarmPage") {
+    prewarmPage(msg.srcLang);
+    sendResponse({ ok: true });
+  }
 });
+
+function requestOcr(job, requestSrcLang, prewarm = false) {
+  const message = { type: "ocrImage", url: job.source, srcLang: requestSrcLang };
+  if (job.crop) message.crop = job.crop;
+  if (prewarm) message.prewarm = true;
+  return chrome.runtime.sendMessage(message);
+}
+
+async function prewarmPage(requestSrcLang) {
+  try {
+    const jobs = selectCandidates(
+      document.querySelectorAll("img"),
+      "visible",
+      translated,
+      innerWidth,
+      innerHeight,
+      requestSrcLang,
+      MIN_SIZE
+    );
+    let selected = null;
+    for (const job of jobs) {
+      if (!selected || visibleArea(job.img, innerWidth, innerHeight) > visibleArea(selected.img, innerWidth, innerHeight)) {
+        selected = job;
+      }
+    }
+    if (!selected) return;
+    const result = await requestOcr(selected, requestSrcLang, true);
+    if (!result || !result.ok) console.warn("[MangaTranslator] prewarm:", result && result.error);
+  } catch (error) {
+    console.warn("[MangaTranslator] prewarm:", error);
+  }
+}
 
 // Both manual actions batch local OCR results into one Gemini request.
 async function translatePage(scope) {
   const requestSrcLang = srcLang;
   const requestDstLang = dstLang;
+  const queriedImages = document.querySelectorAll("img");
   let jobs;
   try {
     jobs = selectCandidates(
-      document.querySelectorAll("img"),
+      queriedImages,
       scope,
       translated,
       innerWidth,
       innerHeight,
+      requestSrcLang,
       MIN_SIZE
     );
   } catch (e) {
     return { ok: false, error: e.message || String(e) };
   }
+  const request = {};
+  for (const img of queriedImages) {
+    if (scope === "loaded" || isViewportVisible(img, innerWidth, innerHeight)) manualRequests.set(img, request);
+  }
   if (!jobs.length) return { ok: true, images: 0, blocks: 0 };
 
   // background giới hạn 2 request /ocr đồng thời
-  const ocrResults = await Promise.all(
-    jobs.map(({ source }) =>
-      chrome.runtime.sendMessage({
-        type: "ocrImage",
-        url: source,
-        srcLang: requestSrcLang,
-      })
-    )
-  );
+  const ocrResults = await Promise.all(jobs.map((job) => requestOcr(job, requestSrcLang)));
 
   const texts = [];
   const slots = []; // ảnh OCR thành công + vị trí text của nó trong mảng chung
@@ -76,8 +111,9 @@ async function translatePage(scope) {
   if (!texts.length) {
     let images = 0;
     for (const slot of slots) {
-      if (!isCurrentSource(slot.img, slot.source)) continue;
-      translated.set(slot.img, slot.source);
+      if (manualRequests.get(slot.img) !== request || !isCurrentSource(slot.img, slot.source, scope)) continue;
+      removeOverlay(slot.img);
+      translated.set(slot.img, slot.key);
       images++;
     }
     return { ok: true, images, blocks: 0 };
@@ -94,10 +130,11 @@ async function translatePage(scope) {
   let images = 0;
   let blocks = 0;
   for (const slot of slots) {
-    if (!isCurrentSource(slot.img, slot.source)) continue;
+    if (manualRequests.get(slot.img) !== request || !isCurrentSource(slot.img, slot.source, scope)) continue;
     slot.data.blocks.forEach((block, i) => (block.trans_text = tr.translations[slot.indices[i]]));
     if (slot.data.blocks.length) renderOverlay(slot.img, slot.data, slot.source, scope);
-    translated.set(slot.img, slot.source);
+    else removeOverlay(slot.img);
+    translated.set(slot.img, slot.key);
     images++;
     blocks += slot.data.blocks.length;
   }
@@ -118,7 +155,7 @@ function removeOverlay(img) {
 
 function pruneOverlays() {
   for (const [img, overlay] of overlays) {
-    if (!isCurrentSource(img, overlay.source)) removeOverlay(img);
+    if (!isCurrentSource(img, overlay.source, overlay.scope)) removeOverlay(img);
   }
 }
 
@@ -172,14 +209,15 @@ function position(img) {
   o.container.style.width = r.width + "px";
   o.container.style.height = r.height + "px";
 
-  const scale = r.width / img.naturalWidth; // bbox theo pixel ảnh gốc (spec)
+  const scaleX = r.width / o.data.image_w;
+  const scaleY = r.height / o.data.image_h;
   o.data.blocks.forEach((b, i) => {
     const [x, y, w, h] = b.bbox;
     const el = o.container.children[i];
-    el.style.left = x * scale + "px";
-    el.style.top = y * scale + "px";
-    el.style.width = w * scale + "px";
-    el.style.height = h * scale + "px";
+    el.style.left = x * scaleX + "px";
+    el.style.top = y * scaleY + "px";
+    el.style.width = w * scaleX + "px";
+    el.style.height = h * scaleY + "px";
     fitText(el);
   });
 }
