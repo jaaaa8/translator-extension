@@ -24,7 +24,11 @@ class GeminiTranslator:
     def __init__(self):
         if not config.GEMINI_API_KEY:
             raise TranslateError("GEMINI_API_KEY chưa được đặt trong .env")
-        self._client = genai.Client(api_key=config.GEMINI_API_KEY)
+        keys = [config.GEMINI_API_KEY]
+        if config.GEMINI_API_KEY_SECONDARY:
+            keys.append(config.GEMINI_API_KEY_SECONDARY)
+        self._clients = [genai.Client(api_key=key) for key in keys]
+        self._active_client = 0
 
     def translate(self, texts: list[str], src: str, dst: str) -> list[str]:
         if not texts:
@@ -36,19 +40,27 @@ class GeminiTranslator:
             lines="\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts)),
         )
         last_err = "unknown"
-        for _ in range(2):  # 1 lần + 1 retry theo spec
+        client_index = self._active_client
+        switched = False
+        for attempt in range(2):  # 1 lần + 1 retry theo spec
             try:
-                resp = self._client.models.generate_content(
+                resp = self._clients[client_index].models.generate_content(
                     model=config.GEMINI_MODEL,
                     contents=prompt,
                     config={"temperature": 0.2, "response_mime_type": "application/json"},
                 )
                 out = json.loads(resp.text)
                 if isinstance(out, list) and len(out) == len(texts):
+                    if switched:
+                        self._active_client = client_index
                     return [str(x) for x in out]
                 last_err = f"expected {len(texts)} items, got: {str(out)[:80]}"
             except Exception as e:
                 last_err = str(e)
-                if "429" in last_err:
-                    break  # rate limit/hết quota — retry sau 3s vô ích, còn tốn thêm call
+                if getattr(e, "code", None) == 429:  # google.genai APIError.code
+                    if attempt == 0 and len(self._clients) > 1:
+                        client_index = 1 - client_index
+                        switched = True
+                        continue
+                    break
         raise TranslateError(last_err)
