@@ -370,8 +370,67 @@ Bốn test 429 cũ ném `RuntimeError("429 ...")` nên **pass nhờ đúng cái 
 
 Warning còn lại là deprecation Starlette/httpx và `pkg_resources` của vendor — có sẵn từ trước.
 
+> [!success] Smoke test đã chạy — PASS (2026-07-29)
+> `こんにちは世界` → `Xin chào thế giới`, call Gemini thật qua `scripts\smoke.ps1`. Cả hai project đều hợp lệ khi ép chạy riêng từng client: `primary OK` / `secondary OK`. Failover đã thực sự có hiệu lực.
+> Commit `d016038`, nay nằm trên `feat/v2` cùng `b920fdd` (viewport OCR), `f570693` (docs), `de58b42` (config). **Chưa push** theo yêu cầu user.
+
 > [!warning] Còn nợ
-> - **Smoke test tay với key thật vẫn CHƯA chạy** — chờ user tự đặt key đã xoay vòng vào `.env` (untracked). Không được tuyên bố là đã làm.
-> - Key Gemini từng bị dán vào chat ở phiên trước **phải revoke/xoay vòng**; nó chưa từng lọt vào source, test, log hay `.env.example`.
-> - Plan viewport OCR prewarming xong phần code, chỉ còn kiểm thử browser tay + model ngoài (cũng chờ user).
-> - `.git` **đã ghi được trở lại** ở phiên này (phiên trước read-only nên mọi ghi chú "commits unavailable" chỉ đúng với phiên đó). Working tree vẫn dirty, chưa commit.
+> - **Kiểm thử browser tay của plan viewport OCR prewarming vẫn chưa chạy.**
+> - Key Gemini bị dán vào chat (cả phiên trước lẫn phiên này) **phải revoke/xoay vòng**; chưa từng lọt vào source, test, log hay `.env.example`. Transcript nằm trên đĩa nên coi như đã lộ.
+> - `.git` **đã ghi được trở lại** ở phiên này (phiên trước read-only nên mọi ghi chú "commits unavailable" chỉ đúng với phiên đó).
+
+## Đo latency thật + phương án tối ưu (2026-07-29)
+
+> [!info] Vì sao đo trước khi sửa
+> User chốt: **độ chính xác giữ nguyên**, chỉ tối ưu latency, và đau ở cả hai kiểu đọc như nhau. Roadmap `ocr-manga-extension-roadmap.md` đoán nút thắt nằm ở cache/concurrency — **đo xong thì sai**.
+
+### Số warm, một trang thật
+
+| | ja (Aisazu, 24 bóng) | es (mangadex, 13 bóng) |
+| --- | --- | --- |
+| decode | 0.02s | 0.01s |
+| detect | 0.67s | 0.18s |
+| **OCR loop** | **7.18s (91%)** | **13.15s (99%)** |
+| Gemini | ~4.1s | ~1.7s |
+| **end-to-end `/translate`** | **11.8s** | **14.7s** |
+
+Per-crop: manga-ocr (GPU) median **0.179s**, max 1.94s — PaddleOCR (**CPU**) median **1.068s**, overhead cố định 0.237s/call. Cold start lần đầu sau khi bật server: +6–8s mỗi model.
+
+**Kết luận: OCR loop là tất cả.** detect/decode không có gì để lấy; `MAX_CONCURRENT=2` phía client là trang trí vì `_ocr_lock` serialize toàn bộ.
+
+### Phương án A — đưa PaddleOCR lên GPU (TẠM GÁC)
+
+Bốn cách *không cần cài gì* đều đã đo và **loại**:
+
+| Thử | Kết quả |
+| --- | --- |
+| `enable_mkldnn=True` | Vỡ đúng lỗi PIR mà comment `server/ocr.py:26` mô tả — comment vẫn đúng, không phải nợ cũ |
+| Batch cả list vào 1 call | 13.32s vs 12.94s — `predict()` chỉ loop nội bộ, không được gì |
+| rec-only (bỏ detect nội bộ) | Nhanh 53× (0.020s/crop) nhưng ra `['T','TA','E','AP']` — crop là **cả bóng nhiều dòng**, `TextRecognition` chỉ đọc một dòng |
+| 1 call cả trang rồi gom dòng về bóng | **Chậm hơn** (16.84s vs 12.62s) và đổi text |
+
+Wheel hiện tại `paddle 3.3.1`, **`is_compiled_with_cuda() == False`** → `device="gpu"` chỉ in *"not available, switching to CPU"*. Nên A **bắt buộc cài `paddlepaddle-gpu`**, không có đường vòng.
+
+> [!danger] Rủi ro DLL đã được chứng minh
+> Import `paddle` trước `torch` làm hỏng `torch/lib/shm.dll` (`WinError 127`) — gặp thật khi viết probe. Sở dĩ server chạy được là vì `paddleocr` được import **lười** bên trong `PaddleLatinEngine.__init__`, nên torch luôn lên trước.
+> Nhét CUDA runtime của paddle cạnh cu121 của torch trên Windows có thể làm **hỏng path `ja` đang chạy tốt**.
+> **Cách an toàn khi làm A:** dựng **venv riêng** để thử, chứng minh paddle GPU chạy + đo tốc độ, rồi mới quyết có đổi venv chính không. Không cài đè lên venv đang chạy.
+
+### Phương án B — vẽ chữ dần (ĐANG LÀM)
+
+Hiện tại OCR hết cả trang (7–13s) → 1 call Gemini → **rồi mới vẽ**. User nhìn màn hình trống suốt 12–15s. B không giảm tổng thời gian, nhưng cắt mạnh **thời gian tới chữ đầu tiên**. Chọn B vì nó độc lập với chuyện paddle có lên GPU được hay không.
+
+### Phương án C — bỏ `_ocr_lock` chạy song song (KHÔNG LÀM)
+
+Chỉ đáng khi CPU-bound. Sau A thì hệ thành GPU-bound mà chỉ có một GPU ⇒ gần như vô nghĩa.
+
+### Phát hiện phụ — detector trả box trùng
+
+```
+es: [0](379,141,500,230) vs [1](379,141,501,230)  IoU=0.99  ← lệch 1 pixel
+    [7](501,422,574,488) vs [8](500,423,575,490)  IoU=0.93
+```
+
+2/13 bóng bị OCR **hai lần**: ~2.0s trong 13.15s là công toi, chữ trùng gửi lên Gemini, overlay vẽ đè cùng một câu hai lần.
+
+Trang `ja` khác kiểu: 7 cặp **lồng nhau** (contain≈1.0 nhưng IoU thấp — box nhỏ nằm trong box lớn, chữ dọc). Với ngưỡng IoU 0.5 thì `ja` không mất box nào. **Không đụng phần lồng nhau** vì nó có thể là hiệu ứng âm thanh riêng, và user đã chốt giữ nguyên độ chính xác.
