@@ -7,6 +7,8 @@ const {
   viewportCrop,
   visibleArea,
   selectCandidates,
+  viewportDistance,
+  sourceSignature,
 } = require("../srcset.js");
 
 // srcset nhiều biến thể → chọn URL có descriptor lớn nhất
@@ -87,12 +89,12 @@ const offscreenImage = fakeImage({
 });
 const smallImage = fakeImage({ src: "https://x/icon.jpg", naturalWidth: 100, naturalHeight: 100 });
 const incompleteImage = fakeImage({ src: "https://x/loading.jpg", complete: false });
-const translated = new WeakMap([[doneImage, `${doneImage.src}|ja|full`]]);
-
-assert.deepStrictEqual(
-  selectCandidates([doneImage, offscreenImage, smallImage, incompleteImage], "loaded", translated, 800, 600, "ja"),
-  [{ img: offscreenImage, source: offscreenImage.src, crop: null, key: "https://x/offscreen.jpg|ja|full" }]
-);
+const loadedJobs = selectCandidates([doneImage, offscreenImage, smallImage, incompleteImage], "loaded", 800, 600);
+assert.strictEqual(loadedJobs.length, 2);
+assert.strictEqual(loadedJobs[0].natural_width, doneImage.naturalWidth);
+assert.strictEqual(loadedJobs[0].natural_height, doneImage.naturalHeight);
+assert.strictEqual(typeof loadedJobs[0].distance, "number");
+assert.strictEqual(typeof loadedJobs[0].source_signature, "string");
 
 const visibleImage = fakeImage({ src: "https://x/visible.jpg" });
 const partiallyVisibleImage = fakeImage({
@@ -104,22 +106,14 @@ const zeroSizeImage = fakeImage({
   rect: { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 },
 });
 assert.deepStrictEqual(
-  selectCandidates([visibleImage, partiallyVisibleImage, offscreenImage], "visible", new WeakMap(), 800, 600, "ja"),
-  [
-    { img: visibleImage, source: visibleImage.src, crop: null, key: "https://x/visible.jpg|ja|full" },
-    {
-      img: partiallyVisibleImage,
-      source: partiallyVisibleImage.src,
-      crop: { left: 0, top: 0.725, right: 1, bottom: 1 },
-      key: "https://x/partial.jpg|ja|0,0.725,1,1",
-    },
-  ]
+  selectCandidates([visibleImage, partiallyVisibleImage, offscreenImage], "visible", 800, 600).map(({ img, source, crop }) => ({ img, source, crop })),
+  [{ img: visibleImage, source: visibleImage.src, crop: null }, { img: partiallyVisibleImage, source: partiallyVisibleImage.src, crop: { left: 0, top: 0.725, right: 1, bottom: 1 } }]
 );
 
 doneImage.src = "https://x/new-page.jpg";
 assert.deepStrictEqual(
-  selectCandidates([doneImage], "loaded", translated, 800, 600, "ja"),
-  [{ img: doneImage, source: doneImage.src, crop: null, key: "https://x/new-page.jpg|ja|full" }]
+  selectCandidates([doneImage], "loaded", 800, 600).map(({ img, source, crop }) => ({ img, source, crop })),
+  [{ img: doneImage, source: doneImage.src, crop: null }]
 );
 
 const croppedImage = fakeImage({
@@ -138,17 +132,11 @@ assert.deepStrictEqual(viewportCrop(croppedImage, 800, 600), {
 const [visibleJob] = selectCandidates(
   [croppedImage],
   "visible",
-  new WeakMap(),
   800,
-  600,
-  "ja"
+  600
 );
 assert.strictEqual(visibleJob.source, croppedImage.currentSrc);
 assert.deepStrictEqual(visibleJob.crop, { left: 0, top: 0.725, right: 1, bottom: 1 });
-assert.strictEqual(
-  visibleJob.key,
-  "https://x/current-1000.jpg|ja|0,0.725,1,1"
-);
 
 const twoXImage = fakeImage({
   src: "https://x/fallback-1x.jpg",
@@ -163,26 +151,17 @@ twoXImage.naturalHeight = 2000;
 assert.deepStrictEqual(twoXCrop, { left: 0.2, top: 0.2, right: 0.8, bottom: 0.8 });
 assert.deepStrictEqual(viewportCrop(twoXImage, 200, 200), twoXCrop);
 assert.deepStrictEqual(
-  selectCandidates([twoXImage], "visible", new WeakMap(), 200, 200, "ja")[0].crop,
+  selectCandidates([twoXImage], "visible", 200, 200)[0].crop,
   twoXCrop
 );
 
 const fullJob = selectCandidates(
   [visibleImage],
   "visible",
-  new WeakMap(),
   800,
-  600,
-  "es"
+  600
 )[0];
 assert.strictEqual(fullJob.crop, null);
-assert.strictEqual(fullJob.key, "https://x/visible.jpg|es|full");
-
-const completed = new WeakMap([[croppedImage, visibleJob.key]]);
-assert.deepStrictEqual(
-  selectCandidates([croppedImage], "visible", completed, 800, 600, "ja"),
-  []
-);
 assert.strictEqual(isCurrentSource(croppedImage, croppedImage.currentSrc, "visible"), true);
 
 assert.strictEqual(eligible(visibleImage), true);
@@ -201,8 +180,10 @@ currentImage.isConnected = false;
 assert.strictEqual(isCurrentSource(currentImage, currentImage.src), false);
 
 assert.throws(
-  () => selectCandidates([], "auto", new WeakMap(), 800, 600, "ja"),
+  () => selectCandidates([], "auto", 800, 600),
   /scope không hỗ trợ/
 );
+assert.strictEqual(viewportDistance(offscreenImage, 800, 600), 300);
+assert.strictEqual(sourceSignature(doneImage), '[[' + JSON.stringify(doneImage.src) + ',"","","",""]]');
 
 console.log("srcset.test.js OK");

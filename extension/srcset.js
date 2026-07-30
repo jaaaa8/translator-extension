@@ -70,10 +70,6 @@ function viewportCrop(img, viewportWidth, viewportHeight, padding = 0.1) {
   return crop;
 }
 
-function jobKey(source, srcLang, crop) {
-  return `${source}|${srcLang}|${crop ? `${crop.left},${crop.top},${crop.right},${crop.bottom}` : "full"}`;
-}
-
 function isViewportVisible(img, viewportWidth, viewportHeight) {
   return visibleArea(img, viewportWidth, viewportHeight) > 0;
 }
@@ -82,7 +78,20 @@ function isCurrentSource(img, source, scope = "loaded") {
   return img.isConnected && sourceForScope(img, scope) === source;
 }
 
-function selectCandidates(images, scope, translated, viewportWidth, viewportHeight, srcLang, minSize = 400) {
+function viewportDistance(img, viewportWidth, viewportHeight) {
+  const rect = img.getBoundingClientRect();
+  const dx = rect.right < 0 ? -rect.right : rect.left > viewportWidth ? rect.left - viewportWidth : 0;
+  const dy = rect.bottom < 0 ? -rect.bottom : rect.top > viewportHeight ? rect.top - viewportHeight : 0;
+  return Math.hypot(dx, dy);
+}
+
+function sourceSignature(img) {
+  const picture = img.parentElement?.tagName === "PICTURE" ? img.parentElement : null;
+  const elements = picture?.querySelectorAll ? [...picture.querySelectorAll("source"), img] : [img];
+  return JSON.stringify(elements.map((element) => ["src", "srcset", "sizes", "media", "type"].map((name) => element.getAttribute?.(name) || element[name] || "")));
+}
+
+function selectCandidates(images, scope, viewportWidth, viewportHeight, minSize = 400) {
   if (scope !== "loaded" && scope !== "visible") throw new Error(`scope không hỗ trợ: ${scope}`);
 
   const jobs = [];
@@ -91,9 +100,7 @@ function selectCandidates(images, scope, translated, viewportWidth, viewportHeig
     if (scope === "visible" && !isViewportVisible(img, viewportWidth, viewportHeight)) continue;
     const source = sourceForScope(img, scope);
     const crop = scope === "visible" ? viewportCrop(img, viewportWidth, viewportHeight) : null;
-    const key = jobKey(source, srcLang, crop);
-    if (translated.get(img) === key) continue;
-    jobs.push({ img, source, crop, key });
+    jobs.push({ img, source, crop, natural_width: img.naturalWidth, natural_height: img.naturalHeight, distance: viewportDistance(img, viewportWidth, viewportHeight), source_signature: sourceSignature(img) });
   }
   return jobs;
 }
@@ -105,7 +112,8 @@ if (typeof module !== "undefined") {
     sourceForScope,
     visibleArea,
     viewportCrop,
-    jobKey,
+    viewportDistance,
+    sourceSignature,
     isViewportVisible,
     isCurrentSource,
     selectCandidates,
