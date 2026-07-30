@@ -385,6 +385,7 @@ async function attachDescriptor(request, descriptor, ledger) {
   if (!serverVersions) { if (request.scope === "visible") await pageCache.putJob({ ...ledger, waiting_for_health: true }); offlineJobs.push({ request, descriptor, ledger }); return; }
   const keys = await buildKeys(descriptor, serverVersions); descriptor.page_artifact_key = keys.pageArtifactKey;
   request.jobsBySourceCrop.set(sourceCropKey(descriptor), descriptor);
+  if (request.scope === "prewarm" && await pageCache?.findPage((p) => p.ocr_key === keys.ocrKey && p.ocr_done === true)) return;
   let page = request.scope === "visible" ? await pageCache.getPage(keys.pageArtifactKey) : null;
   if (!page && request.scope === "visible") {
     const analysis = await pageCache.findPage(

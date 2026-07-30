@@ -442,6 +442,25 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     assert.strictEqual(vm.runInContext("requestTier({ connected: true, scope: 'prewarm' })", app.context), 2);
   });
 
+  await scenario("prewarm skips OCR already complete in the persisted session cache", async () => {
+    const app = createBackgroundApp();
+    await app.ready();
+    const job = app.job("visible-job", "https://x/cached-prewarm.jpg");
+    const port = app.connect();
+    port.receive(app.startScope("visible-request", "visible", job));
+    await app.waitFor("scope_done", port);
+    const before = structuredClone(app.server.counts);
+
+    const response = await app.message({
+      type: "prewarmJob",
+      src_lang: "ja",
+      job: app.job("prewarm-job", "https://x/cached-prewarm.jpg"),
+    });
+    assert.strictEqual(response.ok, true);
+    await waitUntil(() => app.debug().producers === 0, "cached prewarm completion");
+    assert.deepStrictEqual(app.server.counts, before);
+  });
+
   await scenario("detached queued manual work is demoted to background FIFO", async () => {
     const server = createFakeServer();
     server.holdSource("slot-a");
