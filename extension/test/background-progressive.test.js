@@ -41,6 +41,9 @@ function fakeStorage(seed = {}) {
   return {
     rows,
     failWrites: false,
+    pageWriteWaiting: false,
+    nextPageWriteGate: null,
+    activePageWriteGate: null,
     async get(key) {
       let value;
       if (key === null) value = { ...rows };
@@ -50,7 +53,17 @@ function fakeStorage(seed = {}) {
     },
     async set(values) {
       if (this.failWrites) throw new Error("quota");
-      Object.assign(rows, JSON.parse(JSON.stringify(values)));
+      const copy = JSON.parse(JSON.stringify(values));
+      if (this.nextPageWriteGate && Object.keys(copy).some((key) => key.startsWith("mt:page:"))) {
+        const gate = this.nextPageWriteGate;
+        this.nextPageWriteGate = null;
+        this.activePageWriteGate = gate;
+        this.pageWriteWaiting = true;
+        await gate.promise;
+        this.pageWriteWaiting = false;
+        this.activePageWriteGate = null;
+      }
+      Object.assign(rows, copy);
     },
     async remove(keys) {
       for (const key of Array.isArray(keys) ? keys : [keys]) delete rows[key];
@@ -58,6 +71,8 @@ function fakeStorage(seed = {}) {
     async getBytesInUse() {
       return Buffer.byteLength(JSON.stringify(rows));
     },
+    holdNextPageWrite() { this.nextPageWriteGate = deferred(); },
+    releasePageWrite() { (this.activePageWriteGate || this.nextPageWriteGate)?.resolve(); },
   };
 }
 
@@ -88,6 +103,7 @@ function createFakeServer() {
   const sourceGates = new Map();
   const failedSources = new Set();
   const ocrRows = new Map();
+  const ocrAfterFirstGates = new Map();
   const analysisSources = new Map();
   const translationGates = new Map();
   const translationResults = [];
@@ -144,10 +160,23 @@ function createFakeServer() {
         { type: "ocr_block", block_id: "b1", bbox: [1, 2, 3, 4], src_text: srcText },
         { type: "image_done", recognized: 1, failed: 0 },
       ];
-      return {
+      const gate = ocrAfterFirstGates.get(pageName);
+      if (!gate) return {
         ok: true,
         status: 200,
         ...responseFrom([rows.map((row) => JSON.stringify(row)).join("\n") + "\n"]),
+      };
+      const firstBlock = rows.findIndex((row) => row.type === "ocr_block");
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          async *[Symbol.asyncIterator]() {
+            yield new TextEncoder().encode(rows.slice(0, firstBlock + 1).map((row) => JSON.stringify(row)).join("\n") + "\n");
+            await waitForGate(gate, options.signal);
+            yield new TextEncoder().encode(rows.slice(firstBlock + 1).map((row) => JSON.stringify(row)).join("\n") + "\n");
+          },
+        },
       };
     }
     if (url.endsWith("/translate-items")) {
@@ -178,6 +207,8 @@ function createFakeServer() {
     releaseSource(pageName) { sourceGates.get(pageName)?.resolve(); sourceGates.delete(pageName); },
     failSource(pageName) { failedSources.add(pageName); },
     setOcrRows(pageName, rows) { ocrRows.set(pageName, rows); },
+    holdOcrAfterFirst(pageName) { const gate = deferred(); ocrAfterFirstGates.set(pageName, gate); return gate; },
+    releaseOcr(pageName) { ocrAfterFirstGates.get(pageName)?.resolve(); ocrAfterFirstGates.delete(pageName); },
     holdTranslation(dstLang) { const gate = deferred(); translationGates.set(dstLang, gate); return gate; },
     releaseTranslation(dstLang) { translationGates.get(dstLang)?.resolve(); translationGates.delete(dstLang); },
     queueTranslationResult(result) { translationResults.push(result); },
@@ -330,6 +361,30 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     await flush();
     assert.strictEqual(server.counts.aborted, 2);
     assert.strictEqual(server.counts.source, 2);
+    assert.deepStrictEqual(Object.keys(app.storage.rows).filter((key) => key.startsWith("mt:")), []);
+  });
+
+  await scenario("loaded disconnect after an OCR block remains memory-only", async () => {
+    const server = createFakeServer();
+    server.setOcrRows("loaded-late", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "ocr_block", block_id: "early", bbox: [1, 2, 3, 4], src_text: "early" },
+      { type: "ocr_block", block_id: "late", bbox: [5, 6, 7, 8], src_text: "late" },
+      { type: "image_done", recognized: 2, failed: 0 },
+    ]);
+    server.holdOcrAfterFirst("loaded-late");
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const loaded = app.connect();
+    loaded.receive(app.startScope("loaded-late", "loaded", app.job("loaded-late-job", "https://x/loaded-late.jpg")));
+    await waitUntil(
+      () => vm.runInContext("[...producers.values()].some((producer) => producer.page.blocks.length === 1)", app.context),
+      "loaded first OCR block"
+    );
+    loaded.disconnect();
+    server.releaseOcr("loaded-late");
+    await waitUntil(() => app.debug().producers === 0, "loaded late cleanup");
+    await flush();
     assert.deepStrictEqual(Object.keys(app.storage.rows).filter((key) => key.startsWith("mt:")), []);
   });
 
@@ -826,6 +881,53 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     );
   });
 
+  await scenario("target replacement replays OCR blocks emitted before it attached", async () => {
+    const server = createFakeServer();
+    server.setOcrRows("mid-stream", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "ocr_block", block_id: "early", bbox: [1, 2, 3, 4], src_text: "early" },
+      { type: "ocr_block", block_id: "late", bbox: [5, 6, 7, 8], src_text: "late" },
+      { type: "image_done", recognized: 2, failed: 0 },
+    ]);
+    server.holdSource("mid-stream");
+    server.holdOcrAfterFirst("mid-stream");
+    const storage = fakeStorage();
+    const app = createBackgroundApp({ server, storage });
+    await app.ready();
+    const port = app.connect();
+    const source = "https://x/mid-stream.jpg";
+    const oldJob = app.job("mid-stream-old", source);
+    port.receive(app.startScope("mid-stream-old", "visible", oldJob));
+    await app.waitFor("page_job_accepted", port);
+    storage.holdNextPageWrite();
+    server.releaseSource("mid-stream");
+    await waitUntil(() => storage.pageWriteWaiting, "blocked first OCR persistence");
+
+    const newJob = app.job("mid-stream-new", source);
+    port.receive({
+      ...app.startScope("mid-stream-new", "visible", newJob, "mid-stream-old"),
+      dst_lang: "en",
+    });
+    await waitUntil(
+      () => port.sent.some((event) => event.type === "page_job_accepted" && event.request_id === "mid-stream-new"),
+      "mid-stream replacement acceptance"
+    );
+    storage.releasePageWrite();
+    server.releaseOcr("mid-stream");
+    await waitUntil(
+      () => port.sent.some((event) => event.type === "scope_done" && event.request_id === "mid-stream-new"),
+      "mid-stream replacement completion"
+    );
+    assert.deepStrictEqual(
+      port.sent.filter((event) => event.type === "translation" && event.request_id === "mid-stream-new").map((event) => event.block_id).sort(),
+      ["early", "late"]
+    );
+    assert.deepStrictEqual(
+      { source: server.counts.source, ocr: server.counts.ocr },
+      { source: 1, ocr: 1 }
+    );
+  });
+
   await scenario("stale cloud response warms cache without emitting to replacement", async () => {
     const server = createFakeServer();
     server.holdTranslation("vi");
@@ -897,6 +999,33 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     assert.deepStrictEqual({ translated: stayedDone.translated, failed: stayedDone.failed }, { translated: 1, failed: 0 });
     assert.ok(staying.sent.some((event) => event.type === "translation" && event.trans_text.startsWith("vi:")));
     assert.deepStrictEqual(server.translationRequests.map((row) => row.dst_lang).sort(), ["en", "vi"]);
+  });
+
+  await scenario("distinct job IDs sharing one source all complete", async () => {
+    const app = createBackgroundApp();
+    await app.ready();
+    const port = app.connect();
+    const source = "https://x/duplicate-source.jpg";
+    port.receive({
+      ...app.startScope("duplicate-source", "visible"),
+      jobs: [
+        app.job("duplicate-a", source),
+        app.job("duplicate-b", source),
+      ],
+    });
+    const done = await app.waitFor("scope_done", port);
+    assert.deepStrictEqual(
+      { images: done.images, translated: done.translated, failed: done.failed },
+      { images: 2, translated: 2, failed: 0 }
+    );
+    assert.deepStrictEqual(
+      [...new Set(port.sent.filter((event) => event.type === "translation").map((event) => event.job_id))].sort(),
+      ["duplicate-a", "duplicate-b"]
+    );
+    assert.deepStrictEqual(
+      { source: app.server.counts.source, ocr: app.server.counts.ocr, translate: app.server.counts.translate },
+      { source: 1, ocr: 1, translate: 1 }
+    );
   });
 
   await scenario("recognizer replacement keeps cold analysis owner alive", async () => {

@@ -318,9 +318,12 @@ const ready = (async () => {
 function sourceCropKey(descriptor) {
   return JSON.stringify([descriptor.source_url, canonicalCrop(descriptor.crop)]);
 }
+function consumerKey(requestId, jobId) {
+  return JSON.stringify([requestId, jobId]);
+}
 
 function createRequest(port, message) {
-  const request = { requestId: message.request_id, scope: message.scope, srcLang: message.src_lang, dstLang: message.dst_lang, port, jobs: new Map(), jobsBySourceCrop: new Map(), pendingJobs: [], outstanding: 0, connected: true, done: new Set(), hits: 0, translated: 0, failed: 0 };
+  const request = { requestId: message.request_id, scope: message.scope, srcLang: message.src_lang, dstLang: message.dst_lang, port, jobs: new Map(), jobsBySourceCrop: new Map(), expectedJobIds: new Set((message.jobs || []).map((row) => row.job_id)), pendingJobs: [], outstanding: 0, connected: true, done: new Set(), hits: 0, translated: 0, failed: 0 };
   for (const row of message.jobs || []) request.jobsBySourceCrop.set(sourceCropKey(row), row);
   return request;
 }
@@ -360,7 +363,7 @@ async function attachDescriptor(request, descriptor, ledger) {
     producer.ocrStage = attachStage(ocrStages, producer.ocrKey, producer);
     producer.analysisStage = attachStage(analysisStages, producer.analysisKey, producer);
   }
-  producer.consumers.set(request.requestId, { requestId: request.requestId, jobId: descriptor.job_id, port: request.port });
+  producer.consumers.set(consumerKey(request.requestId, descriptor.job_id), { requestId: request.requestId, jobId: descriptor.job_id, port: request.port });
   producer.jobIds.add(descriptor.job_id);
   if (request.scope !== "prewarm") producer.prewarmOnly = false;
   if (request.scope === "visible") producer.persistUntilDone = true;
@@ -391,7 +394,7 @@ function completeJob(request, jobId, translated, failed, hit) {
   if (!request) return;
   if (request.done.has(jobId)) return; request.done.add(jobId); request.translated += translated; request.failed += failed; if (hit) request.hits++;
   void pageCache?.removeJob(jobId);
-  if (request.done.size === request.jobsBySourceCrop.size) scopeDone(request);
+  if (request.done.size === request.expectedJobIds.size) scopeDone(request);
 }
 function scopeDone(request) { request.port?.postMessage({ type: "scope_done", request_id: request.requestId, images: request.done.size, translated: request.translated, failed: request.failed, cache_hit: request.done.size > 0 && request.hits === request.done.size }); requests.delete(request.requestId); }
 function resetAnalysisDeferred(stage) {
@@ -621,6 +624,7 @@ function releaseProducerStages(producer) {
 }
 function retireProducer(producer) {
   if (producer.retired) return;
+  const persistArtifact = producer.persistUntilDone;
   producer.retired = true;
   producer.cancelled = true;
   producer.persistUntilDone = false;
@@ -630,7 +634,7 @@ function retireProducer(producer) {
   removeQueuedTasks(producer);
   releaseProducerStages(producer);
   if (producers.get(producer.pageKey) === producer) producers.delete(producer.pageKey);
-  if (pageCache) {
+  if (pageCache && persistArtifact) {
     const useful = producer.page.analysis_known || producer.page.blocks.length;
     void producer.persistChain.then(() => useful
       ? pageCache.putPage({ ...producer.page, state: "partial" })
@@ -646,11 +650,15 @@ function releaseRequest(requestId, replacement = null) {
   if (!request) return;
   request.connected = false;
   for (const producer of new Set(request.jobs.values())) {
-    const consumer = producer.consumers.get(requestId);
-    producer.consumers.delete(requestId);
+    const releasedConsumers = [];
+    for (const [key, consumer] of producer.consumers) {
+      if (consumer.requestId !== requestId) continue;
+      releasedConsumers.push(consumer);
+      producer.consumers.delete(key);
+    }
     const replacementDescriptor = replacement?.jobsBySourceCrop.get(sourceCropKey(producer.descriptor));
     const exactReplacement = replacementDescriptor?.page_artifact_key === producer.pageKey;
-    if (replacementDescriptor && consumer) void pageCache?.removeJob(consumer.jobId);
+    if (replacementDescriptor) for (const consumer of releasedConsumers) void pageCache?.removeJob(consumer.jobId);
     if (exactReplacement) continue;
     if (replacementDescriptor) {
       if (!producer.consumers.size) retireProducer(producer);
