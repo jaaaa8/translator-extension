@@ -290,7 +290,22 @@ async def wait_gate(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "versions": {"page_schema": "acceptance-page-v1"}}
+    return {
+        "status": "ok",
+        "versions": {
+            "detector": "acceptance-detector-v1",
+            "dedupe": "acceptance-dedupe-v1",
+            "prep": "acceptance-prep-v1",
+            "recognizers": {
+                "ja": "acceptance-recognizer-ja-v1",
+                "es": "acceptance-recognizer-es-v1",
+            },
+            "translator_model": "acceptance-translator-v1",
+            "prompt": "acceptance-prompt-v1",
+            "policy": "acceptance-policy-v1",
+            "page_schema": "acceptance-page-v1",
+        },
+    }
 
 
 @app.get("/fixture.html")
