@@ -36,9 +36,26 @@ function sourceForScope(img, scope) {
   return scope === "visible" ? img.currentSrc || img.src : bestSource(img);
 }
 
+function renderedImageRect(img) {
+  const rect = img.getBoundingClientRect();
+  if (typeof getComputedStyle !== "function" || !img.naturalWidth || !img.naturalHeight) return rect;
+  let style;
+  try { style = getComputedStyle(img); } catch { return rect; }
+  if (style.objectFit !== "contain" && style.objectFit !== "scale-down") return rect;
+  const match = String(style.objectPosition || "").match(/^(-?(?:\d+\.?\d*|\.\d+))%\s+(-?(?:\d+\.?\d*|\.\d+))%$/);
+  if (!match) return rect;
+  let scale = Math.min(rect.width / img.naturalWidth, rect.height / img.naturalHeight);
+  if (style.objectFit === "scale-down") scale = Math.min(1, scale);
+  const width = img.naturalWidth * scale;
+  const height = img.naturalHeight * scale;
+  const left = rect.left + (rect.width - width) * Number(match[1]) / 100;
+  const top = rect.top + (rect.height - height) * Number(match[2]) / 100;
+  return { left, top, right: left + width, bottom: top + height, width, height };
+}
+
 function visibleArea(img, viewportWidth, viewportHeight) {
   if (!img.getClientRects().length) return 0;
-  const rect = img.getBoundingClientRect();
+  const rect = renderedImageRect(img);
   const width = Math.max(0, Math.min(rect.right, viewportWidth) - Math.max(rect.left, 0));
   const height = Math.max(0, Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0));
   return width * height;
@@ -49,7 +66,7 @@ function normalized(value) {
 }
 
 function viewportCrop(img, viewportWidth, viewportHeight, padding = 0.1) {
-  const rect = img.getBoundingClientRect();
+  const rect = renderedImageRect(img);
   const left = Math.max(0, rect.left);
   const top = Math.max(0, rect.top);
   const right = Math.min(viewportWidth, rect.right);
@@ -79,7 +96,7 @@ function isCurrentSource(img, source, scope = "loaded") {
 }
 
 function viewportDistance(img, viewportWidth, viewportHeight) {
-  const rect = img.getBoundingClientRect();
+  const rect = renderedImageRect(img);
   const dx = rect.right < 0 ? -rect.right : rect.left > viewportWidth ? rect.left - viewportWidth : 0;
   const dy = rect.bottom < 0 ? -rect.bottom : rect.top > viewportHeight ? rect.top - viewportHeight : 0;
   return Math.hypot(dx, dy);
@@ -110,6 +127,7 @@ if (typeof module !== "undefined") {
     bestSource,
     eligible,
     sourceForScope,
+    renderedImageRect,
     visibleArea,
     viewportCrop,
     viewportDistance,

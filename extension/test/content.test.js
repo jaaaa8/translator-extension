@@ -2,16 +2,16 @@ const assert = require("assert");
 const fs = require("fs");
 const vm = require("vm");
 
-function image(rect = { left: 0, top: 0, right: 600, bottom: 500, width: 600, height: 500 }) {
+function image(rect = { left: 0, top: 0, right: 600, bottom: 500, width: 600, height: 500 }, style = { objectFit: "fill", objectPosition: "50% 50%" }) {
   const attrs = {};
-  return { src: "https://x/a.jpg", currentSrc: "", complete: true, naturalWidth: 1000, naturalHeight: 1600, isConnected: true, baseURI: "https://x/", parentElement: null, getAttribute(name) { return attrs[name] || ""; }, setAttribute(name, value) { attrs[name] = value; }, getBoundingClientRect: () => rect, getClientRects: () => [rect] };
+  return { src: "https://x/a.jpg", currentSrc: "", complete: true, naturalWidth: 1000, naturalHeight: 1600, isConnected: true, baseURI: "https://x/", parentElement: null, style, getAttribute(name) { return attrs[name] || ""; }, setAttribute(name, value) { attrs[name] = value; }, getBoundingClientRect: () => rect, getClientRects: () => [rect] };
 }
 
 function createApp(images = [image()]) {
   let nextId = 0, disconnect, storageChanged;
   const messages = [], rendered = [], ports = [];
   const makePort = () => { let listener; const p = { sent: [], postMessage(m) { this.sent.push({ ...m }); messages.push({ ...m }); }, onMessage: { addListener(fn) { listener = fn; } }, onDisconnect: { addListener(fn) { disconnect = fn; } }, emit(m) { listener(m); } }; ports.push(p); return p; };
-  const context = { Promise, Map, WeakMap, Set, URL, performance, queueMicrotask, crypto: { randomUUID: () => `id-${++nextId}` }, innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0, requestAnimationFrame: (fn) => (fn(), 1), console, document: { body: { appendChild(element) { rendered.push(element); } }, documentElement: {}, querySelectorAll: () => images, createElement: () => ({ style: {}, children: [], removed: false, appendChild(child) { this.children.push(child); }, remove() { this.removed = true; this.children.forEach((child) => child.remove()); } }) }, window: { addEventListener() {} }, MutationObserver: class { observe() {} }, ResizeObserver: class { observe() {} disconnect() {} }, chrome: { storage: { local: { get: async () => ({ srcLang: "ja", dstLang: "vi" }) }, onChanged: { addListener(fn) { storageChanged = fn; } } }, runtime: { connect: makePort, sendMessage: async (m) => { messages.push({ ...m }); return { ok: true }; }, onMessage: { addListener() {} } } } };
+  const context = { Promise, Map, WeakMap, Set, URL, performance, queueMicrotask, crypto: { randomUUID: () => `id-${++nextId}` }, innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0, getComputedStyle: (element) => element.style, requestAnimationFrame: (fn) => (fn(), 1), console, document: { body: { appendChild(element) { rendered.push(element); } }, documentElement: {}, querySelectorAll: () => images, createElement: () => ({ style: {}, children: [], removed: false, appendChild(child) { this.children.push(child); }, remove() { this.removed = true; this.children.forEach((child) => child.remove()); } }) }, window: { addEventListener() {} }, MutationObserver: class { observe() {} }, ResizeObserver: class { observe() {} disconnect() {} }, chrome: { storage: { local: { get: async () => ({ srcLang: "ja", dstLang: "vi" }) }, onChanged: { addListener(fn) { storageChanged = fn; } } }, runtime: { connect: makePort, sendMessage: async (m) => { messages.push({ ...m }); return { ok: true }; }, onMessage: { addListener() {} } } } };
   vm.createContext(context); vm.runInContext(fs.readFileSync("extension/srcset.js", "utf8"), context); vm.runInContext(fs.readFileSync("extension/content.js", "utf8"), context);
   return { context, images, messages, rendered, ports: () => ports, disconnect: () => disconnect(), storageChanged: (changes) => storageChanged(changes), live: () => rendered.filter((element) => !element.removed), bubbles: () => rendered.filter((element) => !element.removed).flatMap((element) => element.children) };
 }
@@ -51,6 +51,21 @@ function unchanged(app, event) {
   const coordinates = await seeded();
   coordinates.app.ports()[0].emit({ ...translation(coordinates.start, "resized"), image_w: 500, image_h: 800 });
   assert.strictEqual(coordinates.app.bubbles()[0].style.left, "1.2px");
+
+  const contained = image(
+    { left: 100, top: 50, right: 1300, bottom: 650, width: 1200, height: 600 },
+    { objectFit: "contain", objectPosition: "50% 50%" }
+  );
+  contained.naturalWidth = 800;
+  contained.naturalHeight = 1200;
+  const containedApp = createApp([contained]);
+  const containedPending = containedApp.context.translatePage("loaded");
+  const containedStart = containedApp.ports()[0].sent[0];
+  containedApp.ports()[0].emit({ ...translation(containedStart), bbox: [200, 100, 100, 200], image_w: 800, image_h: 1200 });
+  assert.deepStrictEqual(containedApp.live()[0].style, { left: "500px", top: "50px", width: "400px", height: "600px" });
+  assert.deepStrictEqual(containedApp.bubbles()[0].style, { left: "100px", top: "50px", width: "50px", height: "100px", fontSize: "18px" });
+  containedApp.ports()[0].emit({ type: "scope_done", request_id: containedStart.request_id, images: 1, translated: 1, failed: 0 });
+  await containedPending;
 
   const zero = createApp();
   const old = zero.context.translatePage("loaded");

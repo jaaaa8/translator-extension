@@ -9,6 +9,7 @@ const {
   selectCandidates,
   viewportDistance,
   sourceSignature,
+  renderedImageRect,
 } = require("../srcset.js");
 
 // srcset nhiều biến thể → chọn URL có descriptor lớn nhất
@@ -185,6 +186,34 @@ assert.throws(
 );
 assert.strictEqual(viewportDistance(offscreenImage, 800, 600), 300);
 assert.strictEqual(sourceSignature(doneImage), '[[' + JSON.stringify(doneImage.src) + ',"","","",""]]');
+
+const containedImage = fakeImage({
+  naturalWidth: 800,
+  naturalHeight: 1200,
+  rect: { left: 100, top: 50, right: 1300, bottom: 650, width: 1200, height: 600 },
+});
+const previousGetComputedStyle = global.getComputedStyle;
+global.getComputedStyle = () => ({ objectFit: "contain", objectPosition: "50% 50%" });
+assert.deepStrictEqual(renderedImageRect(containedImage), {
+  left: 500, top: 50, right: 900, bottom: 650, width: 400, height: 600,
+});
+assert.strictEqual(visibleArea(containedImage, 450, 700), 0);
+assert.strictEqual(isViewportVisible(containedImage, 450, 700), false);
+assert.strictEqual(viewportDistance(containedImage, 450, 700), 50);
+assert.deepStrictEqual(viewportCrop(containedImage, 700, 700, 0), {
+  left: 0, top: 0, right: 0.5, bottom: 1,
+});
+
+global.getComputedStyle = () => ({ objectFit: "scale-down", objectPosition: "50% 50%" });
+const scaleDownImage = fakeImage({
+  naturalWidth: 200,
+  naturalHeight: 100,
+  rect: { left: 0, top: 0, right: 400, bottom: 400, width: 400, height: 400 },
+});
+assert.deepStrictEqual(renderedImageRect(scaleDownImage), {
+  left: 100, top: 150, right: 300, bottom: 250, width: 200, height: 100,
+});
+global.getComputedStyle = previousGetComputedStyle;
 
 const signatureSource = { srcset: "page.webp 640w", sizes: "100vw", media: "(min-width: 1px)", getAttribute(name) { return this[name] || ""; } };
 const signaturePicture = { tagName: "PICTURE", querySelectorAll: () => [signatureSource] };
