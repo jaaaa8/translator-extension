@@ -2,7 +2,9 @@
 
 ## Revision and automated evidence
 
-- Commit range: `ec3df53..Task 10 HEAD` (`test: verify progressive session workflow`).
+- Task 10 base/implementation: `ec3df53..50c3b81`.
+- Fix Round 1: the commit containing this worklog, whose parent is `50c3b81`
+  (reproduce with `git diff 50c3b81 HEAD`).
 - Focused cross-layer test: 1/1 passed.
 - Exact Node suite: 8/8 files passed.
 - Python: 69 passed, 3 dependency/deprecation warnings, 0 failed.
@@ -12,7 +14,9 @@
 - Automated cases verified: stale A/B navigation, exact artifact replay with no
   extra source/OCR/translation calls, exact-crop miss, near-before-far loaded
   scheduling, replacement while source/OCR/translation are each deferred,
-  Port disconnect plus worker-VM restart/replay, isolated OCR/image/translation
+  Port disconnect plus simulated worker termination (old Port delivery, storage
+  mutation, and fetch continuations revoked) followed by new-VM restart/replay,
+  isolated OCR/image/translation
   faults with valid output retained, visible and loaded scopes, repeated status
   reads during live work, `scope_done` monotonic metrics, first-overlay merge,
   actual 100-sample eviction, and absence of URL/OCR/translation text from

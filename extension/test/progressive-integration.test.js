@@ -16,15 +16,20 @@ function eventTarget() {
 
 function portPair() {
   const trace = [];
+  let active = true;
   const pair = { toBackground: structuredClone, toContent: structuredClone };
   const disconnected = eventTarget();
   const leftMessages = eventTarget();
   const rightMessages = eventTarget();
   const left = { name: "translation", onMessage: leftMessages, onDisconnect: disconnected,
-    postMessage(message) { trace.push(["content", structuredClone(message)]); queueMicrotask(() => rightMessages.emit(pair.toBackground(message))); } };
+    postMessage(message) { if (!active) return; trace.push(["content", structuredClone(message)]); queueMicrotask(() => { if (active) rightMessages.emit(pair.toBackground(message)); }); } };
   const right = { name: "translation", onMessage: rightMessages, onDisconnect: disconnected,
-    postMessage(message) { trace.push(["background", structuredClone(message)]); queueMicrotask(() => leftMessages.emit(pair.toContent(message))); } };
-  return Object.assign(pair, { content: left, background: right, trace, disconnect: () => disconnected.emit() });
+    postMessage(message) { if (!active) return; trace.push(["background", structuredClone(message)]); queueMicrotask(() => { if (active) leftMessages.emit(pair.toContent(message)); }); } };
+  return Object.assign(pair, {
+    content: left, background: right, trace,
+    disconnect: () => disconnected.emit(),
+    kill() { active = false; disconnected.emit(); },
+  });
 }
 
 function storageSession(seed = {}) {
@@ -122,17 +127,25 @@ async function eventually(predicate, label) {
   throw new Error(`timed out: ${label}`);
 }
 
-function createIntegration({ server = createServer(), session = storageSession(), pages = [{ name: "A", rect: { left: 0, top: 0, right: 500, bottom: 600, width: 500, height: 600 } }] } = {}) {
+function createIntegration({ server = createServer(), session = storageSession(), clock = performance, pages = [{ name: "A", rect: { left: 0, top: 0, right: 500, bottom: 600, width: 500, height: 600 } }] } = {}) {
   const pair = portPair();
+  let workerAlive = true;
   const runtimeMessages = eventTarget();
   const connects = eventTarget();
   const background = {
-    console, URL, Blob, FormData, TextEncoder, TextDecoder, AbortController, performance,
+    console, URL, Blob, FormData, TextEncoder, TextDecoder, AbortController, performance: clock,
     crypto: { subtle: { digest: (algorithm, bytes) => webcrypto.subtle.digest(algorithm, Buffer.from(bytes)) } },
     structuredClone, queueMicrotask,
-    setTimeout, clearTimeout, fetch: server.fetch,
+    setTimeout, clearTimeout,
+    fetch: async (...args) => {
+      const response = await server.fetch(...args);
+      if (!workerAlive) throw new Error("service worker terminated");
+      return response;
+    },
     chrome: {
-      storage: { session }, action: { setBadgeText() {}, setBadgeBackgroundColor() {} },
+      storage: { session: Object.fromEntries(["get", "set", "remove", "getBytesInUse"].map((method) => [
+        method, (...args) => workerAlive ? session[method](...args) : Promise.resolve(method === "getBytesInUse" ? 0 : {}),
+      ])) }, action: { setBadgeText() {}, setBadgeBackgroundColor() {} },
       runtime: { onMessage: runtimeMessages, onConnect: connects },
     },
   };
@@ -153,7 +166,7 @@ function createIntegration({ server = createServer(), session = storageSession()
     rect: page.rect, getAttribute: () => "", getBoundingClientRect() { return this.rect; }, getClientRects() { return [this.rect]; } }));
   const rendered = [];
   const content = {
-    console, URL, Promise, Map, WeakMap, Set, performance, queueMicrotask,
+    console, URL, Promise, Map, WeakMap, Set, performance: clock, queueMicrotask,
     crypto: { randomUUID: () => `id-${++id}` }, innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0,
     requestAnimationFrame(fn) { fn(); return 1; },
     document: {
@@ -180,6 +193,7 @@ function createIntegration({ server = createServer(), session = storageSession()
     session,
     trace: pair.trace,
     disconnect: pair.disconnect,
+    killWorker() { workerAlive = false; pair.kill(); },
     click: () => content.translatePage("visible", "ja", "vi"),
     clickLoaded: () => content.translatePage("loaded", "ja", "vi"),
     navigate(source, nextRect = images[0].rect) { images[0].src = `https://reader/${source}.jpg`; images[0].rect = nextRect; content.pruneOverlays(); },
@@ -193,6 +207,8 @@ function createIntegration({ server = createServer(), session = storageSession()
   const app = createIntegration();
   const result = await app.click();
   assert.strictEqual(app.text(), "A translated");
+  assert.ok(Number.isFinite(result.first_overlay_ms));
+  assert.strictEqual(result.firstOverlayMs, undefined);
   assert.deepStrictEqual(Object.keys(result.metrics).sort(), [
     "analysis_ms", "fetch_ms", "first_ocr_ms", "first_translation_ms", "queue_wait_ms", "total_ms",
   ]);
@@ -267,17 +283,32 @@ function createIntegration({ server = createServer(), session = storageSession()
   await replacementVisible;
   assert.ok((await cancelled.summary()).counters.stale_work >= 1);
 
+  let tick = 0;
+  const agedServer = createServer();
+  agedServer.holdSource("A");
+  const aged = createIntegration({ server: agedServer, clock: { now: () => tick } });
+  const agedLoaded = aged.clickLoaded();
+  await eventually(() => agedServer.calls.source === 1, "aged request source");
+  tick = 5000;
+  aged.navigate("B");
+  const agedReplacement = aged.click();
+  await agedLoaded;
+  await agedReplacement;
+  assert.strictEqual((await aged.summary()).cancel_latency_ms.p50, 0);
+
   const restartServer = createServer();
   restartServer.holdTranslation("A");
   const sharedSession = storageSession();
   const beforeRestart = createIntegration({ server: restartServer, session: sharedSession });
   void beforeRestart.click();
   await eventually(() => restartServer.calls.translate === 1, "translation before worker restart");
-  beforeRestart.disconnect();
+  beforeRestart.killWorker();
   const afterRestart = createIntegration({ server: restartServer, session: sharedSession });
   const resumed = afterRestart.click();
+  await eventually(() => restartServer.calls.translate >= 2, "translation resumed by restarted worker");
   restartServer.finishTranslation("A");
   await resumed;
+  assert.strictEqual(beforeRestart.text(), "");
   assert.strictEqual(afterRestart.text(), "A translated");
   assert.strictEqual(afterRestart.trace.filter(([side, event]) => side === "background" && event.type === "translation").length, 1);
 

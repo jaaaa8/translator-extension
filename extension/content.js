@@ -110,7 +110,7 @@ function handleEvent(event) {
   if (event.type === "scope_done") {
     const pending = pendingScopes.get(event.request_id);
     if (!pending) return;
-    cleanupRequest(event.request_id, { ok: true, images: event.images, blocks: event.translated, failed: event.failed, cacheHit: event.cache_hit === true, firstOverlayMs: pending.firstOverlayMs, metrics: event.metrics });
+    cleanupRequest(event.request_id, { ok: true, images: event.images, blocks: event.translated, failed: event.failed, cacheHit: event.cache_hit === true, first_overlay_ms: pending.firstOverlayMs, metrics: event.metrics });
   }
 }
 

@@ -734,8 +734,8 @@ function retireProducer(producer) {
 function releaseRequest(requestId, replacement = null) {
   const request = requests.get(requestId);
   if (!request) return;
+  const cancelStartedAt = now();
   request.connected = false;
-  request.cancelLatencyMs = Math.round(now() - request.acceptedAt);
   const releasedProducers = new Set(request.jobs.values());
   for (const producer of releasedProducers) {
     const releasedConsumers = [];
@@ -770,6 +770,7 @@ function releaseRequest(requestId, replacement = null) {
   for (const producer of releasedProducers) {
     for (const key of Object.keys(counters)) counters[key] += producer.counters[key] || 0;
   }
+  request.cancelLatencyMs = Math.round(now() - cancelStartedAt);
   recordMetrics({ ...scopeMetrics(request), first_overlay_ms: request.firstOverlayMs, cancel_latency_ms: request.cancelLatencyMs, ...counters });
   requests.delete(requestId);
 }
