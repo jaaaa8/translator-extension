@@ -18,7 +18,7 @@
 
 ### Case 1 — PASS: stale A/B navigation
 
-A source/OCR was held; B then completed source/OCR/translation and rendered
+A's OCR was held; B then completed source/OCR/translation and rendered
 exactly `en:B:block-1`. Before A release, counters were `page_load=8,
 source=2, ocr_stream=2, translation=1, source_aborted=0, ocr_aborted=0,
 active_source=0, peak_source=1`. Releasing A produced no translation/A event,
