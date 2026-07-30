@@ -59,6 +59,30 @@ not scheduler behavior). A later multi-turn attempt allowed MV3 sleep/reconnect
 and A/B replay; Translate → 3 seconds → F5 produced the clean absolute-two
 abort result.
 
+### Case 8 — PASS: full Chrome restart clears session cache
+
+The static production fixture was `http://127.0.0.1:8000/fixture.html`, Reader
+A, against production `server.main:app` PID `25764`. Before restart, the popup
+began at `background=0, cached=0, errors=0`; visible translation completed as
+`1 image, 1 dialogue, 0 errors` and settled at `background=0, cached=1,
+errors=0`.
+
+The user closed the full Chrome process and reopened it. Reader A then showed
+`background=0, cached=0, errors=0`, proving `chrome.storage.session` cleared
+from one cached page to zero. The production log checkpoint after popup
+prewarm was line 31; the visible translation added exactly three lines through
+line 34: `GET /health 200`, `POST /ocr-stream 200`, and
+`POST /translate-items 200`. The popup again reported `1 image, 1 dialogue,
+0 errors` and ended at `cached=1`. Those requests prove A ran cold after
+restart rather than using an exact page-cache hit.
+
+Chrome control correctly became unavailable when the browser process exited,
+and one reconnection attempt failed. Diagnostics found Chrome running, the
+ChatGPT Chrome Extension installed and enabled in the selected Default
+profile, and the native-host manifest/registry correct, but the control
+connection did not auto-reconnect. The test therefore continued manually;
+the popup transition and production log independently establish the result.
+
 ### Case 9 — PASS: loaded ordering
 
 With `hold.source=[A,C]`, A entered/held, B source/OCR/translation completed
@@ -106,8 +130,6 @@ contract: detector `comic-text-detector-v1`, dedupe
 
 ## Pending and warnings
 
-- Case 8, a full Chrome restart/session-clearing check, remains pending and is
-  not claimed.
 - The 20-cold/20-warm real-production benchmark remains pending; no synthetic
   timing has been presented as production measurement.
 - Known warnings: FastAPI/Starlette `httpx` deprecation, vendored detector
