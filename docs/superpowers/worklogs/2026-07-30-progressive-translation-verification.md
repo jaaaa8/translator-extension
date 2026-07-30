@@ -9,6 +9,8 @@
   (reproduce with `git diff 6f00f49 HEAD`).
 - Fix Round 3: the commit containing this worklog, whose parent is `5731c7c`
   (reproduce with `git diff 5731c7c HEAD`).
+- Fix Round 4: the commit containing this worklog, whose parent is `13b4ac1`
+  (reproduce with `git diff 13b4ac1 HEAD`).
 - Focused cross-layer test: 1/1 passed.
 - Exact Node suite: 8/8 files passed.
 - Python: 69 passed, 3 dependency/deprecation warnings, 0 failed.
@@ -32,6 +34,9 @@
 - Mixed progressive Port and legacy `ocrImage` runtime traffic shares the single
   two-slot scheduler. The deferred mixed-path regression observes peak source/
   OCR work <= 2 while both public response paths complete.
+- Benchmark counters union producer identities across the retained request
+  samples, so duplicate consumers and cross-request sharing count each actual
+  producer call once without exposing those identities in the runtime summary.
 
 ## Browser acceptance
 

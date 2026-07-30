@@ -42,9 +42,10 @@ function benchmarkSummary() {
     })
   );
   summary.counters = Object.fromEntries(
-    ["translation_calls", "rate_limited", "stale_work"].map((field) => [
-      field, metricSamples.reduce((total, row) => total + (row[field] || 0), 0),
-    ])
+    ["translation_calls", "rate_limited", "stale_work"].map((field) => {
+      const producers = new Set(metricSamples.flatMap((row) => [...(row.counter_producers || [])]));
+      return [field, [...producers].reduce((total, producer) => total + (producer.counters[field] || 0), 0)];
+    })
   );
   return summary;
 }
@@ -363,7 +364,7 @@ function consumerKey(requestId, jobId) {
 }
 
 function createRequest(port, message) {
-  const request = { requestId: message.request_id, scope: message.scope, srcLang: message.src_lang, dstLang: message.dst_lang, port, jobs: new Map(), jobsBySourceCrop: new Map(), expectedJobIds: new Set((message.jobs || []).map((row) => row.job_id)), pendingJobs: [], outstanding: 0, connected: true, done: new Set(), hits: 0, translated: 0, failed: 0, acceptedAt: now(), firstOverlayMs: null, metricRows: [], counters: { translation_calls: 0, rate_limited: 0, stale_work: 0 }, cancelLatencyMs: null };
+  const request = { requestId: message.request_id, scope: message.scope, srcLang: message.src_lang, dstLang: message.dst_lang, port, jobs: new Map(), jobsBySourceCrop: new Map(), expectedJobIds: new Set((message.jobs || []).map((row) => row.job_id)), pendingJobs: [], outstanding: 0, connected: true, done: new Set(), hits: 0, translated: 0, failed: 0, acceptedAt: now(), firstOverlayMs: null, metricRows: [], counters: { translation_calls: 0, rate_limited: 0, stale_work: 0 }, countedCounterProducers: new Set(), cancelLatencyMs: null };
   for (const row of message.jobs || []) request.jobsBySourceCrop.set(sourceCropKey(row), row);
   return request;
 }
@@ -430,11 +431,14 @@ async function acceptScope(port, message) {
   if (message.replaces_request_id) releaseRequest(message.replaces_request_id, request);
   admitRequestJobs(request);
 }
-function completeJob(request, jobId, translated, failed, hit, metrics = null, counters = null) {
+function completeJob(request, jobId, translated, failed, hit, metrics = null, counters = null, counterProducer = null) {
   if (!request) return;
   if (request.done.has(jobId)) return; request.done.add(jobId); request.translated += translated; request.failed += failed; if (hit) request.hits++;
   if (metrics) request.metricRows.push(metrics);
-  if (counters) for (const key of Object.keys(request.counters)) request.counters[key] += counters[key] || 0;
+  if (counters && !request.countedCounterProducers.has(counterProducer)) {
+    request.countedCounterProducers.add(counterProducer);
+    for (const key of Object.keys(request.counters)) request.counters[key] += counters[key] || 0;
+  }
   void pageCache?.removeJob(jobId);
   if (request.done.size === request.expectedJobIds.size) scopeDone(request);
 }
@@ -452,7 +456,7 @@ function scopeMetrics(request) {
 }
 function scopeDone(request) {
   const metrics = scopeMetrics(request);
-  recordMetrics(request.requestId, { ...metrics, first_overlay_ms: request.firstOverlayMs, cancel_latency_ms: request.cancelLatencyMs, ...request.counters });
+  recordMetrics(request.requestId, { ...metrics, first_overlay_ms: request.firstOverlayMs, cancel_latency_ms: request.cancelLatencyMs, counter_producers: new Set(request.countedCounterProducers) });
   request.port?.postMessage({ type: "scope_done", request_id: request.requestId, images: request.done.size, translated: request.translated, failed: request.failed, cache_hit: request.done.size > 0 && request.hits === request.done.size, metrics });
   requests.delete(request.requestId);
 }
@@ -676,8 +680,8 @@ async function removeProducerJobs(producer) {
   await Promise.all([...producer.jobIds].map((jobId) => pageCache?.removeJob(jobId)));
   producer.jobIds.clear();
 }
-async function finishProducer(producer) { const failed = producer.page.blocks.filter((b) => !b.trans_text).length; producer.page.state = failed || producer.blockErrors ? "partial" : "complete"; await persist(producer); await producer.persistChain; emit(producer, "image_done", { translated: producer.page.blocks.length - failed, failed: failed + (producer.blockErrors || 0) }); const metrics = producerMetrics(producer); for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, producer.page.blocks.length - failed, failed + (producer.blockErrors || 0), false, metrics, producer.counters); await removeProducerJobs(producer); releaseProducerStages(producer); producers.delete(producer.pageKey); }
-async function failProducer(producer, error) { producer.page.last_error = String(error); producer.page.state = producer.page.analysis_known || producer.page.blocks.length ? "partial" : "failed"; await persist(producer); emit(producer, "image_done", { translated: 0, failed: 1 }); const metrics = producerMetrics(producer); for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, 0, 1, false, metrics, producer.counters); await removeProducerJobs(producer); releaseProducerStages(producer); producers.delete(producer.pageKey); }
+async function finishProducer(producer) { const failed = producer.page.blocks.filter((b) => !b.trans_text).length; producer.page.state = failed || producer.blockErrors ? "partial" : "complete"; await persist(producer); await producer.persistChain; emit(producer, "image_done", { translated: producer.page.blocks.length - failed, failed: failed + (producer.blockErrors || 0) }); const metrics = producerMetrics(producer); for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, producer.page.blocks.length - failed, failed + (producer.blockErrors || 0), false, metrics, producer.counters, producer); await removeProducerJobs(producer); releaseProducerStages(producer); producers.delete(producer.pageKey); }
+async function failProducer(producer, error) { producer.page.last_error = String(error); producer.page.state = producer.page.analysis_known || producer.page.blocks.length ? "partial" : "failed"; await persist(producer); emit(producer, "image_done", { translated: 0, failed: 1 }); const metrics = producerMetrics(producer); for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, 0, 1, false, metrics, producer.counters, producer); await removeProducerJobs(producer); releaseProducerStages(producer); producers.delete(producer.pageKey); }
 function removeQueuedTasks(producer) { for (const task of taskQueue) if (task.producer === producer) task.cancelled = () => true; }
 function demoteQueuedTasks(producer) {
   for (const task of taskQueue) if (task.producer === producer) task.tier = PRIORITY.background;
@@ -763,12 +767,8 @@ function releaseRequest(requestId, replacement = null) {
     offlineJobs.splice(index, 1);
     void pageCache?.removeJob(row.descriptor.job_id);
   }
-  const counters = { ...request.counters };
-  for (const producer of releasedProducers) {
-    for (const key of Object.keys(counters)) counters[key] += producer.counters[key] || 0;
-  }
   request.cancelLatencyMs = Math.round(now() - cancelStartedAt);
-  recordMetrics(request.requestId, { ...scopeMetrics(request), first_overlay_ms: request.firstOverlayMs, cancel_latency_ms: request.cancelLatencyMs, ...counters });
+  recordMetrics(request.requestId, { ...scopeMetrics(request), first_overlay_ms: request.firstOverlayMs, cancel_latency_ms: request.cancelLatencyMs, counter_producers: new Set([...request.countedCounterProducers, ...releasedProducers]) });
   requests.delete(requestId);
 }
 function disconnectPort(port) { ports.delete(port); for (const request of requests.values()) if (request.port === port) releaseRequest(request.requestId); }

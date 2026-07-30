@@ -356,6 +356,15 @@ function createIntegration({ server = createServer(), session = storageSession()
   assert.ok(faultServer.calls.ocrStream >= validPageCalls.ocrStream);
   assert.strictEqual(faults.text(), "A translated");
 
+  const duplicateServer = createServer();
+  const duplicate = createIntegration({ server: duplicateServer, pages: [
+    { name: "A", rect: sameRect }, { name: "A", rect: sameRect },
+  ] });
+  const duplicateResult = await duplicate.clickLoaded();
+  assert.deepStrictEqual({ images: duplicateResult.images, blocks: duplicateResult.blocks }, { images: 2, blocks: 2 });
+  assert.strictEqual(duplicateServer.calls.translate, 1);
+  assert.strictEqual((await duplicate.summary()).counters.translation_calls, 1);
+
   const mixedServer = createServer();
   for (const name of ["A", "B", "C", "D"]) mixedServer.holdSource(name);
   const mixed = createIntegration({ server: mixedServer, pages: [

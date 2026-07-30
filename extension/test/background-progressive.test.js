@@ -965,6 +965,23 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     assert.strictEqual(server.counts.translate, callsBeforeReturn);
   });
 
+  await scenario("shared producer counters count once across requests", async () => {
+    const server = createFakeServer();
+    server.holdTranslation("vi");
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const source = "https://x/shared-counter.jpg";
+    const first = app.connect();
+    const second = app.connect();
+    first.receive(app.startScope("shared-counter-a", "visible", app.job("shared-counter-job-a", source)));
+    second.receive(app.startScope("shared-counter-b", "visible", app.job("shared-counter-job-b", source)));
+    await waitUntil(() => server.counts.translate === 1, "one shared translation call");
+    server.releaseTranslation("vi");
+    await app.waitFor("scope_done", first);
+    await app.waitFor("scope_done", second);
+    assert.strictEqual((await app.message({ type: "benchmarkSummary" })).counters.translation_calls, 1);
+  });
+
   await scenario("one replacement cannot retire another request's shared producer", async () => {
     const server = createFakeServer();
     server.holdTranslation("vi");
