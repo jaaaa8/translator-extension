@@ -1,13 +1,14 @@
 import asyncio
 import ipaddress
+import json
 import struct
 import zlib
 from collections import deque
 from hashlib import sha256
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 PAGES = frozenset("ABCD")
@@ -70,6 +71,17 @@ class AcceptanceConfig(BaseModel):
         if any(value < 1 or value > 16 for value in self.blocks.values()):
             raise ValueError("block count must be between 1 and 16")
         return self
+
+
+class TranslateItem(BaseModel):
+    id: str
+    text: str
+
+
+class TranslateItemsBody(BaseModel):
+    items: list[TranslateItem]
+    src_lang: str
+    dst_lang: str = "vi"
 
 
 def page_png(page: str) -> bytes:
@@ -151,6 +163,58 @@ class AcceptanceState:
         async with self.lock:
             return self.gates.get((stage, page))
 
+    async def entered(self, stage: str, page: str) -> None:
+        async with self.lock:
+            counter = {"source": "source", "ocr": "ocr_stream", "translation": "translation"}[stage]
+            self.counts[counter] += 1
+            if stage == "source":
+                self.counts["active_source"] += 1
+                self.counts["peak_source"] = max(
+                    self.counts["peak_source"], self.counts["active_source"]
+                )
+        await self.record(stage, page, "entered")
+
+    async def leave_source(self) -> None:
+        async with self.lock:
+            self.counts["active_source"] -= 1
+
+    async def increment(self, key: str) -> None:
+        async with self.lock:
+            self.counts[key] += 1
+
+    async def fails(self, fault: str, page: str) -> bool:
+        async with self.lock:
+            return page in getattr(self.config.fail, fault)
+
+    async def remember_analysis(self, analysis_key: str, page: str) -> None:
+        async with self.lock:
+            self.analysis_pages[analysis_key] = page
+
+    async def analysis_page(self, analysis_key: str) -> str | None:
+        async with self.lock:
+            return self.analysis_pages.get(analysis_key)
+
+    async def block_count(self, page: str) -> int:
+        async with self.lock:
+            return self.config.blocks.get(page, 1)
+
+    async def consume_translation_fault(self, page: str) -> bool:
+        async with self.lock:
+            if (
+                page not in self.config.fail.translation_batch
+                or page in self.consumed_translation_faults
+            ):
+                return False
+            self.consumed_translation_faults.add(page)
+            return True
+
+    async def aborted(self, stage: str, page: str) -> None:
+        async with self.lock:
+            key = f"{stage}_aborted"
+            if key in self.counts:
+                self.counts[key] += 1
+        await self.record(stage, page, "aborted")
+
     async def record(self, stage: str, page: str, event: str) -> None:
         async with self.lock:
             self.sequence += 1
@@ -178,6 +242,28 @@ state = AcceptanceState()
 control_dependencies = [Depends(control_request)]
 
 
+async def wait_gate(
+    stage: str,
+    page: str,
+    request: Request,
+    runtime: AcceptanceState = state,
+) -> bool:
+    gate = await runtime.gate(stage, page)
+    if gate is None:
+        return True
+    await runtime.record(stage, page, "held")
+    while not gate.is_set():
+        if await request.is_disconnected():
+            await runtime.aborted(stage, page)
+            return False
+        try:
+            await asyncio.wait_for(gate.wait(), timeout=0.05)
+        except TimeoutError:
+            pass
+    await runtime.record(stage, page, "released")
+    return True
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "versions": {"page_schema": "acceptance-page-v1"}}
@@ -189,14 +275,115 @@ async def fixture():
 
 
 @app.get("/assets/{page}.png")
-async def asset(page: str):
+async def asset(page: str, request: Request):
     if page not in PAGES:
         raise HTTPException(status_code=404, detail="unknown synthetic page")
+    if request.headers.get("sec-fetch-dest") == "image":
+        await state.increment("page_load")
+    else:
+        await state.entered("source", page)
+        try:
+            if not await wait_gate("source", page, request):
+                return Response(status_code=499)
+            if await state.fails("source_after_load", page):
+                await state.record("source", page, "failed")
+                return Response(status_code=500)
+            await state.record("source", page, "completed")
+        finally:
+            await state.leave_source()
     return Response(
         content=page_png(page),
         media_type="image/png",
         headers={"Cache-Control": "no-store"},
     )
+
+
+@app.post("/ocr-stream")
+async def ocr_stream(
+    request: Request,
+    analysis_key: str = Form(...),
+    ocr_key: str = Form(...),
+    src_lang: str = Form(...),
+    image: UploadFile | None = File(None),
+):
+    if src_lang not in {"ja", "es"}:
+        return JSONResponse(status_code=422, content={"error": "unsupported src_lang"})
+    if image is None:
+        page = await state.analysis_page(analysis_key)
+        if page is None:
+            return JSONResponse(status_code=409, content={"error": "analysis_missing"})
+    else:
+        page = PAGE_BY_DIGEST.get(sha256(await image.read()).hexdigest())
+        if page is None:
+            return JSONResponse(status_code=422, content={"error": "unknown synthetic image"})
+        await state.remember_analysis(analysis_key, page)
+
+    block_count = await state.block_count(page)
+    block_fault = await state.fails("ocr_block", page)
+    await state.entered("ocr", page)
+
+    async def stream():
+        yield json.dumps({
+            "type": "analysis_ready",
+            "analysis_key": analysis_key,
+            "image_w": 800,
+            "image_h": 1200,
+            "regions": block_count,
+        }) + "\n"
+        if not await wait_gate("ocr", page, request):
+            return
+        emitted = 1 if block_fault else block_count
+        for index in range(1, emitted + 1):
+            yield json.dumps({
+                "type": "ocr_block",
+                "ocr_key": ocr_key,
+                "block_id": f"{page}-{index}",
+                "bbox": [80, 80, 240, 120],
+                "src_text": f"{page}:block-{index}",
+            }) + "\n"
+        if block_fault:
+            yield json.dumps({
+                "type": "ocr_block_error",
+                "ocr_key": ocr_key,
+                "block_id": f"{page}-2",
+                "code": "recognizer_failed",
+            }) + "\n"
+            await state.record("ocr", page, "failed")
+        else:
+            await state.record("ocr", page, "completed")
+        yield json.dumps({
+            "type": "image_done",
+            "recognized": emitted,
+            "failed": int(block_fault),
+        }) + "\n"
+
+    return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
+@app.post("/translate-items")
+async def translate_items(body: TranslateItemsBody, request: Request):
+    if body.src_lang not in {"ja", "es"}:
+        return JSONResponse(status_code=422, content={"error": "unsupported src_lang"})
+    if len({item.id for item in body.items}) != len(body.items):
+        return JSONResponse(status_code=422, content={"error": "duplicate input id"})
+    pages = {item.text.split(":", 1)[0] for item in body.items}
+    if len(pages) != 1 or not pages <= PAGES:
+        return JSONResponse(status_code=422, content={"error": "mixed or unknown page"})
+    page = pages.pop()
+
+    await state.entered("translation", page)
+    if not await wait_gate("translation", page, request):
+        return Response(status_code=499)
+    if await state.consume_translation_fault(page):
+        await state.record("translation", page, "failed")
+        return JSONResponse(status_code=502, content={"error": "translation_batch_failed"})
+    await state.record("translation", page, "completed")
+    return {
+        "items": [
+            {"id": item.id, "translation": f"{body.dst_lang}:{item.text}"}
+            for item in body.items
+        ]
+    }
 
 
 @app.post("/__acceptance/reset", dependencies=control_dependencies)
