@@ -44,6 +44,10 @@ class FailConfig(BaseModel):
     translation_batch: set[str] = Field(default_factory=set)
 
 
+class EmptyBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 class AcceptanceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     hold: HoldConfig = Field(default_factory=HoldConfig)
@@ -196,7 +200,7 @@ async def asset(page: str):
 
 
 @app.post("/__acceptance/reset", dependencies=control_dependencies)
-async def reset():
+async def reset(_body: EmptyBody):
     await state.reset()
     return await state.snapshot()
 
@@ -211,7 +215,7 @@ async def configure(config: AcceptanceConfig):
     "/__acceptance/release/{stage}/{page}",
     dependencies=control_dependencies,
 )
-async def release(stage: str, page: str):
+async def release(stage: str, page: str, _body: EmptyBody):
     if stage not in STAGES or page not in PAGES:
         raise HTTPException(status_code=422, detail="unknown stage or page")
     await state.release(stage, page)

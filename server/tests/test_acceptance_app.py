@@ -89,6 +89,17 @@ def test_control_rejects_non_json_unknown_values_and_non_loopback():
         assert remote.post("/__acceptance/reset", json={}).status_code == 403
 
 
+def test_reset_and_release_require_an_empty_json_object():
+    with client() as http:
+        for path in ("/__acceptance/reset", "/__acceptance/release/ocr/B"):
+            assert http.post(path, content=b"").status_code == 415
+            json_headers = {"content-type": "application/json"}
+            assert http.post(path, content=b"", headers=json_headers).status_code == 422
+            assert http.post(path, content=b"{", headers=json_headers).status_code == 422
+            assert http.post(path, json={"unexpected": True}).status_code == 422
+            assert http.post(path, json={}).status_code == 200
+
+
 def test_event_log_is_bounded_and_reset_sets_old_gates():
     runtime = AcceptanceState()
 
