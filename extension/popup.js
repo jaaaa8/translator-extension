@@ -44,24 +44,42 @@ chrome.runtime.sendMessage({ type: "health" }).then((res) => {
   prewarmInitialPage();
 });
 
-const actions = [$("translateLoaded"), $("translateVisible")];
-
-function setActionsDisabled(disabled) {
-  for (const button of actions) button.disabled = disabled;
+async function refreshPageStatus() {
+  const state = await chrome.runtime.sendMessage({ type: "pageStatus" });
+  const value = state || { background: 0, cached: 0, failed: 0 };
+  $("cacheStatus").textContent =
+    `Đang dịch nền: ${value.background} · Đã cache: ${value.cached} · Lỗi: ${value.failed}`;
 }
 
+refreshPageStatus();
+
+let actionSequence = 0;
+
 function translate(scope) {
-  setActionsDisabled(true);
-  $("result").textContent = "đang dịch… (OCR local + 1 call Gemini)";
+  const action = ++actionSequence;
+  const message = {
+    type: "translatePage",
+    scope,
+    srcLang: $("srcLang").value,
+    dstLang: $("dstLang").value,
+  };
+  $("result").textContent = "đang dịch…";
   chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-    chrome.tabs.sendMessage(tab.id, { type: "translatePage", scope }, (res) => {
-      setActionsDisabled(false);
+    if (!tab) return;
+    chrome.tabs.sendMessage(tab.id, message, (res) => {
+      if (action !== actionSequence) return;
       if (chrome.runtime.lastError) {
         $("result").textContent = "không kết nối được trang — F5 trang rồi thử lại";
         return;
       }
-      $("result").textContent =
-        res && res.ok ? `xong: ${res.images} ảnh, ${res.blocks} thoại` : `lỗi: ${res ? res.error : "?"}`;
+      if (res && res.ok && res.cacheHit) {
+        $("result").textContent = "Khôi phục từ cache";
+      } else {
+        $("result").textContent = res && res.ok
+          ? `xong: ${res.images} ảnh, ${res.blocks} thoại, ${res.failed || 0} lỗi`
+          : `lỗi: ${res ? res.error : "?"}`;
+      }
+      void refreshPageStatus();
     });
   });
 }

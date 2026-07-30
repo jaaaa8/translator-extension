@@ -7,19 +7,26 @@ function deferred() {
   return { promise: new Promise((done) => (resolve = done)), resolve };
 }
 
-function popup({ tabs = [{ id: 7 }] } = {}) {
+function popup({ tabs = [{ id: 7 }], pageStatus = { background: 0, cached: 0, failed: 0 } } = {}) {
   const settings = deferred();
   const health = deferred();
   const elements = {};
   const sent = [];
   const queries = [];
   const tabCallbacks = [];
+  const translateCallbacks = [];
   const writes = [];
   let lastErrorReads = 0;
   const $ = (id) =>
     (elements[id] ||= { checked: false, value: "", textContent: "", style: {}, disabled: false });
   const runtime = {
-    sendMessage: (message) => (message.type === "health" ? health.promise : Promise.resolve()),
+    sendMessage: (message) => {
+      if (message.type === "health") return health.promise;
+      if (message.type === "pageStatus") {
+        return Promise.resolve(Array.isArray(pageStatus) ? pageStatus.shift() : pageStatus);
+      }
+      return Promise.resolve();
+    },
   };
   Object.defineProperty(runtime, "lastError", {
     get: () => {
@@ -40,7 +47,8 @@ function popup({ tabs = [{ id: 7 }] } = {}) {
         },
         sendMessage: (id, message, done) => {
           sent.push({ id, message: { ...message } });
-          done();
+          if (message.type === "translatePage") translateCallbacks.push(done);
+          else done();
         },
       },
     },
@@ -53,6 +61,8 @@ function popup({ tabs = [{ id: 7 }] } = {}) {
     lastErrorReads: () => lastErrorReads,
     queries,
     releaseTabs: () => tabCallbacks.splice(0).forEach((done) => done()),
+    replyTranslate: (response) => translateCallbacks.at(-1)(response),
+    replyTranslateAt: (index, response) => translateCallbacks[index](response),
     sent,
     settings,
     writes,
@@ -112,5 +122,46 @@ async function flush() {
   await flush();
   noTab.releaseTabs();
   assert.deepStrictEqual(noTab.sent, []);
+
+  const ready = popup({
+    pageStatus: [
+      { background: 2, cached: 8, failed: 1 },
+      { background: 0, cached: 9, failed: 2 },
+    ],
+  });
+  ready.settings.resolve({ srcLang: "ja", dstLang: "vi" });
+  ready.health.resolve({ ok: true, device: "cpu" });
+  await flush();
+  assert.strictEqual(ready.elements.cacheStatus.textContent, "Đang dịch nền: 2 · Đã cache: 8 · Lỗi: 1");
+  ready.elements.srcLang.value = "es";
+  ready.elements.dstLang.value = "en";
+
+  ready.elements.translateVisible.onclick();
+  ready.elements.srcLang.value = "ja";
+  ready.elements.dstLang.value = "vi";
+  ready.elements.translateLoaded.onclick();
+  assert.strictEqual(ready.elements.translateVisible.disabled, false);
+  assert.strictEqual(ready.elements.translateLoaded.disabled, false);
+  ready.releaseTabs();
+  const translations = ready.sent.filter((row) => row.message.type === "translatePage");
+  assert.deepStrictEqual(translations, [
+    { id: 7, message: { type: "translatePage", scope: "visible", srcLang: "es", dstLang: "en" } },
+    { id: 7, message: { type: "translatePage", scope: "loaded", srcLang: "ja", dstLang: "vi" } },
+  ]);
+  ready.replyTranslateAt(0, { ok: true, images: 1, blocks: 1, failed: 0 });
+  assert.strictEqual(ready.elements.result.textContent, "đang dịch…");
+  ready.replyTranslateAt(1, { ok: true, images: 1, blocks: 4, failed: 0, cacheHit: true });
+  await flush();
+  assert.strictEqual(ready.elements.result.textContent, "Khôi phục từ cache");
+  assert.strictEqual(ready.elements.cacheStatus.textContent, "Đang dịch nền: 0 · Đã cache: 9 · Lỗi: 2");
+
+  const failed = popup();
+  failed.settings.resolve({ srcLang: "ja", dstLang: "vi" });
+  failed.health.resolve({ ok: false });
+  await flush();
+  failed.elements.translateVisible.onclick();
+  failed.releaseTabs();
+  failed.replyTranslate({ ok: true, images: 2, blocks: 5, failed: 3, cacheHit: false });
+  assert.strictEqual(failed.elements.result.textContent, "xong: 2 ảnh, 5 thoại, 3 lỗi");
   console.log("popup.test.js OK");
 })();
