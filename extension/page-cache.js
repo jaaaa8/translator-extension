@@ -8,6 +8,13 @@ const PAGE_FIELDS = [
   "natural_width", "natural_height", "src_lang", "dst_lang", "versions", "state",
   "analysis_known", "ocr_done", "image_w", "image_h", "created_at", "last_error",
 ];
+const JOB_FIELDS = [
+  "job_id", "request_id", "scope", "src_lang", "dst_lang", "state", "waiting_for_health", "created_at", "page_artifact_key",
+];
+const DESCRIPTOR_FIELDS = [
+  "job_id", "request_id", "source_url", "natural_width", "natural_height", "priority", "distance",
+  "src_lang", "dst_lang", "scope", "page_artifact_key",
+];
 
 class CacheFullError extends Error {}
 
@@ -26,11 +33,40 @@ function storedBlock({ block_id, bbox, src_text, trans_text }) {
   return block;
 }
 
+function storedCrop(crop) {
+  if (crop === "full") return crop;
+  if (!crop || Object.getPrototypeOf(crop) !== Object.prototype ||
+    Object.keys(crop).length !== 4 || !["left", "top", "right", "bottom"].every((key) => key in crop) ||
+    !Object.values(crop).every((value) => typeof value === "number" && Number.isFinite(value)) ||
+    crop.left < 0 || crop.top < 0 || crop.right > 1 || crop.bottom > 1 ||
+    crop.left >= crop.right || crop.top >= crop.bottom) {
+    throw new TypeError("crop must be normalized metadata");
+  }
+  return { left: crop.left, top: crop.top, right: crop.right, bottom: crop.bottom };
+}
+
 function storedPage(record, now) {
-  if (record.crop !== undefined && typeof record.crop !== "string") throw new TypeError("crop must be metadata");
   const value = { schema_version: PAGE_SCHEMA, updated_at: now, last_accessed_at: record.last_accessed_at || now };
-  for (const field of PAGE_FIELDS) if (record[field] !== undefined) value[field] = record[field];
+  for (const field of PAGE_FIELDS) if (field !== "crop" && record[field] !== undefined) value[field] = record[field];
+  if (record.crop !== undefined) value.crop = storedCrop(record.crop);
   value.blocks = (record.blocks || []).map(storedBlock);
+  return value;
+}
+
+function storedDescriptor(descriptor) {
+  if (descriptor === undefined) return undefined;
+  if (!descriptor || Object.getPrototypeOf(descriptor) !== Object.prototype) throw new TypeError("descriptor must be metadata");
+  const value = {};
+  for (const field of DESCRIPTOR_FIELDS) if (descriptor[field] !== undefined) value[field] = descriptor[field];
+  if (descriptor.crop !== undefined) value.crop = storedCrop(descriptor.crop);
+  return value;
+}
+
+function storedJob(record) {
+  const value = {};
+  for (const field of JOB_FIELDS) if (record[field] !== undefined) value[field] = record[field];
+  const descriptor = storedDescriptor(record.descriptor);
+  if (descriptor !== undefined) value.descriptor = descriptor;
   return value;
 }
 
@@ -142,7 +178,7 @@ class PageCache {
   }
 
   async putJob(record) {
-    return this._put(jobStorageKey(record.job_id), record);
+    return this._put(jobStorageKey(record.job_id), storedJob(record));
   }
 
   async removeJob(jobId) {

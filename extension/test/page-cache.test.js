@@ -56,7 +56,11 @@ function page(key, state, access, text = "x") {
   const activeOnly = new PageCache(fakeStorage(), { budgetBytes: 800 });
   await activeOnly.putPage(page("active-1", "queued", 1, "a".repeat(120)));
   await activeOnly.putPage(page("active-2", "running", 2, "b".repeat(120)));
-  await assert.rejects(activeOnly.putJob({ job_id: "full", state: "queued", descriptor: "c".repeat(300) }), CacheFullError);
+  await assert.rejects(activeOnly.putJob({
+    job_id: "full",
+    state: "queued",
+    descriptor: { source_url: `https://x/${"c".repeat(300)}`, crop: "full" },
+  }), CacheFullError);
   assert.ok(await activeOnly.getPage("active-1"));
   assert.ok(await activeOnly.getPage("active-2"));
 
@@ -74,6 +78,32 @@ function page(key, state, access, text = "x") {
   assert.deepStrictEqual(saved.blocks, [{ block_id: "b1", bbox: [1, 2, 3, 4], src_text: "hola", trans_text: "xin chao" }]);
   assert.strictEqual(saved.image_bytes, undefined);
   assert.strictEqual(saved.prepared_crop, undefined);
+
+  await assert.rejects(
+    safeCache.putPage({ ...page("image-crop", "complete", 2), crop: "data:image/png;base64,AAAA" }),
+    TypeError
+  );
+  const canonicalCrop = { left: 0.1, top: 0.2, right: 0.8, bottom: 0.9 };
+  await safeCache.putPage({ ...page("canonical-crop", "complete", 3), crop: canonicalCrop });
+  assert.deepStrictEqual((await safeCache.getPage("canonical-crop")).crop, canonicalCrop);
+
+  await safeCache.putJob({
+    job_id: "safe-job",
+    scope: "page",
+    descriptor: { source_url: "https://x/page.jpg", crop: "full", prepared_crop: "data:image/png;base64,AAAA" },
+    image_bytes: new Uint8Array([1, 2, 3]),
+  });
+  const savedJob = safeStorage.rows["mt:job:safe-job"];
+  assert.strictEqual(savedJob.image_bytes, undefined);
+  assert.strictEqual(savedJob.descriptor.prepared_crop, undefined);
+  await assert.rejects(
+    safeCache.putJob({
+      job_id: "bad-job",
+      descriptor: { source_url: "https://x/page.jpg", crop: "data:image/png;base64,AAAA" },
+    }),
+    TypeError
+  );
+  assert.strictEqual(safeStorage.rows["mt:job:bad-job"], undefined);
 
   let tick = 3;
   const lruCache = new PageCache(fakeStorage(), { budgetBytes: 800, now: () => tick });
