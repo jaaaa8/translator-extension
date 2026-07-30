@@ -391,7 +391,7 @@ async function attachDescriptor(request, descriptor, ledger) {
     const analysis = await pageCache.findPage(
       (p) => p.analysis_key === keys.analysisKey && p.analysis_known === true
     );
-    const sibling = await pageCache.findPage((p) => p.ocr_key === keys.ocrKey && p.blocks.some((b) => b.src_text));
+    const sibling = await pageCache.findPage((p) => p.ocr_key === keys.ocrKey && p.ocr_done === true);
     page = createProducer(descriptor, keys).page;
     page.analysis_known = !!analysis; page.ocr_done = sibling?.ocr_done === true;
     if (analysis) { page.image_w = analysis.image_w; page.image_h = analysis.image_h; }

@@ -461,6 +461,40 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     assert.deepStrictEqual(app.server.counts, before);
   });
 
+  await scenario("target change reuses a persisted zero-block OCR completion", async () => {
+    const server = createFakeServer();
+    server.setOcrRows("empty", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "image_done", recognized: 0, failed: 0 },
+    ]);
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const job = app.job("empty-vi-job", "https://x/empty.jpg");
+    const vi = app.connect();
+    vi.receive(app.startScope("empty-vi", "visible", job));
+    const viDone = await app.waitFor("scope_done", vi);
+    assert.deepStrictEqual(
+      { translated: viDone.translated, failed: viDone.failed },
+      { translated: 0, failed: 0 }
+    );
+
+    const before = structuredClone(server.counts);
+    await app.message({
+      type: "prewarmJob",
+      src_lang: "ja",
+      job: app.job("empty-prewarm", "https://x/empty.jpg"),
+    });
+    const en = app.connect();
+    en.receive({ ...app.startScope("empty-en", "visible", app.job("empty-en-job", "https://x/empty.jpg")), dst_lang: "en" });
+    const enDone = await app.waitFor("scope_done", en);
+    assert.deepStrictEqual(server.counts, before);
+    assert.deepStrictEqual(
+      { translated: enDone.translated, failed: enDone.failed, cache_hit: enDone.cache_hit },
+      { translated: 0, failed: 0, cache_hit: false }
+    );
+    assert.deepStrictEqual(structuredClone(app.debug()), { activeTasks: 0, queued: 0, offline: 0, requests: 0, producers: 0 });
+  });
+
   await scenario("detached queued manual work is demoted to background FIFO", async () => {
     const server = createFakeServer();
     server.holdSource("slot-a");
