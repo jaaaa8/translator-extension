@@ -17,6 +17,14 @@ class FakeTranslator:
             raise self.error
         return [f"{dst}:{t}" for t in texts]
 
+    def translate_items(self, items, src, dst):
+        if self.error:
+            raise self.error
+        return [
+            {"id": item["id"], "translation": f"{dst}:{item['text']}"}
+            for item in reversed(items)
+        ]
+
 
 class FakePipeline:
     langs = ["ja", "es"]
@@ -129,3 +137,23 @@ def test_translate_texts_gemini_error_502(monkeypatch):
         "/translate-texts", json={"texts": ["x"], "src_lang": "ja", "target_lang": "vi"}
     )
     assert r.status_code == 502
+
+
+def test_translate_items_ok(monkeypatch):
+    monkeypatch.setattr(main, "_pipeline", FakePipeline())
+    r = TestClient(main.app).post(
+        "/translate-items",
+        json={"items": [{"id": "b1", "text": "hola"}, {"id": "b2", "text": "adios"}], "src_lang": "es"},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"items": [{"id": "b2", "translation": "vi:adios"}, {"id": "b1", "translation": "vi:hola"}]}
+
+
+def test_translate_items_rejects_duplicate_input_id(monkeypatch):
+    monkeypatch.setattr(main, "_pipeline", FakePipeline())
+    r = TestClient(main.app).post(
+        "/translate-items",
+        json={"items": [{"id": "b1", "text": "one"}, {"id": "b1", "text": "two"}], "src_lang": "es"},
+    )
+    assert r.status_code == 422
+    assert r.json() == {"error": "duplicate input id"}

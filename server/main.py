@@ -141,6 +141,37 @@ def translate_texts(body: TranslateTextsBody):
         return JSONResponse(status_code=502, content={"error": f"gemini: {e}"})
 
 
+class TranslateItem(BaseModel):
+    id: str
+    text: str
+
+
+class TranslateItemsBody(BaseModel):
+    items: list[TranslateItem]
+    src_lang: str
+    dst_lang: str = "vi"
+
+
+@app.post("/translate-items")
+def translate_items(body: TranslateItemsBody):
+    if body.src_lang not in LANGS:
+        return JSONResponse(
+            status_code=422,
+            content={"error": f"src_lang khÃ´ng há»— trá»£: {body.src_lang}"},
+        )
+    rows = [item.model_dump() for item in body.items]
+    if len({row["id"] for row in rows}) != len(rows):
+        return JSONResponse(status_code=422, content={"error": "duplicate input id"})
+    try:
+        return {
+            "items": get_pipeline().translator.translate_items(
+                rows, body.src_lang, body.dst_lang
+            )
+        }
+    except TranslateError as error:
+        return JSONResponse(status_code=502, content={"error": f"gemini: {error}"})
+
+
 @app.post("/translate")
 def translate(
     image: UploadFile = File(...),

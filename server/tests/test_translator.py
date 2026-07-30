@@ -204,3 +204,37 @@ def test_missing_api_key_raises(monkeypatch):
     monkeypatch.setattr(tr.config, "GEMINI_API_KEY", "")
     with pytest.raises(tr.TranslateError):
         tr.GeminiTranslator()
+
+
+def test_translate_items_accepts_reordered_exact_ids(monkeypatch):
+    reply = json.dumps([
+        {"id": "b2", "translation": "hai"},
+        {"id": "b1", "translation": "mot"},
+    ])
+    translator = make(monkeypatch, [reply])
+    assert translator.translate_items(
+        [{"id": "b1", "text": "one"}, {"id": "b2", "text": "two"}],
+        "en",
+        "vi",
+    ) == [
+        {"id": "b1", "translation": "mot"},
+        {"id": "b2", "translation": "hai"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        [{"id": "b1", "translation": "x"}],
+        [{"id": "b1", "translation": "x"}, {"id": "foreign", "translation": "y"}],
+        [{"id": "b1", "translation": "x"}, {"id": "b1", "translation": "y"}],
+    ],
+)
+def test_translate_items_rejects_missing_foreign_or_duplicate_ids(monkeypatch, reply):
+    translator = make(monkeypatch, [json.dumps(reply), json.dumps(reply)])
+    with pytest.raises(tr.TranslateError):
+        translator.translate_items(
+            [{"id": "b1", "text": "one"}, {"id": "b2", "text": "two"}],
+            "en",
+            "vi",
+        )
