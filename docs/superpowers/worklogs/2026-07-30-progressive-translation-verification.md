@@ -5,6 +5,8 @@
 - Task 10 base/implementation: `ec3df53..50c3b81`.
 - Fix Round 1: the commit containing this worklog, whose parent is `50c3b81`
   (reproduce with `git diff 50c3b81 HEAD`).
+- Fix Round 2: the commit containing this worklog, whose parent is `6f00f49`
+  (reproduce with `git diff 6f00f49 HEAD`).
 - Focused cross-layer test: 1/1 passed.
 - Exact Node suite: 8/8 files passed.
 - Python: 69 passed, 3 dependency/deprecation warnings, 0 failed.
@@ -21,6 +23,10 @@
   reads during live work, `scope_done` monotonic metrics, first-overlay merge,
   actual 100-sample eviction, and absence of URL/OCR/translation text from
   `benchmarkSummary`.
+- Warm exact-cache replay uses asynchronous Port delivery; its late
+  `render_metric` updates the matching retained sample. After eviction, a late
+  metric for the old request is ignored, proving correlation state is bounded
+  with the same 100-sample lifetime.
 
 ## Browser acceptance
 

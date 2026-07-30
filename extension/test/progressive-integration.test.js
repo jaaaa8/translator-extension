@@ -200,12 +200,14 @@ function createIntegration({ server = createServer(), session = storageSession()
     text: () => rendered.flatMap((node) => node.children).filter((node) => !node.removed).map((node) => node.textContent).join(" "),
     summary: () => new Promise((resolve) => runtimeMessages.emit({ type: "benchmarkSummary" }, {}, resolve)),
     pageStatus: () => new Promise((resolve) => runtimeMessages.emit({ type: "pageStatus" }, {}, resolve)),
+    sendRenderMetric(requestId, value) { pair.content.postMessage({ type: "render_metric", request_id: requestId, first_overlay_ms: value }); },
   };
 }
 
 (async () => {
   const app = createIntegration();
   const result = await app.click();
+  const coldRequestId = app.trace.find(([side, event]) => side === "content" && event.type === "start_scope")[1].request_id;
   assert.strictEqual(app.text(), "A translated");
   assert.ok(Number.isFinite(result.first_overlay_ms));
   assert.strictEqual(result.firstOverlayMs, undefined);
@@ -230,7 +232,14 @@ function createIntegration({ server = createServer(), session = storageSession()
   assert.strictEqual(app.text(), "A translated");
 
   for (let index = 0; index < 100; index++) await app.click();
-  assert.strictEqual((await app.summary()).counters.translation_calls, 0);
+  const warmSummary = await app.summary();
+  assert.strictEqual(warmSummary.counters.translation_calls, 0);
+  assert.ok(Number.isFinite(warmSummary.first_overlay_ms.p50));
+  assert.ok(Number.isFinite(warmSummary.first_overlay_ms.p95));
+  app.sendRenderMetric(coldRequestId, 999999);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepStrictEqual(await app.summary(), warmSummary);
 
   app.navigate("A", { left: 0, top: -200, right: 500, bottom: 600, width: 500, height: 800 });
   await app.click();

@@ -5,6 +5,7 @@ const MAX_CONCURRENT = 2;
 const MAX_OUTSTANDING_PER_REQUEST = 4;
 const PRIORITY = Object.freeze({ foreground: 0, background: 1, prewarm: 2 });
 const metricSamples = [];
+const metricSamplesByRequest = new Map();
 
 function now() { return typeof performance === "undefined" ? Date.now() : performance.now(); }
 function mark(producer, name) { producer.timings[name] ??= now(); }
@@ -20,9 +21,13 @@ function producerMetrics(producer) {
     total_ms: Math.round(now() - producer.timings.accepted),
   };
 }
-function recordMetrics(sample) {
+function recordMetrics(requestId, sample) {
   metricSamples.push(sample);
-  if (metricSamples.length > 100) metricSamples.shift();
+  metricSamplesByRequest.set(requestId, sample);
+  if (metricSamples.length > 100) {
+    const removed = metricSamples.shift();
+    for (const [id, row] of metricSamplesByRequest) if (row === removed) metricSamplesByRequest.delete(id);
+  }
 }
 function percentile(values, ratio) {
   if (!values.length) return null;
@@ -455,7 +460,7 @@ function scopeMetrics(request) {
 }
 function scopeDone(request) {
   const metrics = scopeMetrics(request);
-  recordMetrics({ ...metrics, first_overlay_ms: request.firstOverlayMs, cancel_latency_ms: request.cancelLatencyMs, ...request.counters });
+  recordMetrics(request.requestId, { ...metrics, first_overlay_ms: request.firstOverlayMs, cancel_latency_ms: request.cancelLatencyMs, ...request.counters });
   request.port?.postMessage({ type: "scope_done", request_id: request.requestId, images: request.done.size, translated: request.translated, failed: request.failed, cache_hit: request.done.size > 0 && request.hits === request.done.size, metrics });
   requests.delete(request.requestId);
 }
@@ -771,7 +776,7 @@ function releaseRequest(requestId, replacement = null) {
     for (const key of Object.keys(counters)) counters[key] += producer.counters[key] || 0;
   }
   request.cancelLatencyMs = Math.round(now() - cancelStartedAt);
-  recordMetrics({ ...scopeMetrics(request), first_overlay_ms: request.firstOverlayMs, cancel_latency_ms: request.cancelLatencyMs, ...counters });
+  recordMetrics(request.requestId, { ...scopeMetrics(request), first_overlay_ms: request.firstOverlayMs, cancel_latency_ms: request.cancelLatencyMs, ...counters });
   requests.delete(requestId);
 }
 function disconnectPort(port) { ports.delete(port); for (const request of requests.values()) if (request.port === port) releaseRequest(request.requestId); }
@@ -800,7 +805,12 @@ if (chrome.runtime.onConnect && chrome.runtime.onConnect.addListener) {
       if (message.type === "cancel_request") releaseRequest(message.request_id);
       if (message.type === "render_metric") {
         const request = requests.get(message.request_id);
-        if (request && Number.isFinite(message.first_overlay_ms)) request.firstOverlayMs ??= message.first_overlay_ms;
+        if (!Number.isFinite(message.first_overlay_ms)) return;
+        if (request) request.firstOverlayMs ??= message.first_overlay_ms;
+        else {
+          const sample = metricSamplesByRequest.get(message.request_id);
+          if (sample) sample.first_overlay_ms ??= message.first_overlay_ms;
+        }
       }
     });
     port.onDisconnect.addListener(() => disconnectPort(port));
