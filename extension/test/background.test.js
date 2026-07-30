@@ -31,6 +31,7 @@ class FakeFormData {
 const context = {
   Promise,
   JSON,
+  importScripts: () => {},
   FormData: FakeFormData,
   AbortSignal: { timeout: (ms) => (timeouts.push(ms), { ms }) },
   fetch: async (url, options) => {
