@@ -2,7 +2,7 @@
 
 **Ngày:** 2026-07-30 | **Nhánh:** `feat/v2`
 
-**Trạng thái:** thiết kế đã được người dùng duyệt theo từng phần ngày 2026-07-30
+**Trạng thái:** thiết kế và bổ sung session page cache đã được người dùng duyệt theo từng phần ngày 2026-07-30
 
 ## 1. Kết quả cuối cùng đối với người dùng
 
@@ -16,6 +16,8 @@ Spec này biến thao tác **Dịch trang đang xem** và **Dịch webtoon đã 
 6. Rời viewport không làm mất overlay. Khi ảnh thực sự đổi nguồn, phần hiển thị cũ được tách để không phủ nhầm ảnh, còn dữ liệu vẫn được giữ trong cache.
 7. Quay lại nguồn ảnh cũ rồi bấm **Dịch** có thể khôi phục kết quả từ cache còn hiệu lực.
 8. Lỗi một vùng, một ảnh hoặc một batch dịch không làm mất kết quả hợp lệ của phần còn lại.
+9. Với **Dịch trang đang xem**, lật sang trang kế tiếp không hủy trang cũ: job cũ tiếp tục nền và lưu page artifact trong phiên Chrome.
+10. Quay lại một trang đã dịch trong cùng phiên Chrome rồi bấm **Dịch** sẽ dựng lại overlay mà không gọi fetch, detector, OCR hoặc Gemini khi exact page artifact đã hoàn tất.
 
 Người dùng vẫn chủ động bắt đầu bằng nút **Dịch**. P0 không tự dịch ảnh mới khi lật trang hoặc khi trang lazy-load.
 
@@ -55,6 +57,8 @@ P0 là một vertical slice end-to-end gồm:
 - Gemini micro-batch theo ID;
 - upsert overlay theo từng block;
 - cancellation theo consumer, không xóa artifact dùng chung;
+- background-owned job cho scope `visible` và session page cache bằng `chrome.storage.session`;
+- rehydrate job `visible` chưa hoàn tất sau service-worker restart trong cùng phiên Chrome;
 - metric TTFT, total time và correctness.
 
 P0 không gồm:
@@ -62,12 +66,12 @@ P0 không gồm:
 - thay detector hoặc recognizer;
 - PaddleOCR GPU;
 - DeepL draft hoặc Gemini refine pass;
-- IndexedDB, `chrome.storage.session` hay cache qua browser restart;
+- IndexedDB hoặc cache qua browser restart;
 - Shadow DOM, tiling, ONNX/WebGPU hoặc browser-local OCR;
 - reading-order heuristic mới;
 - WebSocket hay server-side task registry;
 - tự khám phá và tự dịch ảnh mới;
-- resume một request dở dang sau khi server hoặc service worker restart.
+- tiếp tục chính in-flight server task sau browser/local-server restart; khi server khỏe lại, background chỉ được phép khởi chạy lại stage còn thiếu từ page artifact.
 
 Các API `/ocr`, `/translate-texts` và `/translate` hiện tại được giữ để tương thích và smoke test.
 
@@ -80,16 +84,19 @@ Một lần bấm **Dịch** tạo một `requestId`. Request chỉ là **quyề
 | Phân tích ảnh | kích thước ảnh, crop viewport, detector regions, dedupe, bbox gốc và crop đã upscale/thêm viền | đổi recognizer, source language hoặc target language |
 | OCR | `blockId`, bbox và `srcText` của một recognizer cụ thể | đổi target language hoặc bấm lại cùng cấu hình |
 | Bản dịch | `transText` cho đúng block, target, model, prompt và policy version | quay lại cùng ảnh/cấu hình hoặc bấm lại |
+| Page artifact | descriptor job, dimensions, block OCR/bản dịch, trạng thái và LRU metadata trong `chrome.storage.session` | lật nhiều manga page rồi quay lại trong cùng phiên Chrome |
 
 “Lượt tải ảnh đang chạy” chỉ là fetch blob ảnh từ URL bởi service worker trước khi upload sang localhost. Nó không phải thao tác lật trang của browser.
 
-Khi có request mới, coordinator phải **đăng ký nhu cầu của request mới trước**, rồi mới gỡ nhu cầu của request cũ. Nhờ vậy:
+Khi có request mới, coordinator phải **đăng ký nhu cầu của request mới trước**, rồi mới gỡ nhu cầu render của request cũ. Nhờ vậy:
 
 - đổi `vi` sang `en` vẫn giữ nguyên fetch, phân tích và OCR đang chạy;
 - đổi Manga OCR sang PaddleOCR vẫn giữ fetch và phân tích đang chạy;
 - chỉ công việc không còn request nào cần mới được cân nhắc hủy.
 
-Cancel không bao giờ xóa artifact đã hoàn thành. Artifact chỉ mất do LRU eviction, đổi version, xóa cache chủ động hoặc process kết thúc.
+Riêng manual job scope `visible`, background gắn một cache-consumer `persistUntilDone` ngay khi nhận job. Lật trang chỉ gỡ render subscriber; cache-consumer vẫn giữ producer chạy tới trạng thái terminal. Scope `loaded` và prewarm không có quyền giữ này và tiếp tục dùng cancellation theo consumer.
+
+Cancel không bao giờ xóa artifact đã hoàn thành. Artifact chỉ mất do LRU eviction, đổi version, cache session bị xóa hoặc process kết thúc.
 
 ## 5. Identity và cache key
 
@@ -143,9 +150,14 @@ overlayKey = hash(
   + promptVersion
   + translationPolicyVersion
 )
+
+pageArtifactKey = hash(
+  overlayKey
+  + pageCacheSchemaVersion
+)
 ```
 
-`batchContextHash` là hash của danh sách `{blockId, srcText}` theo đúng thứ tự batch đã gửi. Nó ngăn một bản dịch phụ thuộc ngữ cảnh của batch A bị dùng như thể đến từ batch B. `overlayKey` trỏ tới artifact hiển thị hoàn chỉnh hoặc một phần của đúng source/cấu hình, nên quay lại trang vẫn replay được kết quả đã thấy mà không phụ thuộc batch được chia lại ra sao.
+`batchContextHash` là hash của danh sách `{blockId, srcText}` theo đúng thứ tự batch đã gửi. Nó ngăn một bản dịch phụ thuộc ngữ cảnh của batch A bị dùng như thể đến từ batch B. `overlayKey` trỏ tới artifact hiển thị hoàn chỉnh hoặc một phần của đúng source/cấu hình. `pageArtifactKey` thêm schema version để record session cũ không được đọc bằng schema mới.
 
 `canonicalCrop` tiếp tục dùng quy tắc hiện tại: crop normalized làm tròn sáu chữ số; crop phủ toàn ảnh được canonicalize thành `full`.
 
@@ -155,14 +167,14 @@ URL nguồn chỉ xuất hiện trong input tạo hash, không ghi nguyên URL c
 
 ### 5.3 Single-flight
 
-Mỗi `analysisKey`, `ocrKey` và `translationKey` có tối đa một producer đang chạy. Mọi request cần exact key đó trở thành consumer của cùng producer. Khác crop, model hoặc version luôn tạo miss đúng.
+Mỗi `analysisKey`, `ocrKey`, `translationKey` và `pageArtifactKey` có tối đa một producer đang chạy. Mọi request cần exact key đó trở thành consumer của cùng producer. Khác crop, model hoặc version luôn tạo miss đúng.
 
 ## 6. Kiến trúc mục tiêu
 
 ```text
 Popup
   -> gửi action + scope + language snapshot
-  -> đọc progress; không sở hữu vòng đời request
+  -> đọc progress + số trang nền/cache/lỗi; không sở hữu vòng đời request
 
 Content script
   -> tạo requestId và candidate jobs
@@ -176,9 +188,11 @@ chrome.runtime.Port
 Service worker
   -> coordinator theo stage key + consumer set
   -> priority queue và AbortController
+  -> sở hữu manual job visible sau khi content disconnect
+  -> job ledger + page artifact trong chrome.storage.session
   -> fetch ảnh cross-origin khi analysis miss
   -> bridge NDJSON từ localhost
-  -> giữ OCR metadata và translation cache trong RAM
+  -> giữ RAM cache làm hot layer
 
 Local server
   -> analysis cache: decode/crop/detect/dedupe/prepare
@@ -194,12 +208,14 @@ Content overlay
 
 Popup đóng không hủy request vì content và service worker sở hữu vòng đời. Khi popup mở lại, nó hỏi trạng thái hiện hành thay vì khởi tạo request mới.
 
+Full document navigation hoặc thay DOM image chỉ tách render subscriber. Manual job `visible` đã được background chấp nhận vẫn chạy nhờ cache-consumer. Khi service worker khởi động lại trong cùng phiên Chrome, nó đọc job ledger, đổi trạng thái `running` cũ thành `queued` và tiếp tục phần chưa có artifact.
+
 ## 7. Data flow
 
 ### 7.1 Cold path
 
 1. Người dùng bấm một trong hai nút Dịch.
-2. Content snapshot `scope`, `srcLang`, `dstLang`, tạo `requestId` và candidate jobs như workflow hiện tại.
+2. Content snapshot `scope`, `srcLang`, `dstLang`, tạo `requestId` và candidate jobs như workflow hiện tại. Với `visible`, background persist descriptor trước khi trả event `page_job_accepted`.
 3. `visible` giữ `currentSrc` và viewport crop; `loaded` giữ `bestSource` và full image.
 4. Scheduler sort ảnh đang thấy trước, sau đó theo khoảng cách tới viewport. Tối đa bốn job outstanding ở content; background giữ concurrency hiện tại là hai cho tới khi benchmark chứng minh mức khác tốt hơn.
 5. Service worker kiểm tra artifact cache từ translation trở ngược về OCR và analysis.
@@ -207,8 +223,9 @@ Popup đóng không hủy request vì content và service worker sở hữu vòn
 7. Server decode, crop, detect, dedupe và chuẩn bị crop. `analysis_ready` được phát sau khi artifact này đã vào cache.
 8. Server nhận dạng tuần tự. Sau mỗi `engine.read()`, nó cache block thành công rồi phát `ocr_block`.
 9. Content gom block theo priority. Batch đầu flush khi đủ ba block hoặc 250 ms sau block đầu tiên; các batch sau flush khi đủ tám block, sau 500 ms, hoặc khi job/scope hết block.
-10. Service worker gọi endpoint structured translation. Sau khi validate exact ID set, từng translation được cache và phát về content.
-11. Content chạy stale guards rồi upsert đúng bubble. `scope_done` kết thúc progress, nhưng overlay đầu tiên đã xuất hiện trước đó.
+10. Service worker gọi endpoint structured translation. Sau khi validate exact ID set, từng translation được ghi vào RAM cache và page artifact session.
+11. Nếu render subscriber còn hợp lệ, background phát translation về content; nếu trang đã lật, nó chỉ tiếp tục cập nhật cache.
+12. Content chạy stale guards rồi upsert đúng bubble. `scope_done` kết thúc progress, nhưng overlay đầu tiên đã xuất hiện trước đó.
 
 Hai timeout flush là giới hạn tối đa tính từ block pending đầu tiên; timer không trì hoãn batch đã đạt số lượng. Đây là policy P0 và có `translationPolicyVersion` để thay đổi sau benchmark mà không dùng nhầm cache cũ.
 
@@ -241,17 +258,41 @@ Không fetch, decode, detect, dedupe hoặc chuẩn bị crop lại khi analysis
 
 ### 7.4 Đổi trở lại cấu hình cũ
 
-Nếu OCR và translation artifact cũ chưa bị LRU eviction hoặc process restart, content replay các event cache và render lại mà không chạy inference hoặc gọi cloud.
+Nếu OCR và translation artifact cũ chưa bị LRU eviction, content replay các event cache và render lại mà không chạy inference hoặc gọi cloud. Exact page artifact trong `chrome.storage.session` vẫn dùng được sau page navigation và service-worker restart của cùng phiên Chrome.
+
+### 7.5 Lật liên tục nhiều single page
+
+1. Job A được background persist và phát `page_job_accepted`.
+2. Người dùng lật sang B; subscriber A disconnect nhưng cache-consumer A còn sống.
+3. Job B vào hàng foreground; A chuyển thành background FIFO; prewarm luôn đứng sau cả hai.
+4. Mỗi OCR/translation batch hợp lệ của A được flush vào page artifact dù A không còn DOM để render.
+5. Quay lại A rồi bấm **Dịch**:
+   - `complete`: replay toàn bộ overlay, không có network/inference/cloud call;
+   - `partial`: replay block đã có và chỉ tiếp tục phần thiếu;
+   - `queued/running`: replay block đã có và gắn subscriber mới vào producer hiện hành.
+
+Cache unit P0 là exact `source + canonicalCrop + configuration`. Viewport crop khác là artifact khác; P0 không hợp nhất nhiều crop của cùng source.
 
 ## 8. Cancellation và stale work
 
-Coordinator giữ consumer set cho từng stage producer. Một thao tác mới chỉ bỏ consumer của request cũ sau khi đã gắn request mới vào các exact-key producer cần tái sử dụng.
+Coordinator giữ consumer set cho từng stage producer. Một thao tác mới chỉ bỏ render consumer của request cũ sau khi đã gắn request mới vào các exact-key producer cần tái sử dụng.
 
-Thao tác mới supersede request hiện hành của **cùng tab** ngay cả khi không tìm được candidate mới. Nó không gỡ consumer thuộc tab khác, prewarm đang được request tay dùng chung, hoặc producer có consumer hợp lệ khác.
+Consumer policy theo scope:
+
+| Loại công việc | Khi DOM/popup disconnect | Khi request mới bắt đầu |
+|---|---|---|
+| manual `visible` khác source | gỡ render subscriber; giữ `persistUntilDone` cache-consumer | job cũ tiếp tục background |
+| manual cùng source + exact config | gắn lại subscriber | join producer/page artifact cũ |
+| manual cùng source + target mới | không render target cũ | giữ analysis/OCR; bỏ translation batch target cũ chưa gửi |
+| manual cùng source + recognizer mới | không render recognizer cũ | giữ analysis; recognizer cũ dừng sau block hiện tại nếu không còn consumer khác |
+| `loaded` webtoon | không có cache-consumer giữ toàn scope | supersede/cancel stale work như thiết kế gốc |
+| prewarm | không có cache-consumer | hủy đầu tiên khi cần tài nguyên |
+
+Một thao tác mới vẫn supersede render request hiện hành của cùng DOM image ngay cả khi không tìm được candidate mới. Nó không gỡ producer manual `visible` của source khác đã được chấp nhận, consumer thuộc tab khác, hoặc exact-key producer hợp lệ.
 
 | Trạng thái công việc | Không còn consumer | Request mới vẫn cần exact key |
 |---|---|---|
-| queued | xóa khỏi queue | giữ nguyên vị trí hoặc tăng priority |
+| queued | xóa khỏi queue nếu không có `persistUntilDone` | giữ nguyên vị trí hoặc tăng priority |
 | fetch blob | `AbortController.abort()` | tiếp tục cùng fetch, không tải lần hai |
 | upload/NDJSON request | abort network nếu không còn giá trị | giữ stream và chuyển/replay event cho request mới |
 | analysis đang detect/prep | để stage nguyên tử hiện tại hoàn tất và cache, không chạy OCR tiếp | tiếp tục và dùng chung artifact |
@@ -325,8 +366,10 @@ Các event hiển thị tối thiểu:
 
 ```json
 {"type":"progress","request_id":"r1","stage":"ocr","done":4,"total":12}
+{"type":"page_job_accepted","request_id":"r1","page_artifact_key":"p1","state":"queued"}
 {"type":"translation","request_id":"r1","job_id":"j1","block_id":"b1","trans_text":"..."}
 {"type":"block_error","request_id":"r1","job_id":"j1","block_id":"b2","stage":"ocr"}
+{"type":"page_status","background":2,"cached":8,"failed":1}
 {"type":"scope_done","request_id":"r1","images":3,"translated":30,"failed":1}
 ```
 
@@ -334,28 +377,74 @@ Event được xử lý idempotent. Nhận lại cùng translation cho cùng `bl
 
 ## 10. Cache và vòng đời
 
-P0 chỉ dùng cache session trong RAM:
+P0 có ba lớp cache, mỗi lớp giữ đúng dữ liệu cần thiết:
 
-- server analysis cache: LRU tối đa 32 analysis artifact và 128 MiB prepared crops, chạm giới hạn nào trước thì evict LRU;
-- server partial OCR cache: LRU tối đa 256 `ocrKey` records;
-- service worker metadata/OCR cache: LRU tối đa 256 image records;
-- service worker translation cache: LRU tối đa 2.048 block records.
+- `chrome.storage.session`: job ledger và page artifact cho manual scope `visible`;
+- service-worker RAM: hot metadata/OCR/translation maps và in-flight single-flight;
+- local-server RAM: analysis/prepared crops và partial OCR cache.
 
-Không cache full image bytes sau khi analysis hoàn tất. Không có settings mới cho các giới hạn này trong P0. Browser/server restart có thể làm cache mất; đó là cache miss hợp lệ, không phải correctness failure.
+Giới hạn:
 
-Version đổi luôn tạo key mới. Cancel, rời viewport, đổi ngôn ngữ hoặc đổi nguồn DOM không xóa artifact. P0 chưa thêm nút clear cache vì toàn bộ cache tự mất khi session/process kết thúc.
+- session page cache có soft budget 8 MiB dưới quota 10 MiB của Chrome;
+- server analysis cache tối đa 32 artifact và 128 MiB prepared crops, chạm giới hạn nào trước thì evict LRU;
+- server partial OCR cache tối đa 256 `ocrKey` records;
+- service-worker hot OCR cache tối đa 256 image records;
+- service-worker hot translation cache tối đa 2.048 block records.
+
+Một page record tối thiểu:
+
+```json
+{
+  "schema_version":"page-v1",
+  "page_artifact_key":"p1",
+  "source_url":"https://...",
+  "crop":"full",
+  "src_lang":"ja",
+  "dst_lang":"vi",
+  "versions":{"detector":"...","recognizer":"...","translator":"...","prompt":"...","policy":"..."},
+  "state":"queued|running|partial|complete|failed",
+  "image_w":1200,
+  "image_h":1800,
+  "blocks":[{"block_id":"b1","bbox":[1,2,3,4],"src_text":"...","trans_text":"...","state":"complete"}],
+  "created_at":0,
+  "updated_at":0,
+  "last_accessed_at":0,
+  "last_error":null
+}
+```
+
+Background giữ quyền truy cập mặc định của `storage.session`; không expose cache cho content script. Canonical source URL phải được lưu để rehydrate/fetch lại nhưng không được ghi nguyên query nhạy cảm vào log.
+
+Write policy:
+
+1. Persist job descriptor trước khi phát `page_job_accepted`.
+2. Flush block OCR/bản dịch sau mỗi validated batch và khi state đổi.
+3. Cache write không chặn render hiện hành; lỗi write đi qua policy quota bên dưới.
+4. Không lưu full image bytes hoặc prepared crop trong Chrome storage.
+
+Eviction policy khi vượt soft budget:
+
+1. xóa record sai schema/version;
+2. xóa page `complete` ít được dùng nhất;
+3. xóa terminal `partial/failed` ít được dùng nhất;
+4. không xóa `queued/running`;
+5. nếu vẫn không đủ chỗ, từ chối nhận job mới với lỗi rõ ràng.
+
+Khi service worker khởi động lại trong cùng phiên Chrome, mọi record `running` được chuyển về `queued`, block đã persist được replay và chỉ stage thiếu được chạy lại. Nếu local server đã restart, server cache miss có thể buộc fetch/detect/prep lại; correctness không thay đổi.
+
+Version đổi luôn tạo key mới. Cancel, rời viewport, đổi ngôn ngữ hoặc đổi nguồn DOM không xóa page artifact. Browser restart, disable/reload/update extension làm `storage.session` mất đúng thiết kế. P0 chưa thêm nút clear cache hoặc trang quản lý cache.
 
 ## 11. Chính sách overlay và lật trang
 
 Ba trạng thái phải được phân biệt:
 
 1. **Ảnh chỉ rời viewport:** không gỡ overlay, không cancel và không xóa cache. Overlay cuộn cùng ảnh; khi quay lại vẫn còn.
-2. **DOM image đổi `src`/`currentSrc`:** tách hoặc ẩn overlay cũ ngay để không phủ chữ trang trước lên ảnh mới; giữ artifact trong cache. Không tự dịch source mới.
+2. **DOM image đổi `src`/`currentSrc`:** tách hoặc ẩn overlay cũ ngay để không phủ chữ trang trước lên ảnh mới; giữ artifact trong cache. Manual job `visible` đã được chấp nhận tiếp tục nền; không tự dịch source mới.
 3. **DOM image bị xóa:** xóa node overlay để tránh leak, nhưng vẫn giữ artifact theo LRU.
 
 Khi người dùng bấm **Dịch** trên source hiện tại:
 
-- exact `overlayKey` hit: gắn/replay overlay từ cache;
+- exact `pageArtifactKey`/`overlayKey` hit: gắn/replay overlay từ session hoặc hot cache;
 - translation hit nhưng overlay node không còn: dựng lại node từ artifact;
 - cache thiếu stage nào: chỉ chạy từ stage thiếu đó.
 
@@ -367,7 +456,8 @@ Quay về source cũ không tự làm overlay xuất hiện. Người dùng bấ
 
 | Lỗi | Hành vi mục tiêu |
 |---|---|
-| server offline hoặc fetch ảnh lỗi | báo trạng thái rõ; giữ overlay/cache hiện có; lần bấm sau retry |
+| server offline | giữ job `queued`, không retry vòng lặp; chạy lại khi health thành công hoặc người dùng bấm Dịch |
+| fetch ảnh lỗi/URL hết hạn | page `failed` hoặc `partial`; quay lại source hiện hành rồi bấm Dịch để retry |
 | decode/validation/detector lỗi | kết thúc ảnh đó vì chưa có analysis artifact; ảnh khác tiếp tục |
 | một recognizer block lỗi | phát `ocr_block_error`, tiếp tục block khác; chỉ block lỗi retry |
 | một ảnh lỗi | scope và ảnh khác tiếp tục |
@@ -375,8 +465,12 @@ Quay về source cũ không tự làm overlay xuất hiện. Người dùng bấ
 | response Gemini sai ID | reject toàn batch response; không gắn theo array index |
 | result về muộn | cache đúng key nếu hợp lệ; stale guards chặn render |
 | popup đóng | request tiếp tục; mở lại đọc progress hiện tại |
-| Port/service worker disconnect | giữ overlay đã render, đánh dấu phần dở dang retryable; không resume protocol phức tạp |
-| cache eviction/server restart | tính lại từ stage bị miss |
+| content Port disconnect vì lật single page | gỡ render subscriber; `visible` job tiếp tục nhờ cache-consumer |
+| service worker restart trong cùng Chrome session | rehydrate `queued/running`, replay persisted blocks và tiếp tục stage thiếu |
+| Gemini đang bay khi worker chết | có thể gọi lại một lần sau resume; ID/stale guards vẫn ngăn render trùng/sai |
+| `storage.session` quota/write lỗi | evict theo policy rồi retry một lần; nếu vẫn lỗi, render hiện tại, giữ state xử lý và đặt `last_error=cache_failed` |
+| server cache eviction/restart | tính lại từ stage bị miss; page artifact hợp lệ vẫn được replay |
+| browser restart | session page cache và job ledger bị xóa |
 
 Không có lỗi cục bộ nào được phép xóa artifact hợp lệ của block/ảnh khác.
 
@@ -389,6 +483,10 @@ Popup chỉ cần trạng thái ngắn:
 - `Đang chuẩn bị ảnh x/y`;
 - `Đang nhận dạng vùng a/b`;
 - `Đang dịch vùng c/b`;
+- `Đang dịch nền: n trang`;
+- `Đã cache: n trang`;
+- `Lỗi: n trang`;
+- exact hit: `Khôi phục từ cache`;
 - `Hoàn tất: n vùng, m lỗi`;
 - lỗi có hành động **Thử lại** bằng chính nút Dịch.
 
@@ -415,7 +513,7 @@ Các con số sau là pass/fail target, không phải khẳng định code hiệ
 ### 14.3 Race và cancellation
 
 - Request mới không nhận translation của request cũ.
-- Tất cả queued work không còn consumer bị loại.
+- Tất cả queued work không còn consumer bị loại, trừ manual `visible` còn `persistUntilDone` cache-consumer.
 - Fetch không còn consumer bị abort.
 - `engine.read()` stale hiện tại được phép hoàn tất một block nhưng không bắt đầu block kế tiếp.
 - Cloud call đã gửi có thể hoàn tất/cache nhưng không render stale.
@@ -428,6 +526,18 @@ Các con số sau là pass/fail target, không phải khẳng định code hiệ
 - Artifact nguồn cũ vẫn còn và được khôi phục khi quay lại rồi bấm Dịch, nếu cache chưa evict.
 - DOM image bị xóa không để lại overlay node mồ côi.
 
+### 14.5 Session page cache
+
+- Bấm Dịch A rồi lật sang B trước khi A xong: A đạt terminal state và không có block A render trên B.
+- Quay lại exact A rồi bấm Dịch tạo **0 fetch, 0 detector, 0 recognizer và 0 Gemini call** khi page artifact `complete` còn sống.
+- Page `partial` replay ngay block đã có và chỉ retry phần thiếu.
+- Service-worker restart rehydrate job trong cùng Chrome session mà không tạo duplicate block/overlay.
+- Foreground page chạy trước detached background page; background page chạy trước prewarm.
+- Vượt 8 MiB chỉ evict terminal LRU; không evict `queued/running`.
+- Không đủ chỗ cho job mới trả lỗi rõ; không âm thầm nhận rồi bỏ.
+- Browser restart xóa session cache đúng thiết kế.
+- Policy này không thay đổi cancellation của scope `loaded`.
+
 ## 15. Chiến lược kiểm thử
 
 ### 15.1 Extension unit tests
@@ -437,6 +547,10 @@ Các con số sau là pass/fail target, không phải khẳng định code hiệ
 - atomic replace: đăng ký request mới trước khi release request cũ;
 - priority queue, bounded outstanding và prewarm priority thấp;
 - cancel matrix cho queued/fetch/shared producer;
+- scope policy: `visible` giữ cache-consumer, `loaded` và prewarm không giữ;
+- session page record schema, state transition và exact-key lookup;
+- session write/rehydrate qua service-worker restart giả lập;
+- 8 MiB LRU eviction không xóa `queued/running` và từ chối rõ khi hết chỗ;
 - NDJSON parser với một dòng bị chia qua nhiều network chunk;
 - Port event reorder/duplicate/stale;
 - upsert một node theo `blockId`;
@@ -460,7 +574,9 @@ Các con số sau là pass/fail target, không phải khẳng định code hiệ
 - ảnh gần viewport hoàn tất trước ảnh xa;
 - bấm dịch hai lần khi fetch/OCR/Gemini đang chạy;
 - đóng/mở popup giữa request;
-- lật sang source mới, quay lại source cũ và bấm Dịch;
+- bấm Dịch A, lật sang B trước khi A hoàn tất, quay lại A và bấm Dịch;
+- giả lập content Port disconnect và service-worker restart giữa job `visible`;
+- spy xác nhận exact page hit không gọi fetch/OCR/Gemini;
 - một block, một ảnh và một batch dịch lần lượt bị inject lỗi;
 - chạy cả `visible` crop và `loaded` full image.
 
@@ -487,7 +603,12 @@ Benchmark lịch sử trong roadmap chỉ là baseline tham khảo; acceptance p
 | Server cache prepared crops tốn RAM | LRU theo cả count và byte size; không giữ full image bytes |
 | Streaming event reorder/duplicate | stable IDs, exact-set validation và idempotent upsert |
 | Cancel nhầm shared work | consumer set và atomic replacement |
-| Service worker/server restart làm mất cache | retry từ stage miss; persistence để P1 nếu số đo chứng minh cần |
+| Session page cache đạt quota | soft cap 8 MiB, terminal LRU, không evict active job, từ chối rõ nếu vẫn đầy |
+| Nhiều trang được bấm nhanh tạo backlog | concurrency giữ ở 2, foreground > background FIFO > prewarm; descriptors nằm trong budget session |
+| Service worker restart giữa job | job ledger rehydrate, persisted block replay, stage thiếu chạy lại |
+| Worker chết khi Gemini đang bay | chấp nhận khả năng một call bị lặp; ID/upsert bảo vệ correctness, chưa thêm distributed transaction |
+| URL ảnh hết hạn trước khi background fetch/retry | giữ trạng thái failed/partial; quay lại dùng source hiện hành để retry |
+| Browser/server restart | browser restart xóa session theo chủ ý; server restart chỉ làm miss heavy stage cache |
 | Cùng URL/cùng kích thước nhưng nội dung đổi | source guard hiện tại không phát hiện; thêm content fingerprint chỉ khi có fixture thực tế |
 
 ## 17. Điều kiện hoàn thành P0
@@ -500,5 +621,7 @@ P0 chỉ hoàn thành khi:
 4. Không có stale overlay trong race test đổi source/ngôn ngữ.
 5. Accuracy/block count không hồi quy trên fixture baseline.
 6. TTFT và total-time đạt gate đã định hoặc có số đo chứng minh rõ nguyên nhân không thuộc transport P0 để quay lại thiết kế.
+7. Manual `visible` job tiếp tục/cache sau navigation và exact page hit đạt assertion zero-call ở mục 14.5.
+8. Scope `loaded` giữ nguyên cancellation; không bị session page-cache policy giữ job ngoài ý muốn.
 
 Sau khi spec này được người dùng review, bước kế tiếp mới là viết implementation plan theo Superpowers. Spec này không tự cho phép bắt đầu sửa code.
