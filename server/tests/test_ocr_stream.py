@@ -30,6 +30,9 @@ class FakeStreamPipeline:
         }
         yield {"type": "image_done", "ocr_key": ocr_key, "recognized": 1, "failed": 0}
 
+    def _iter_ocr(self, analysis, analysis_key, src_lang, ocr_key, cancelled):
+        yield from self.iter_ocr(analysis_key, src_lang, ocr_key, cancelled)
+
 
 def events(response):
     return [json.loads(line) for line in response.text.splitlines()]
@@ -62,3 +65,39 @@ def test_ocr_stream_reports_analysis_missing(monkeypatch):
     )
     assert response.status_code == 409
     assert response.json() == {"error": "analysis_missing"}
+
+
+def test_ocr_stream_keeps_warm_analysis_after_cache_eviction(monkeypatch):
+    class EvictingPipeline(FakeStreamPipeline):
+        def __init__(self):
+            super().__init__()
+            self.analysis = type(
+                "Analysis",
+                (),
+                {"key": "a1", "image_w": 100, "image_h": 200, "regions": [1, 2]},
+            )()
+            self.get_calls = 0
+
+        def get_analysis(self, key):
+            self.get_calls += 1
+            return self.analysis if self.get_calls == 1 and key == "a1" else None
+
+        def analyze(self, data, crop, key):
+            raise ValueError("decode should not run for a warm analysis")
+
+        def _iter_ocr(self, analysis, analysis_key, src_lang, ocr_key, cancelled):
+            assert analysis is self.analysis
+            yield from super()._iter_ocr(analysis, analysis_key, src_lang, ocr_key, cancelled)
+
+    pipeline = EvictingPipeline()
+    monkeypatch.setattr(main, "_pipeline", pipeline)
+
+    response = TestClient(main.app).post(
+        "/ocr-stream",
+        data={"analysis_key": "a1", "ocr_key": "o1", "src_lang": "ja"},
+    )
+
+    assert response.status_code == 200
+    assert [row["type"] for row in events(response)] == [
+        "analysis_ready", "ocr_block", "image_done"
+    ]

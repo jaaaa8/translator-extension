@@ -146,6 +146,9 @@ class Pipeline:
         analysis = self._analysis_cache.get(analysis_key)
         if analysis is None:
             raise KeyError("analysis_missing")
+        yield from self._iter_ocr(analysis, analysis_key, src_lang, ocr_key, cancelled)
+
+    def _iter_ocr(self, analysis, analysis_key, src_lang, ocr_key, cancelled):
         record = self._ocr_cache.get(ocr_key)
         if record is None:
             record = OcrArtifact(ocr_key, analysis_key)

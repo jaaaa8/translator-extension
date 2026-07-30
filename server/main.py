@@ -98,12 +98,13 @@ async def ocr_stream(
         return crop_or_error
     pipeline = get_pipeline()
     data = await image.read() if image is not None else None
-    if data is None and pipeline.get_analysis(analysis_key) is None:
+    cached_analysis = pipeline.get_analysis(analysis_key)
+    if data is None and cached_analysis is None:
         return JSONResponse(status_code=409, content={"error": "analysis_missing"})
 
     async def stream():
         try:
-            analysis = pipeline.get_analysis(analysis_key)
+            analysis = cached_analysis
             if analysis is None:
                 analysis = await asyncio.to_thread(pipeline.analyze, data, crop_or_error, analysis_key)
             yield _ndjson({
@@ -113,7 +114,7 @@ async def ocr_stream(
                 "image_h": analysis.image_h,
                 "regions": len(analysis.regions),
             })
-            iterator = pipeline.iter_ocr(analysis_key, src_lang, ocr_key, lambda: False)
+            iterator = pipeline._iter_ocr(analysis, analysis_key, src_lang, ocr_key, lambda: False)
             while not await request.is_disconnected():
                 event = await asyncio.to_thread(next, iterator, None)
                 if event is None:
