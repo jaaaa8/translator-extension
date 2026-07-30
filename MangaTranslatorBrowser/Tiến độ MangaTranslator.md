@@ -789,8 +789,8 @@ Test harness cuối được viết lại để theo dõi identity container/bub
 ### Trạng thái còn lại
 
 - [x] **Case 8:** restart toàn bộ Chrome để xác nhận session cache bị xóa đúng vòng đời.
-- [ ] **Benchmark production:** tối thiểu 20 cold + 20 warm trên cùng máy; chưa dùng timing synthetic để tuyên bố hiệu năng thật.
-- [ ] Chỉ đóng P0/merge sau benchmark production và final whole-branch review.
+- [x] **Benchmark production:** đã chạy 20 cold + 20 warm trên cùng máy — xem [[Tiến độ MangaTranslator#Benchmark production — 20 cold + 20 warm (2026-07-31)|mục benchmark]]. Không có timing synthetic nào được dùng để tuyên bố hiệu năng thật.
+- [x] Đã đóng P0 và merge: benchmark production xong, final whole-branch review sạch, `feat/v3` fast-forward vào `feat/v2`.
 
 Liên quan: [[Tiến độ MangaTranslator#Cập nhật Task 9–10 — 2026-07-30|mốc Task 9–10 trước]].
 
@@ -804,7 +804,7 @@ Liên quan: [[Tiến độ MangaTranslator#Cập nhật Task 9–10 — 2026-07-
 > Log production phát sinh mới `GET /health`, `POST /ocr-stream`, `POST /translate-items`, nên đây là cold pipeline thật, không phải exact cache hit. Công cụ điều khiển Chrome không nối lại được sau full restart dù extension/native host đều khỏe; kiểm thử được tiếp tục thủ công. Đây là khó khăn của công cụ test, không phải lỗi MangaTranslator.
 
 - Case 8: **PASS**, cache phiên đi theo chuỗi **1 → 0 → 1**.
-- Gate chức năng còn lại: benchmark production tối thiểu **20 cold + 20 warm** trên cùng máy.
+- Gate chức năng còn lại lúc đó: benchmark production tối thiểu **20 cold + 20 warm** trên cùng máy — đã chạy xong ngày 2026-07-31.
 - Repo worklog đã ghi bằng commit `4f40952`; review độc lập không có lỗi Critical/Important/Minor.
 
 ## Task 10 — chuẩn bị benchmark production (2026-07-31)
@@ -855,3 +855,7 @@ Liên quan: [[Tiến độ MangaTranslator#Cập nhật Task 9–10 — 2026-07-
 > - `ja_page.png` là trang tổng hợp 800×1200 chỉ có **đúng 1 bóng thoại**. Vòng OCR chạy 1 lần/sample, trong khi trang manga thật chạy theo số block. Đây là **cận dưới** cho transport/scheduler/cache, **không phải** độ trễ đọc truyện thật.
 > - Request OCR **đầu tiên sau khi server khởi động** phải dựng model: đo được `first_ocr_ms=9234`, `first_overlay_ms=10281`, so với ~207ms khi engine đã nằm sẵn.
 > - Gate "total không chậm baseline quá 10%" **chưa đánh giá được**: repo không có số baseline tiền-progressive nào, còn đường `ocrImage` cũ chỉ OCR (không dịch) nên không so ngang được.
+
+### Chốt nhánh
+
+Bằng chứng benchmark commit `daf80e2` trên nhánh mới `feat/v3`, sau đó fast-forward vào `feat/v2`. Review lại toàn bộ delta `326273e..daf80e2` (20 commit chưa nằm trong lần review sạch trước) **không có finding Critical/Important**: `metadataEqual` trả false cho giá trị mảng nhưng `versions` từ `/health` chỉ gồm object/string nên so version vẫn đúng, và `return` sớm cho prewarm trong `attachDescriptor` không treo request vì prewarm không có port lẫn hợp đồng completion. Gate trên cây đã merge: Node **9/9**, pytest **85 passed** với 3 warning quen thuộc.
