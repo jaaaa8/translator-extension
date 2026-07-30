@@ -98,16 +98,16 @@ function pumpTasks() {
   }
 }
 
+function requestTier(request) {
+  return request.connected ? PRIORITY.foreground : PRIORITY.background;
+}
+
 function admitRequestJobs(request) {
   while (request.outstanding < MAX_OUTSTANDING_PER_REQUEST && request.pendingJobs.length) {
     const producer = request.pendingJobs.shift();
     request.outstanding++;
     enqueueTask({
-      tier: producer.descriptor.priority === PRIORITY.prewarm || request.priority === PRIORITY.prewarm
-        ? PRIORITY.prewarm
-        : producer.descriptor.priority === PRIORITY.background || request.priority === PRIORITY.background
-          ? PRIORITY.background
-          : request.connected ? PRIORITY.foreground : PRIORITY.background,
+      tier: requestTier(request),
       distance: producer.descriptor.distance || 0,
       cancelled: () => producer.cancelled === true,
       run: () => runProducer(producer),

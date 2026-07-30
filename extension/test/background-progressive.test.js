@@ -131,21 +131,36 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     connected: false,
     outstanding: 0,
     pendingJobs: [0, 1, 2, 3, 4].map((job_id) => ({
-      descriptor: { job_id, priority: job_id === 0 ? 2 : 1, distance: job_id },
+      descriptor: { job_id, priority: job_id === 0 ? 2 : 0, distance: job_id },
     })),
   };
+  const foregroundRequest = {
+    connected: true,
+    priority: 2,
+    outstanding: 0,
+    pendingJobs: [{ descriptor: { job_id: "foreground", priority: 0, distance: 0 } }],
+  };
   context.admitRequestJobs(request);
+  context.admitRequestJobs(foregroundRequest);
+  context.enqueueTask({
+    tier: 2,
+    cancelled: () => false,
+    run: () => { producerStarts.push("prewarm"); },
+    fail: (error) => { throw error; },
+    done() {},
+  });
   await Promise.resolve();
   assert.strictEqual(request.outstanding, 4);
   assert.strictEqual(request.pendingJobs.length, 1);
   releases.shift()();
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.deepStrictEqual(producerStarts.slice(0, 2), [1, 2]);
+  assert.deepStrictEqual(producerStarts.slice(0, 2), ["foreground", 0]);
   releases.splice(0).forEach((release) => release());
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.deepStrictEqual(producerStarts, [1, 2, 3, 4, 0]);
+  assert.deepStrictEqual(producerStarts, ["foreground", 0, 1, 2, 3, 4, "prewarm"]);
   assert.strictEqual(request.outstanding, 0);
   assert.strictEqual(request.pendingJobs.length, 0);
+  assert.strictEqual(foregroundRequest.outstanding, 0);
   console.log("background-progressive.test.js transport OK");
 })().catch((error) => {
   console.error(error);
