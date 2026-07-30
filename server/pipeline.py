@@ -1,10 +1,15 @@
+from collections import Counter
+from hashlib import sha256
 from math import ceil, floor
 from threading import Lock
 
 import cv2
 import numpy as np
 
+from .artifacts import AnalysisArtifact, BoundedLru, OcrArtifact, PreparedRegion, stable_block_id
+
 _MIN_CROP_H = 48
+ANALYSIS_MAX_BYTES = 128 * 1024 * 1024
 # Detector trả hai box gần trùng cho cùng một bóng (đo được IoU 0.99 và 0.93 trên
 # mangadex.jpeg) → OCR hai lần, chữ trùng lên Gemini, overlay vẽ đè. Ngưỡng để rộng
 # vì box lồng nhau của chữ dọc chỉ tới ~0.36 và phải giữ nguyên.
@@ -61,10 +66,142 @@ class Pipeline:
         self.translator = translator
         # ponytail: shared ML models run serially; split locks only if measured throughput needs it
         self._ocr_lock = Lock()
+        self._analysis_cache = BoundedLru(
+            max_items=32,
+            max_bytes=ANALYSIS_MAX_BYTES,
+            size_of=lambda artifact: artifact.byte_size,
+        )
+        self._ocr_cache = BoundedLru(max_items=256)
 
     @property
     def langs(self) -> list[str]:
         return self.ocr.langs
+
+    def get_analysis(self, key):
+        return self._analysis_cache.get(key)
+
+    def _decode_crop(self, image_bytes, crop):
+        arr = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError("không decode được ảnh")
+        image_h, image_w = img.shape[:2]
+        offset_x = offset_y = 0
+        work = img
+        if crop is not None:
+            left, top, right, bottom = crop
+            if not (0 <= left < right <= 1 and 0 <= top < bottom <= 1):
+                raise ValueError("crop outside image")
+            offset_x = floor(left * image_w)
+            offset_y = floor(top * image_h)
+            crop_right = ceil(right * image_w)
+            crop_bottom = ceil(bottom * image_h)
+            work = img[offset_y:crop_bottom, offset_x:crop_right]
+        return img, image_w, image_h, work, offset_x, offset_y
+
+    def analyze(self, image_bytes, crop, analysis_key):
+        cached = self._analysis_cache.get(analysis_key)
+        if cached is not None:
+            return cached
+        with self._ocr_lock:
+            cached = self._analysis_cache.get(analysis_key)
+            if cached is not None:
+                return cached
+            img, image_w, image_h, work, offset_x, offset_y = self._decode_crop(image_bytes, crop)
+            work_h, work_w = work.shape[:2]
+            regions = sorted(
+                _dedupe_regions(self.detector.detect(work)),
+                key=lambda region: (-region.bbox[2] * region.bbox[3], *region.bbox),
+            )
+            ordinals = Counter()
+            prepared = []
+            for region in regions:
+                x, y, bw, bh = region.bbox
+                x, y = max(0, x), max(0, y)
+                x2, y2 = min(work_w, x + bw), min(work_h, y + bh)
+                if x2 <= x or y2 <= y:
+                    continue
+                bbox = (offset_x + x, offset_y + y, x2 - x, y2 - y)
+                ordinal = ordinals[bbox]
+                ordinals[bbox] += 1
+                crop_rgb = cv2.cvtColor(work[y:y2, x:x2], cv2.COLOR_BGR2RGB)
+                prepared.append(
+                    PreparedRegion(
+                        stable_block_id(analysis_key, bbox, ordinal),
+                        bbox,
+                        _prep_crop(crop_rgb),
+                    )
+                )
+            artifact = AnalysisArtifact(
+                analysis_key,
+                image_w,
+                image_h,
+                tuple(prepared),
+                sum(region.crop_rgb.nbytes for region in prepared),
+            )
+            self._analysis_cache.put(analysis_key, artifact)
+            return artifact
+
+    def iter_ocr(self, analysis_key, src_lang, ocr_key, cancelled=lambda: False):
+        analysis = self._analysis_cache.get(analysis_key)
+        if analysis is None:
+            raise KeyError("analysis_missing")
+        record = self._ocr_cache.get(ocr_key)
+        if record is None:
+            record = OcrArtifact(ocr_key, analysis_key)
+            self._ocr_cache.put(ocr_key, record)
+
+        for region in analysis.regions:
+            cached = record.blocks.get(region.block_id)
+            if cached is not None:
+                yield {"type": "ocr_block", "ocr_key": ocr_key, **cached}
+
+        if record.complete:
+            yield {
+                "type": "image_done",
+                "ocr_key": ocr_key,
+                "recognized": len(record.blocks),
+                "failed": 0,
+            }
+            return
+
+        with self._ocr_lock:
+            engine = self.ocr.get(src_lang)
+        for region in analysis.regions:
+            if region.block_id in record.completed_ids:
+                continue
+            if cancelled():
+                return
+            try:
+                with self._ocr_lock:
+                    text = engine.read(region.crop_rgb).strip()
+            except Exception:
+                record.failures[region.block_id] = "recognizer_failed"
+                yield {
+                    "type": "ocr_block_error",
+                    "ocr_key": ocr_key,
+                    "block_id": region.block_id,
+                    "code": "recognizer_failed",
+                }
+                continue
+            record.completed_ids.add(region.block_id)
+            record.failures.pop(region.block_id, None)
+            if text:
+                block = {
+                    "block_id": region.block_id,
+                    "bbox": list(region.bbox),
+                    "src_text": text,
+                }
+                record.blocks[region.block_id] = block
+                yield {"type": "ocr_block", "ocr_key": ocr_key, **block}
+
+        record.complete = len(record.completed_ids) == len(analysis.regions)
+        yield {
+            "type": "image_done",
+            "ocr_key": ocr_key,
+            "recognized": len(record.blocks),
+            "failed": len(analysis.regions) - len(record.completed_ids),
+        }
 
     def ocr_image(
         self,
@@ -74,45 +211,19 @@ class Pipeline:
     ) -> dict:
         """Detect + OCR thuần local, không gọi Gemini — extension gom text nhiều ảnh
         rồi dịch chung 1 call qua /translate-texts để không chạm rate limit."""
-        with self._ocr_lock:
-            arr = np.frombuffer(image_bytes, np.uint8)
-            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            if img is None:
-                raise ValueError("không decode được ảnh")
-            image_h, image_w = img.shape[:2]
-            offset_x = offset_y = 0
-            work = img
-            if crop is not None:
-                left, top, right, bottom = crop
-                if not (0 <= left < right <= 1 and 0 <= top < bottom <= 1):
-                    raise ValueError("crop outside image")
-                offset_x = floor(left * image_w)
-                offset_y = floor(top * image_h)
-                crop_right = ceil(right * image_w)
-                crop_bottom = ceil(bottom * image_h)
-                work = img[offset_y:crop_bottom, offset_x:crop_right]
-
-            work_h, work_w = work.shape[:2]
-            engine = self.ocr.get(src_lang)
-            blocks = []
-            for region in _dedupe_regions(self.detector.detect(work)):
-                x, y, bw, bh = region.bbox
-                # clamp vào biên ảnh — detector có thể trả box chạm/vượt mép
-                x, y = max(0, x), max(0, y)
-                x2, y2 = min(work_w, x + bw), min(work_h, y + bh)
-                if x2 <= x or y2 <= y:
-                    continue
-                crop_rgb = cv2.cvtColor(work[y:y2, x:x2], cv2.COLOR_BGR2RGB)
-                text = engine.read(_prep_crop(crop_rgb)).strip()
-                if not text:
-                    continue
-                blocks.append(
-                    {
-                        "bbox": [offset_x + x, offset_y + y, x2 - x, y2 - y],
-                        "src_text": text,
-                    }
-                )
-            return {"image_w": image_w, "image_h": image_h, "blocks": blocks}
+        digest = sha256(image_bytes).hexdigest()
+        analysis_key = f"legacy:{digest}:{crop}"
+        ocr_key = f"{analysis_key}:{src_lang}"
+        analysis = self.analyze(image_bytes, crop, analysis_key)
+        blocks = {}
+        for event in self.iter_ocr(analysis_key, src_lang, ocr_key):
+            if event["type"] == "ocr_block":
+                blocks[event["block_id"]] = {
+                    "bbox": event["bbox"],
+                    "src_text": event["src_text"],
+                }
+        ordered = [blocks[region.block_id] for region in analysis.regions if region.block_id in blocks]
+        return {"image_w": analysis.image_w, "image_h": analysis.image_h, "blocks": ordered}
 
     def process(self, image_bytes: bytes, src_lang: str, target_lang: str) -> dict:
         out = self.ocr_image(image_bytes, src_lang)

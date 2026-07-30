@@ -221,3 +221,91 @@ def test_ocr_image_serializes_shared_models():
 
     assert detector.max_active == 1
     assert engine.max_active == 1
+
+
+class CountingDetector:
+    def __init__(self):
+        self.calls = 0
+
+    def detect(self, image):
+        self.calls += 1
+        return [TextRegion(bbox=(10, 10, 40, 20), vertical=False)]
+
+
+class ThreeRegionDetector:
+    def detect(self, image):
+        return [
+            TextRegion(bbox=(10, 10, 40, 20), vertical=False),
+            TextRegion(bbox=(60, 10, 40, 20), vertical=False),
+            TextRegion(bbox=(110, 10, 40, 20), vertical=False),
+        ]
+
+
+class TwoRegionDetector:
+    def detect(self, image):
+        return [
+            TextRegion(bbox=(10, 10, 40, 20), vertical=False),
+            TextRegion(bbox=(60, 10, 40, 20), vertical=False),
+        ]
+
+
+class SequenceEngine:
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = 0
+
+    def read(self, crop):
+        self.calls += 1
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+class CancelAfterFirstEngine:
+    def __init__(self, cancelled):
+        self.cancelled = cancelled
+        self.calls = 0
+
+    def read(self, crop):
+        self.calls += 1
+        self.cancelled[0] = True
+        return "hola"
+
+
+def test_analysis_is_reused_across_recognizers():
+    detector = CountingDetector()
+    pipeline = Pipeline(detector=detector, ocr=FakeOcr(), translator=FakeTranslator())
+    data = encode_png(300, 200)
+    pipeline.analyze(data, None, "a1")
+    pipeline.analyze(data, None, "a1")
+    assert detector.calls == 1
+
+
+def test_iter_ocr_retries_only_failed_block():
+    engine = SequenceEngine(["hola", RuntimeError("bad"), "adios", "retry"])
+    pipeline = Pipeline(
+        detector=ThreeRegionDetector(),
+        ocr=SharedOcr(engine),
+        translator=FakeTranslator(),
+    )
+    pipeline.analyze(encode_png(300, 200), None, "a1")
+    first = list(pipeline.iter_ocr("a1", "es", "o1"))
+    assert [event["type"] for event in first].count("ocr_block_error") == 1
+    second = list(pipeline.iter_ocr("a1", "es", "o1"))
+    assert engine.calls == 4
+    assert second[-1]["type"] == "image_done"
+    assert second[-1]["failed"] == 0
+
+
+def test_cancel_is_checked_between_engine_reads():
+    cancelled = [False]
+    engine = CancelAfterFirstEngine(cancelled)
+    pipeline = Pipeline(
+        detector=TwoRegionDetector(),
+        ocr=SharedOcr(engine),
+        translator=FakeTranslator(),
+    )
+    pipeline.analyze(encode_png(300, 200), None, "a1")
+    events = list(pipeline.iter_ocr("a1", "es", "o1", lambda: cancelled[0]))
+    assert engine.calls == 1
