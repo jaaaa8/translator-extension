@@ -43,8 +43,8 @@ function benchmarkSummary() {
   );
   summary.counters = Object.fromEntries(
     ["translation_calls", "rate_limited", "stale_work"].map((field) => {
-      const producers = new Set(metricSamples.flatMap((row) => [...(row.counter_producers || [])]));
-      return [field, [...producers].reduce((total, producer) => total + (producer.counters[field] || 0), 0)];
+      const records = new Set(metricSamples.flatMap((row) => [...(row.counter_records || [])]));
+      return [field, [...records].reduce((total, record) => total + (record[field] || 0), 0)];
     })
   );
   return summary;
@@ -456,7 +456,7 @@ function scopeMetrics(request) {
 }
 function scopeDone(request) {
   const metrics = scopeMetrics(request);
-  recordMetrics(request.requestId, { ...metrics, first_overlay_ms: request.firstOverlayMs, cancel_latency_ms: request.cancelLatencyMs, counter_producers: new Set(request.countedCounterProducers) });
+  recordMetrics(request.requestId, { ...metrics, first_overlay_ms: request.firstOverlayMs, cancel_latency_ms: request.cancelLatencyMs, counter_records: new Set([...request.countedCounterProducers].map((producer) => producer.counters)) });
   request.port?.postMessage({ type: "scope_done", request_id: request.requestId, images: request.done.size, translated: request.translated, failed: request.failed, cache_hit: request.done.size > 0 && request.hits === request.done.size, metrics });
   requests.delete(request.requestId);
 }
@@ -768,7 +768,7 @@ function releaseRequest(requestId, replacement = null) {
     void pageCache?.removeJob(row.descriptor.job_id);
   }
   request.cancelLatencyMs = Math.round(now() - cancelStartedAt);
-  recordMetrics(request.requestId, { ...scopeMetrics(request), first_overlay_ms: request.firstOverlayMs, cancel_latency_ms: request.cancelLatencyMs, counter_producers: new Set([...request.countedCounterProducers, ...releasedProducers]) });
+  recordMetrics(request.requestId, { ...scopeMetrics(request), first_overlay_ms: request.firstOverlayMs, cancel_latency_ms: request.cancelLatencyMs, counter_records: new Set([...request.countedCounterProducers, ...releasedProducers].map((producer) => producer.counters)) });
   requests.delete(requestId);
 }
 function disconnectPort(port) { ports.delete(port); for (const request of requests.values()) if (request.port === port) releaseRequest(request.requestId); }

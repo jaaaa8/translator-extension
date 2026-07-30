@@ -11,6 +11,8 @@
   (reproduce with `git diff 5731c7c HEAD`).
 - Fix Round 4: the commit containing this worklog, whose parent is `13b4ac1`
   (reproduce with `git diff 13b4ac1 HEAD`).
+- Fix Round 5: the commit containing this worklog, whose parent is `de48fab`
+  (reproduce with `git diff de48fab HEAD`).
 - Focused cross-layer test: 1/1 passed.
 - Exact Node suite: 8/8 files passed.
 - Python: 69 passed, 3 dependency/deprecation warnings, 0 failed.
@@ -37,6 +39,10 @@
 - Benchmark counters union producer identities across the retained request
   samples, so duplicate consumers and cross-request sharing count each actual
   producer call once without exposing those identities in the runtime summary.
+- Retained counter contributors are shared lightweight records containing only
+  `translation_calls`, `rate_limited`, and `stale_work` numbers; samples retain
+  no producer/page/descriptor/block/URL/text/promise graph, and contributor
+  reachability ends with the same 100-sample eviction lifecycle.
 
 ## Browser acceptance
 

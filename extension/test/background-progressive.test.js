@@ -980,6 +980,17 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     await app.waitFor("scope_done", first);
     await app.waitFor("scope_done", second);
     assert.strictEqual((await app.message({ type: "benchmarkSummary" })).counters.translation_calls, 1);
+    const retained = vm.runInContext(`metricSamples.flatMap((row) =>
+      [...(row.counter_records || row.counter_producers || [])].map((value) => ({
+        keys: Object.keys(value).sort(),
+        numeric: Object.values(value).every(Number.isFinite),
+      })))`, app.context);
+    assert.ok(retained.length > 0);
+    assert.ok(retained.every((row) => row.numeric));
+    assert.ok(retained.every((row) => JSON.stringify(row.keys) === JSON.stringify([
+      "rate_limited", "stale_work", "translation_calls",
+    ])));
+    assert.ok(vm.runInContext("metricSamples.length <= 100", app.context));
   });
 
   await scenario("one replacement cannot retire another request's shared producer", async () => {
