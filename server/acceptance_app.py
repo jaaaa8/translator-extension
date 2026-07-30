@@ -18,6 +18,7 @@ EVENT_LIMIT = 500
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "extension" / "test" / "fixture.html"
 BASE_PNG = (ROOT / "extension" / "test" / "ja_page.png").read_bytes()
+ASSET_HEADERS = {"Cache-Control": "no-store"}
 
 COUNTER_KEYS = (
     "page_load",
@@ -114,6 +115,7 @@ class AcceptanceState:
         self.sequence = 0
         self.analysis_pages: dict[str, str] = {}
         self.consumed_translation_faults: set[str] = set()
+        self.generation = 0
 
     async def configure(self, config: AcceptanceConfig) -> None:
         async with self.lock:
@@ -137,6 +139,7 @@ class AcceptanceState:
         async with self.lock:
             for gate in self.gates.values():
                 gate.set()
+            self.generation += 1
             self.config = AcceptanceConfig()
             self.gates.clear()
             self.counts = dict.fromkeys(COUNTER_KEYS, 0)
@@ -163,8 +166,13 @@ class AcceptanceState:
         async with self.lock:
             return self.gates.get((stage, page))
 
-    async def entered(self, stage: str, page: str) -> None:
+    async def current_generation(self) -> int:
         async with self.lock:
+            return self.generation
+
+    async def entered(self, stage: str, page: str) -> int:
+        async with self.lock:
+            generation = self.generation
             counter = {"source": "source", "ocr": "ocr_stream", "translation": "translation"}[stage]
             self.counts[counter] += 1
             if stage == "source":
@@ -172,11 +180,13 @@ class AcceptanceState:
                 self.counts["peak_source"] = max(
                     self.counts["peak_source"], self.counts["active_source"]
                 )
-        await self.record(stage, page, "entered")
+        await self.record(stage, page, "entered", generation)
+        return generation
 
-    async def leave_source(self) -> None:
+    async def leave_source(self, generation: int) -> None:
         async with self.lock:
-            self.counts["active_source"] -= 1
+            if generation == self.generation:
+                self.counts["active_source"] -= 1
 
     async def increment(self, key: str) -> None:
         async with self.lock:
@@ -198,25 +208,36 @@ class AcceptanceState:
         async with self.lock:
             return self.config.blocks.get(page, 1)
 
-    async def consume_translation_fault(self, page: str) -> bool:
+    async def consume_translation_fault(self, page: str, generation: int) -> bool:
         async with self.lock:
             if (
-                page not in self.config.fail.translation_batch
+                generation != self.generation
+                or page not in self.config.fail.translation_batch
                 or page in self.consumed_translation_faults
             ):
                 return False
             self.consumed_translation_faults.add(page)
             return True
 
-    async def aborted(self, stage: str, page: str) -> None:
+    async def aborted(self, stage: str, page: str, generation: int) -> None:
         async with self.lock:
+            if generation != self.generation:
+                return
             key = f"{stage}_aborted"
             if key in self.counts:
                 self.counts[key] += 1
-        await self.record(stage, page, "aborted")
+        await self.record(stage, page, "aborted", generation)
 
-    async def record(self, stage: str, page: str, event: str) -> None:
+    async def record(
+        self,
+        stage: str,
+        page: str,
+        event: str,
+        generation: int | None = None,
+    ) -> None:
         async with self.lock:
+            if generation is not None and generation != self.generation:
+                return
             self.sequence += 1
             self.events.append(
                 {"seq": self.sequence, "stage": stage, "page": page, "event": event}
@@ -247,20 +268,23 @@ async def wait_gate(
     page: str,
     request: Request,
     runtime: AcceptanceState = state,
+    generation: int | None = None,
 ) -> bool:
+    if generation is None:
+        generation = await runtime.current_generation()
     gate = await runtime.gate(stage, page)
     if gate is None:
         return True
-    await runtime.record(stage, page, "held")
+    await runtime.record(stage, page, "held", generation)
     while not gate.is_set():
         if await request.is_disconnected():
-            await runtime.aborted(stage, page)
+            await runtime.aborted(stage, page, generation)
             return False
         try:
             await asyncio.wait_for(gate.wait(), timeout=0.05)
         except TimeoutError:
             pass
-    await runtime.record(stage, page, "released")
+    await runtime.record(stage, page, "released", generation)
     return True
 
 
@@ -281,20 +305,20 @@ async def asset(page: str, request: Request):
     if request.headers.get("sec-fetch-dest") == "image":
         await state.increment("page_load")
     else:
-        await state.entered("source", page)
+        generation = await state.entered("source", page)
         try:
-            if not await wait_gate("source", page, request):
-                return Response(status_code=499)
+            if not await wait_gate("source", page, request, generation=generation):
+                return Response(status_code=499, headers=ASSET_HEADERS)
             if await state.fails("source_after_load", page):
-                await state.record("source", page, "failed")
-                return Response(status_code=500)
-            await state.record("source", page, "completed")
+                await state.record("source", page, "failed", generation)
+                return Response(status_code=500, headers=ASSET_HEADERS)
+            await state.record("source", page, "completed", generation)
         finally:
-            await state.leave_source()
+            await state.leave_source(generation)
     return Response(
         content=page_png(page),
         media_type="image/png",
-        headers={"Cache-Control": "no-store"},
+        headers=ASSET_HEADERS,
     )
 
 
@@ -320,7 +344,7 @@ async def ocr_stream(
 
     block_count = await state.block_count(page)
     block_fault = await state.fails("ocr_block", page)
-    await state.entered("ocr", page)
+    generation = await state.entered("ocr", page)
 
     async def stream():
         yield json.dumps({
@@ -330,7 +354,7 @@ async def ocr_stream(
             "image_h": 1200,
             "regions": block_count,
         }) + "\n"
-        if not await wait_gate("ocr", page, request):
+        if not await wait_gate("ocr", page, request, generation=generation):
             return
         emitted = 1 if block_fault else block_count
         for index in range(1, emitted + 1):
@@ -348,9 +372,9 @@ async def ocr_stream(
                 "block_id": f"{page}-2",
                 "code": "recognizer_failed",
             }) + "\n"
-            await state.record("ocr", page, "failed")
+            await state.record("ocr", page, "failed", generation)
         else:
-            await state.record("ocr", page, "completed")
+            await state.record("ocr", page, "completed", generation)
         yield json.dumps({
             "type": "image_done",
             "recognized": emitted,
@@ -371,13 +395,13 @@ async def translate_items(body: TranslateItemsBody, request: Request):
         return JSONResponse(status_code=422, content={"error": "mixed or unknown page"})
     page = pages.pop()
 
-    await state.entered("translation", page)
-    if not await wait_gate("translation", page, request):
+    generation = await state.entered("translation", page)
+    if not await wait_gate("translation", page, request, generation=generation):
         return Response(status_code=499)
-    if await state.consume_translation_fault(page):
-        await state.record("translation", page, "failed")
+    if await state.consume_translation_fault(page, generation):
+        await state.record("translation", page, "failed", generation)
         return JSONResponse(status_code=502, content={"error": "translation_batch_failed"})
-    await state.record("translation", page, "completed")
+    await state.record("translation", page, "completed", generation)
     return {
         "items": [
             {"id": item.id, "translation": f"{body.dst_lang}:{item.text}"}

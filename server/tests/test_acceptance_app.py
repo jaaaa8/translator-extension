@@ -11,7 +11,9 @@ from server.acceptance_app import (
     AcceptanceState,
     EVENT_LIMIT,
     app,
+    asset,
     page_png,
+    state,
     wait_gate,
 )
 
@@ -174,6 +176,7 @@ def test_source_load_is_free_but_extension_fetch_can_hold_release_and_fail():
         })
         page_load = http.get("/assets/A.png", headers={"sec-fetch-dest": "image"})
         assert page_load.status_code == 200
+        assert page_load.headers["cache-control"] == "no-store"
         with ThreadPoolExecutor(max_workers=1) as pool:
             held = pool.submit(
                 http.get,
@@ -182,9 +185,12 @@ def test_source_load_is_free_but_extension_fetch_can_hold_release_and_fail():
             )
             assert wait_for_count(http, "active_source", 1)
             assert post_json(http, "/__acceptance/release/source/A").status_code == 200
-            assert held.result(timeout=2).status_code == 200
+            released = held.result(timeout=2)
+            assert released.status_code == 200
+            assert released.headers["cache-control"] == "no-store"
         failed = http.get("/assets/C.png", headers={"sec-fetch-dest": "empty"})
         assert failed.status_code == 500
+        assert failed.headers["cache-control"] == "no-store"
         snapshot = http.get("/__acceptance/state").json()
         assert snapshot["counts"]["source"] == 2
         assert snapshot["counts"]["peak_source"] == 1
@@ -192,6 +198,58 @@ def test_source_load_is_free_but_extension_fetch_can_hold_release_and_fail():
             row["event"] == "failed" and row["page"] == "C"
             for row in snapshot["events"]
         )
+
+
+def test_reset_discards_terminal_accounting_from_held_source_request():
+    with client() as http:
+        post_json(http, "/__acceptance/reset")
+        post_json(http, "/__acceptance/config", {
+            "hold": {"source": ["A"]},
+            "fail": {},
+            "blocks": {},
+        })
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(
+                http.get,
+                "/assets/A.png",
+                headers={"sec-fetch-dest": "empty"},
+            )
+            assert wait_for_event(http, stage="source", page="A", event="held")
+            assert post_json(http, "/__acceptance/reset").status_code == 200
+            assert pending.result(timeout=2).status_code == 200
+
+        snapshot = http.get("/__acceptance/state").json()
+        assert snapshot["counts"] == {
+            "page_load": 0,
+            "source": 0,
+            "ocr_stream": 0,
+            "translation": 0,
+            "source_aborted": 0,
+            "ocr_aborted": 0,
+            "active_source": 0,
+            "peak_source": 0,
+        }
+        assert snapshot["events"] == []
+
+
+def test_disconnected_source_response_is_not_cached():
+    class DisconnectedRequest:
+        headers = {"sec-fetch-dest": "empty"}
+
+        async def is_disconnected(self):
+            return True
+
+    async def exercise():
+        await state.reset()
+        await state.configure(AcceptanceConfig(hold={"source": ["A"]}))
+        try:
+            return await asset("A", DisconnectedRequest())
+        finally:
+            await state.reset()
+
+    response = asyncio.run(exercise())
+    assert response.status_code == 499
+    assert response.headers["cache-control"] == "no-store"
 
 
 def test_ocr_stream_holds_releases_and_preserves_good_block_on_fault():
