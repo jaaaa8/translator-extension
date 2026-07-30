@@ -415,8 +415,24 @@ function attachStage(map, key, producer) {
       resetAnalysisDeferred(stage);
     } else if (map === ocrStages) {
       stage.ocrDone = false;
+      stage.blocks = new Map();
+      stage.blockErrors = [];
     }
     map.set(key, stage);
+  }
+  if (map === analysisStages && stage.complete) {
+    producer.page.analysis_known = true;
+    producer.page.image_w = stage.event?.image_w ?? producer.page.image_w;
+    producer.page.image_h = stage.event?.image_h ?? producer.page.image_h;
+  } else if (map === ocrStages) {
+    for (const block of stage.blocks.values()) {
+      if (!producer.page.blocks.some((row) => row.block_id === block.block_id)) {
+        producer.page.blocks.push({ ...block });
+      }
+    }
+    producer.blockErrors = Math.max(producer.blockErrors || 0, stage.blockErrors.length);
+    if (stage.blockErrors.length) producer.page.last_error = stage.blockErrors[stage.blockErrors.length - 1].code || "ocr_block";
+    if (stage.ocrDone) producer.page.ocr_done = true;
   }
   stage.consumers.set(producer.pageKey, producer);
   return stage;
@@ -499,6 +515,8 @@ async function consumeOcr(producer) {
           }
           continue;
         }
+        if (event.type === "ocr_block") stage.blocks.set(event.block_id, ocrBlockFromEvent(event));
+        if (event.type === "ocr_block_error") stage.blockErrors.push(event);
         for (const item of stage.consumers.values()) {
           if (event.type === "ocr_block") await applyOcrBlock(item, event);
           else if (event.type === "ocr_block_error") {
@@ -520,7 +538,8 @@ async function consumeOcr(producer) {
   return stage.promise;
 }
 function queueTranslation(producer, block) { if (producer.prewarmOnly || producer.retired || block.trans_text || producer.attemptedTranslationIds.has(block.block_id) || producer.pendingTranslations.has(block.block_id)) return; producer.pendingTranslations.set(block.block_id, block); const first = producer.translationBatches === 0, limit = first ? 3 : 8, delay = first ? 250 : 500; if (producer.pendingTranslations.size >= limit) void flushTranslations(producer); else if (!producer.translationTimer) producer.translationTimer = setTimeout(() => void flushTranslations(producer), delay); }
-async function applyOcrBlock(producer, event) { const block = { block_id: event.block_id, bbox: event.bbox, src_text: event.src_text ?? event.text, trans_text: null, state: "ocr_complete" }; if (!producer.page.blocks.some((b) => b.block_id === block.block_id)) producer.page.blocks.push(block); lruSet(hotOcr, producer.ocrKey, producer.page.blocks, 256); queueTranslation(producer, block); await persist(producer); }
+function ocrBlockFromEvent(event) { return { block_id: event.block_id, bbox: event.bbox, src_text: event.src_text ?? event.text, trans_text: null, state: "ocr_complete" }; }
+async function applyOcrBlock(producer, event) { const block = ocrBlockFromEvent(event); if (!producer.page.blocks.some((b) => b.block_id === block.block_id)) producer.page.blocks.push(block); lruSet(hotOcr, producer.ocrKey, producer.page.blocks, 256); queueTranslation(producer, block); await persist(producer); }
 async function translationKeyForBatch(producer, blocks, block) {
   const contextHash = await hashValue(blocks.map((row) => ({ blockId: row.block_id, srcText: row.src_text })));
   return hashValue([

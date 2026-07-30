@@ -41,9 +41,6 @@ function fakeStorage(seed = {}) {
   return {
     rows,
     failWrites: false,
-    pageWriteWaiting: false,
-    nextPageWriteGate: null,
-    activePageWriteGate: null,
     async get(key) {
       let value;
       if (key === null) value = { ...rows };
@@ -53,17 +50,7 @@ function fakeStorage(seed = {}) {
     },
     async set(values) {
       if (this.failWrites) throw new Error("quota");
-      const copy = JSON.parse(JSON.stringify(values));
-      if (this.nextPageWriteGate && Object.keys(copy).some((key) => key.startsWith("mt:page:"))) {
-        const gate = this.nextPageWriteGate;
-        this.nextPageWriteGate = null;
-        this.activePageWriteGate = gate;
-        this.pageWriteWaiting = true;
-        await gate.promise;
-        this.pageWriteWaiting = false;
-        this.activePageWriteGate = null;
-      }
-      Object.assign(rows, copy);
+      Object.assign(rows, JSON.parse(JSON.stringify(values)));
     },
     async remove(keys) {
       for (const key of Array.isArray(keys) ? keys : [keys]) delete rows[key];
@@ -71,8 +58,6 @@ function fakeStorage(seed = {}) {
     async getBytesInUse() {
       return Buffer.byteLength(JSON.stringify(rows));
     },
-    holdNextPageWrite() { this.nextPageWriteGate = deferred(); },
-    releasePageWrite() { (this.activePageWriteGate || this.nextPageWriteGate)?.resolve(); },
   };
 }
 
@@ -889,19 +874,18 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       { type: "ocr_block", block_id: "late", bbox: [5, 6, 7, 8], src_text: "late" },
       { type: "image_done", recognized: 2, failed: 0 },
     ]);
-    server.holdSource("mid-stream");
     server.holdOcrAfterFirst("mid-stream");
-    const storage = fakeStorage();
-    const app = createBackgroundApp({ server, storage });
+    const app = createBackgroundApp({ server });
     await app.ready();
     const port = app.connect();
     const source = "https://x/mid-stream.jpg";
     const oldJob = app.job("mid-stream-old", source);
-    port.receive(app.startScope("mid-stream-old", "visible", oldJob));
+    port.receive(app.startScope("mid-stream-old", "loaded", oldJob));
     await app.waitFor("page_job_accepted", port);
-    storage.holdNextPageWrite();
-    server.releaseSource("mid-stream");
-    await waitUntil(() => storage.pageWriteWaiting, "blocked first OCR persistence");
+    await waitUntil(
+      () => vm.runInContext("[...producers.values()].some((producer) => producer.page.blocks.length === 1)", app.context),
+      "completed first loaded OCR block"
+    );
 
     const newJob = app.job("mid-stream-new", source);
     port.receive({
@@ -912,7 +896,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       () => port.sent.some((event) => event.type === "page_job_accepted" && event.request_id === "mid-stream-new"),
       "mid-stream replacement acceptance"
     );
-    storage.releasePageWrite();
+    assert.ok(port.sent.some((event) => event.type === "progress" && event.request_id === "mid-stream-new" && event.image_w === 100));
     server.releaseOcr("mid-stream");
     await waitUntil(
       () => port.sent.some((event) => event.type === "scope_done" && event.request_id === "mid-stream-new"),
