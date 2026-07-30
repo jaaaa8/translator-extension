@@ -190,10 +190,15 @@ const signatureSource = { srcset: "page.webp 640w", sizes: "100vw", media: "(min
 const signaturePicture = { tagName: "PICTURE", querySelectorAll: () => [signatureSource] };
 const signatureImage = fakeImage({ src: "https://x/signature.jpg" });
 signatureImage.parentElement = signaturePicture;
-const signature = sourceSignature(signatureImage);
+const signature1 = sourceSignature(signatureImage);
 signatureSource.srcset = "page-new.webp 1280w";
-assert.notStrictEqual(sourceSignature(signatureImage), signature);
+const signature2 = sourceSignature(signatureImage);
+assert.notStrictEqual(signature2, signature1);
 signatureSource.media = "(min-width: 2px)";
-assert.notStrictEqual(sourceSignature(signatureImage), signature);
+const signature3 = sourceSignature(signatureImage);
+assert.notStrictEqual(signature3, signature2);
+signatureSource.sizes = "50vw";
+const signature4 = sourceSignature(signatureImage);
+assert.notStrictEqual(signature4, signature3);
 
 console.log("srcset.test.js OK");
