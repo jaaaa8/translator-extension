@@ -21,9 +21,14 @@
         max-width: 45vw; padding: 10px; background: white; border: 1px solid #777;
       }
       #acceptanceState { max-height: 45vh; overflow: auto; }
+      #benchmarkStatus {
+        position: fixed; left: 12px; top: 12px; z-index: 1000;
+        padding: 10px; background: white; border: 2px solid #166534;
+      }
     </style>
   </head>
   <body>
+    <strong id="benchmarkStatus" hidden></strong>
     <h2>Webtoon: loaded scope should translate both images</h2>
     <section id="webtoon">
       <img src="ja_page.png" />
@@ -181,5 +186,6 @@
         addEventListener("pagehide", () => clearInterval(poll), { once: true });
       }
     </script>
+    <script src="fixture-benchmark.js"></script>
   </body>
 </html>
