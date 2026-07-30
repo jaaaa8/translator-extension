@@ -2,82 +2,113 @@
 
 ## Revision and automated evidence
 
-- Task 10 base/implementation: `ec3df53..50c3b81`.
-- Fix Round 1: the commit containing this worklog, whose parent is `50c3b81`
-  (reproduce with `git diff 50c3b81 HEAD`).
-- Fix Round 2: the commit containing this worklog, whose parent is `6f00f49`
-  (reproduce with `git diff 6f00f49 HEAD`).
-- Fix Round 3: the commit containing this worklog, whose parent is `5731c7c`
-  (reproduce with `git diff 5731c7c HEAD`).
-- Fix Round 4: the commit containing this worklog, whose parent is `13b4ac1`
-  (reproduce with `git diff 13b4ac1 HEAD`).
-- Fix Round 5: the commit containing this worklog, whose parent is `de48fab`
-  (reproduce with `git diff de48fab HEAD`).
-- Focused cross-layer test: 1/1 passed.
-- Exact Node suite: 8/8 files passed.
-- Python: 69 passed, 3 dependency/deprecation warnings, 0 failed.
-- Cross-layer harness loads production `page-cache.js`, `background.js`,
-  `srcset.js`, and `content.js` in two VMs connected only through paired fake
-  Ports. It shares fake `chrome.storage.session` and a fake NDJSON server.
-- Automated cases verified: stale A/B navigation, exact artifact replay with no
-  extra source/OCR/translation calls, exact-crop miss, near-before-far loaded
-  scheduling, replacement while source/OCR/translation are each deferred,
-  Port disconnect plus simulated worker termination (old Port delivery, storage
-  mutation, and fetch continuations revoked) followed by new-VM restart/replay,
-  isolated OCR/image/translation
-  faults with valid output retained, visible and loaded scopes, repeated status
-  reads during live work, `scope_done` monotonic metrics, first-overlay merge,
-  actual 100-sample eviction, and absence of URL/OCR/translation text from
-  `benchmarkSummary`.
-- Warm exact-cache replay uses asynchronous Port delivery; its late
-  `render_metric` updates the matching retained sample. After eviction, a late
-  metric for the old request is ignored, proving correlation state is bounded
-  with the same 100-sample lifetime.
-- Mixed progressive Port and legacy `ocrImage` runtime traffic shares the single
-  two-slot scheduler. The deferred mixed-path regression observes peak source/
-  OCR work <= 2 while both public response paths complete.
-- Benchmark counters union producer identities across the retained request
-  samples, so duplicate consumers and cross-request sharing count each actual
-  producer call once without exposing those identities in the runtime summary.
-- Retained counter contributors are shared lightweight records containing only
-  `translation_calls`, `rate_limited`, and `stale_work` numbers; samples retain
-  no producer/page/descriptor/block/URL/text/promise graph, and contributor
-  reachability ends with the same 100-sample eviction lifecycle.
+- Controlled browser-acceptance work: `6056c67..b2037be`, including health
+  contract fix `023b00c`, fixture-only prewarm fix `a351855`, and its reviewed
+  boundary coverage `b2037be`.
+- Exact Node gate: 8/8 files passed. Python suite: 85 passed, 3 known
+  dependency/deprecation warnings, 0 failed. `git diff --check` passed.
+- Chrome used the one enabled unpacked extension
+  `dkfmlgjnanglgccfjfojakbdpgdlepbi`.
+- Automated VM coverage remains the production-module cross-layer suite for
+  cache, scheduling, progressive Port delivery, restart/replay, scoped
+  cancellation, faults, and 100-sample summary retention; it is not a source
+  of production timings.
 
-## Browser acceptance
+## Real Chrome browser acceptance
 
-Status: **pending; not executed and P0 is not claimed complete**.
+### Case 1 — PASS: stale A/B navigation
 
-This run had no Chrome instance with this worktree loaded as an unpacked
-extension and no controllable extension service-worker DevTools target. Loading
-an unpacked extension and reloading its MV3 worker require user-visible Chrome
-state; shell-only HTTP processes do not provide that environment. Therefore no
-browser case was marked pass. The ten cases in Task 10 Step 7 remain pending:
-stale A/B navigation, exact cache network silence, offscreen retention, source
-detach, destination-language OCR reuse, worker restart replay, loaded-scope
-cancellation, browser-restart session clearing, near/far priority plus popup
-reopen, and the three fault controls.
+A source/OCR was held; B then completed source/OCR/translation and rendered
+exactly `en:B:block-1`. Before A release, counters were `page_load=8,
+source=2, ocr_stream=2, translation=1, source_aborted=0, ocr_aborted=0,
+active_source=0, peak_source=1`. Releasing A produced no translation/A event,
+no A overlay, and no duplicate B overlay.
 
-## Benchmark
+Retry 1 exposed a harness contract defect: acceptance `/health` omitted
+versions required by `buildKeys()`; `023b00c` supplied them. Synthetic A/B
+pixels are visually identical despite byte-distinct inputs, and an auxiliary
+in-app localhost tab prewarmed and polluted counters. Closing it plus a stable
+double reset isolated the passing run.
 
-Status: **pending; no 20-sample measurements were fabricated**.
+### Case 6 — PASS: worker-stop replay
 
-| Mode | Samples | first overlay p50 | first overlay p95 | total vs baseline | blocks |
-|---|---:|---:|---:|---:|---:|
-| cold visible | 0 | pending | pending | pending | pending |
-| warm visible | 0 | pending | pending | pending | pending |
+After extension Reload cleared session, the popup precondition was
+`background=0, cached=0, errors=0`, then only A/vi was held in translation.
+Stopping the MV3 worker caused two aborted replay attempts and a third held
+attempt; release completed it. Final popup state was `background=0, cached=1,
+errors=0`, with exactly one `vi:A:block-1` bubble.
 
-The automated VM test proves the summary shape and privacy boundary only. A
-real run still needs at least 20 cold and 20 warm visible samples on one machine,
-hardware/Chrome/Python/model versions, queue/fetch/analysis/first OCR/first
-translation/total/cancel timings, hit/miss reasons, stale work, translation
-calls/429, and a same-fixture baseline. Targets remain p50 <= 5 s, p95 <= 8 s,
-total regression <= 10%, and no block-count loss.
+An earlier run was inconclusive: cross-case session state left
+`background=1, cached=2` after replay. Fake-background cleanup probes did not
+reproduce a code defect; the clean retry separated session contamination from
+the confirmed replay behavior.
 
-## Warnings and open acceptance
+### Case 7 — PASS: loaded-scope cancellation
 
-- FastAPI/Starlette reports the existing `httpx` deprecation warning.
-- `pkg_resources` is deprecated in the vendored detector utility.
-- Paddle reports that `ccache` is not installed.
-- Automated integration does not replace the pending real-browser cases or
-  performance measurements above.
+The clean popup precondition was `background=0, cached=0, errors=0`, and
+opening it generated no prewarm source event. Final counts were `page_load=3,
+source=2, ocr_stream=0, translation=0, source_aborted=2, ocr_aborted=0,
+active_source=0, peak_source=2`; events were A entered/held, B entered/held,
+then A/B aborted, with no C source event.
+
+`a351855` skips prewarm only on the loopback acceptance fixture; `b2037be`
+covers localhost, wrong-port, and missing-parameter boundaries. Initial review
+found those three test gaps; re-review approved the test-only follow-up. One
+attempt stayed on `acceptance=reader` and had only A (operator URL mistake,
+not scheduler behavior). A later multi-turn attempt allowed MV3 sleep/reconnect
+and A/B replay; Translate → 3 seconds → F5 produced the clean absolute-two
+abort result.
+
+### Case 9 — PASS: loaded ordering
+
+With `hold.source=[A,C]`, A entered/held, B source/OCR/translation completed
+and rendered first as `vi:B:block-1`, then C entered/held. Releasing A/C
+completed both; final `active_source=0` and popup failures were zero. One
+MV3 sleep/reconnect replay occurred across a chat delay, so this case claims
+first-result ordering and idempotent completion, not exact no-replay. Final
+`background=0, cached=0, errors=0` is expected for loaded scope: it has no
+`persistUntilDone` cache consumer.
+
+### Case 10 — PASS: controlled faults
+
+- OCR block fault (`fail.ocr_block=[B]`, `blocks.B=2`): counts
+  `page_load=4, source=4, ocr_stream=4, translation=4, aborted=0, active=0,
+  peak=1`; B OCR failed but B translation completed. Popup was `4 images,
+  4 dialogues, 1 error`; B had only `vi:B:block-1`, no B-2.
+- Source-after-load fault (`fail.source_after_load=[C]`): counts
+  `page_load=0, source=4, ocr_stream=3, translation=3, aborted=0, active=0,
+  peak=1`; C entered then failed with no OCR/translation C, while A/B/D
+  completed. Popup was `4 images, 3 dialogues, 1 error`; DOM had one bubble on
+  A/B/D and none on C.
+- Translation batch fault (`fail.translation_batch=[D]`, `blocks.D=4`): counts
+  `page_load=0, source=4, ocr_stream=4, translation=5, source_aborted=0,
+  ocr_aborted=0, active=0, peak=1`; D failed then retried/completed and showed
+  only `vi:D:block-4`, no D1-D3. Popup was `4 images, 4 dialogues, 3 errors`.
+
+The first run-3 click used “Translate current page”, yielding A only and
+cache 1; harness events confirmed that scope. This was an operator misclick,
+not a product failure. Extension Reload plus page F5 cleared session/overlays;
+the top loaded-webtoon action produced the clean passing run. All loaded-scope
+final popup states were `background=0, cached=0, errors=0`, as expected.
+
+## Service state
+
+Acceptance PID `25752` (`server.acceptance_app:app`) was stopped and port 8910
+verified empty. A combined stop/start command was policy-blocked before it ran;
+split exact `Stop-Process`, start, and health verification succeeded.
+Production is restored as PID `25764` running `server.main:app`. Its health is
+`ok`, device `cuda`, languages `ja`/`es`, and the complete production version
+contract: detector `comic-text-detector-v1`, dedupe
+`iou-0.5-area-bbox-v2`, prep `upscale48-border8-v1`, recognizers
+`manga-ocr-v1`/`paddleocr-es-v1`, translator
+`gemini-flash-lite-latest`, prompt `comic-items-v1`, policy
+`microbatch-3-8-250-500-v1`, and `page_schema=page-v1`.
+
+## Pending and warnings
+
+- Case 8, a full Chrome restart/session-clearing check, remains pending and is
+  not claimed.
+- The 20-cold/20-warm real-production benchmark remains pending; no synthetic
+  timing has been presented as production measurement.
+- Known warnings: FastAPI/Starlette `httpx` deprecation, vendored detector
+  `pkg_resources` deprecation, and missing Paddle `ccache`.
