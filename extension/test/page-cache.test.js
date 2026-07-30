@@ -46,6 +46,27 @@ function page(key, state, access, text = "x") {
   assert.strictEqual(await cache.purgeIncompatible({ prompt: "v2" }), 1);
   assert.strictEqual(await cache.getPage("wrong-version"), null);
 
+  const versionStorage = fakeStorage();
+  const versionCache = new PageCache(versionStorage);
+  const currentVersions = {
+    detector: "d1",
+    recognizers: { ja: "ja1", es: "es1" },
+    prompt: "p1",
+  };
+  await versionCache.putPage({
+    ...page("reordered-version", "complete", 1),
+    versions: { prompt: "p1", recognizers: { es: "es1", ja: "ja1" }, detector: "d1" },
+  });
+  assert.strictEqual(await versionCache.purgeIncompatible(currentVersions), 0);
+  assert.ok(await versionCache.getPage("reordered-version"));
+  await versionCache.putPage({
+    ...page("changed-recognizer", "complete", 2),
+    versions: { prompt: "p1", recognizers: { es: "es2", ja: "ja1" }, detector: "d1" },
+  });
+  assert.strictEqual(await versionCache.purgeIncompatible(currentVersions), 1);
+  assert.strictEqual(await versionCache.getPage("changed-recognizer"), null);
+  assert.ok(await versionCache.getPage("reordered-version"));
+
   await cache.putJob({ job_id: "j1", state: "running", created_at: 1 });
   const rehydrated = await cache.rehydrate();
   assert.strictEqual(rehydrated.jobs[0].state, "queued");

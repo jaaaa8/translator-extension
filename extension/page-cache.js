@@ -11,6 +11,15 @@ function recordBytes(key, value) {
   return new TextEncoder().encode(JSON.stringify({ [key]: value })).byteLength;
 }
 
+function metadataEqual(left, right) {
+  if (left === right) return true;
+  if (!left || !right || typeof left !== "object" || typeof right !== "object" || Array.isArray(left) || Array.isArray(right)) return false;
+  const keys = Object.keys(left);
+  return keys.length === Object.keys(right).length && keys.every(
+    (key) => Object.prototype.hasOwnProperty.call(right, key) && metadataEqual(left[key], right[key])
+  );
+}
+
 function copyStrings(target, source, fields) {
   for (const field of fields) {
     if (source[field] === undefined) continue;
@@ -191,10 +200,9 @@ class PageCache {
   }
 
   async purgeIncompatible(versions) {
-    const expected = JSON.stringify(versions);
     const remove = Object.entries(await this._all())
       .filter(([key, row]) => key.startsWith(PAGE_PREFIX) &&
-        (row.schema_version !== PAGE_SCHEMA || JSON.stringify(row.versions) !== expected))
+        (row.schema_version !== PAGE_SCHEMA || !metadataEqual(row.versions, versions)))
       .map(([key]) => key);
     if (remove.length) await this.storage.remove(remove);
     return remove.length;
@@ -306,4 +314,5 @@ class PageCache {
 
 globalThis.PageCache = PageCache;
 globalThis.CacheFullError = CacheFullError;
-if (typeof module !== "undefined") module.exports = { PageCache, CacheFullError, PAGE_SCHEMA };
+globalThis.metadataEqual = metadataEqual;
+if (typeof module !== "undefined") module.exports = { PageCache, CacheFullError, PAGE_SCHEMA, metadataEqual };

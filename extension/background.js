@@ -347,7 +347,7 @@ const ready = (async () => {
   const { pages, jobs } = await pageCache.rehydrate();
   try {
     await refreshServerVersions(false);
-    const byKey = new Map(pages.filter((p) => JSON.stringify(p.versions) === JSON.stringify(serverVersions)).map((p) => [p.page_artifact_key, p]));
+    const byKey = new Map(pages.filter((p) => metadataEqual(p.versions, serverVersions)).map((p) => [p.page_artifact_key, p]));
     for (const job of jobs) if (job.scope === "visible" && (job.state === "queued" || job.state === "running")) restoreProducer(job, byKey);
     await resumeOfflineJobs();
     pumpTasks();
