@@ -115,6 +115,81 @@ not a product failure. Extension Reload plus page F5 cleared session/overlays;
 the top loaded-webtoon action produced the clean passing run. All loaded-scope
 final popup states were `background=0, cached=0, errors=0`, as expected.
 
+## Benchmark — 20 cold and 20 warm visible samples (2026-07-31)
+
+Raw per-sample evidence: `docs/superpowers/worklogs/2026-07-31-cold-warm-benchmark.json`.
+
+### Harness
+
+Chrome `150.0.7871.187` in a throwaway profile, driven over CDP by a
+dependency-free Node `24.15.0` script (scratchpad, not committed). Chrome 150
+ignores `--load-extension`, so the worktree extension
+`D:\MangaTranslator\.worktrees\progressive-session-translation\extension` was
+installed through `Extensions.loadUnpacked` under
+`--enable-unsafe-extension-debugging`; it took the same id
+`dkfmlgjnanglgccfjfojakbdpgdlepbi` used in the acceptance cases. A DevTools
+session stayed attached to the MV3 worker for the whole run, so no sleep,
+reconnect, or replay noise entered the samples.
+
+Each sample is the popup's own action — `chrome.tabs.sendMessage(tab,
+{type: "translatePage", scope: "visible", srcLang: "ja", dstLang: "vi"})` —
+issued from the worker, with `fixture-benchmark.js` advancing `#readerPage`
+between samples exactly as designed. The popup was never opened, so no prewarm
+assisted any counted sample. Server was production `server.main:app` on
+`127.0.0.1:8910`, `cuda`, `page_schema=page-v1`,
+`translator_model=gemini-flash-lite-latest`,
+`policy=microbatch-3-8-250-500-v1`; fixture served from `127.0.0.1:8000`.
+
+Pass 1 (cold) ran 20 unique sources `ja_page.png?benchmark=1..20`. Because
+`buildKeys()` derives `analysisKey` from `sourceUrl.href`, each source missed
+both `chrome.storage.session` and the server `_analysis_cache`/`_ocr_cache`.
+Pass 2 (warm) replayed the same 20 sources after a page reload, with session
+storage untouched. Each pass discarded one warm-up sample.
+
+### Results
+
+| metric | cold p50 | cold p95 | cold max | warm p50 | warm p95 |
+| --- | --- | --- | --- | --- | --- |
+| `first_overlay_ms` | 984 | 1322 | 1401 | 4 | 8 |
+| `total_ms` | 986 | 1323 | 1402 | 3 | 6 |
+| `first_translation_ms` | 977 | 1315 | 1393 | n/a | n/a |
+| `first_ocr_ms` | 207 | 240 | 538 | n/a | n/a |
+| `queue_wait_ms` | 1 | 2 | 3 | n/a | n/a |
+| `fetch_ms` | 4 | 4 | 5 | 0 | 0 |
+| `analysis_ms` | 0 | 0 | 0 | 0 | 0 |
+
+Cold: 20/20 `cacheHit=false`, 20 unique sources, 0 failed blocks,
+`translation_calls=21` (20 counted plus the discarded warm-up),
+`rate_limited=0`, `stale_work=0`. Warm: 20/20 `cacheHit=true`,
+`translation_calls=0` — exact page hits reached zero server calls.
+`blocks=1` on all 40 samples, unchanged between passes.
+`cancel_latency_ms` is null: this benchmark never cancels, and case 7 already
+covers cancellation.
+
+### Gate
+
+- Visible first overlay p50 ≤ 5 s: **PASS** at 0.98 s.
+- Visible first overlay p95 ≤ 8 s: **PASS** at 1.32 s.
+- Block count must not decrease: **PASS**, 1 block on every sample.
+- Total ≤ 10% slower than baseline: **NOT EVALUATED**. No numeric
+  pre-progressive total-scope time for this fixture is recorded anywhere in
+  the repository, and the legacy `ocrImage` path is OCR-only, so it is not a
+  like-for-like comparison. Closing this needs a recorded baseline, not
+  another run of this harness.
+
+### Limits of this measurement
+
+`ja_page.png` is an 800x1200 synthetic page holding exactly one speech bubble.
+These numbers therefore bound the transport, scheduling, and cache paths, not
+the latency of a dense real manga page: the OCR loop runs once per sample here,
+while a real page runs it per block. The gate above is the gate the plan
+defined on this fixture; it is not a claim about production reading latency.
+
+One further real cost is excluded by design: the first OCR request after the
+server starts pays lazy model construction. A separate single-sample warm-up
+run measured `first_ocr_ms=9234`, `first_overlay_ms=10281` for that first
+request, against `first_ocr_ms` around 207 ms once the engine is resident.
+
 ## Service state
 
 Acceptance PID `25752` (`server.acceptance_app:app`) was stopped and port 8910
@@ -130,7 +205,11 @@ contract: detector `comic-text-detector-v1`, dedupe
 
 ## Pending and warnings
 
-- The 20-cold/20-warm real-production benchmark remains pending; no synthetic
-  timing has been presented as production measurement.
+- The 20-cold/20-warm real-production benchmark is done; see the benchmark
+  section above. No synthetic timing has been presented as production
+  measurement.
+- The total-vs-baseline sub-gate stays open for lack of a recorded baseline,
+  and the one-bubble fixture keeps these timings a floor rather than a
+  production reading latency.
 - Known warnings: FastAPI/Starlette `httpx` deprecation, vendored detector
   `pkg_resources` deprecation, and missing Paddle `ccache`.
