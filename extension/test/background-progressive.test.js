@@ -68,6 +68,11 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     { tier: 0, sequence: 3 },
   ].sort(context.compareTasks);
   assert.deepStrictEqual(order.map((row) => row.tier), [0, 1, 2]);
+  const foregroundOrder = [
+    { tier: 0, distance: 100, sequence: 1 },
+    { tier: 0, distance: 0, sequence: 2 },
+  ].sort(context.compareTasks);
+  assert.deepStrictEqual(foregroundOrder.map((row) => row.sequence), [2, 1]);
 
   const starts = [];
   const releases = [];
@@ -131,7 +136,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     connected: false,
     outstanding: 0,
     pendingJobs: [0, 1, 2, 3, 4].map((job_id) => ({
-      descriptor: { job_id, priority: job_id === 0 ? 2 : 0, distance: job_id },
+      descriptor: { job_id, priority: job_id === 0 ? 2 : 0, distance: job_id === 0 ? 100 : job_id },
     })),
   };
   const foregroundRequest = {

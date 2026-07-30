@@ -71,7 +71,11 @@ let taskSequence = 0;
 let activeTasks = 0;
 
 function compareTasks(a, b) {
-  return a.tier - b.tier || a.distance - b.distance || a.sequence - b.sequence;
+  const tier = a.tier - b.tier;
+  if (tier) return tier;
+  return a.tier === PRIORITY.background
+    ? a.sequence - b.sequence
+    : a.distance - b.distance || a.sequence - b.sequence;
 }
 
 function enqueueTask(task) {
