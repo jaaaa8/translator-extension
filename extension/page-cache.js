@@ -3,19 +3,6 @@ const PAGE_PREFIX = "mt:page:";
 const JOB_PREFIX = "mt:job:";
 const ACTIVE_STATES = new Set(["queued", "running"]);
 const TERMINAL_STATES = new Set(["partial", "complete", "failed"]);
-const PAGE_FIELDS = [
-  "page_artifact_key", "analysis_key", "ocr_key", "overlay_key", "source_url", "crop",
-  "natural_width", "natural_height", "src_lang", "dst_lang", "versions", "state",
-  "analysis_known", "ocr_done", "image_w", "image_h", "created_at", "last_error",
-];
-const JOB_FIELDS = [
-  "job_id", "request_id", "scope", "src_lang", "dst_lang", "state", "waiting_for_health", "created_at", "page_artifact_key",
-];
-const DESCRIPTOR_FIELDS = [
-  "job_id", "request_id", "source_url", "natural_width", "natural_height", "priority", "distance",
-  "src_lang", "dst_lang", "scope", "page_artifact_key",
-];
-
 class CacheFullError extends Error {}
 
 function pageStorageKey(key) { return PAGE_PREFIX + key; }
@@ -24,12 +11,69 @@ function recordBytes(key, value) {
   return new TextEncoder().encode(JSON.stringify({ [key]: value })).byteLength;
 }
 
-function storedBlock({ block_id, bbox, src_text, trans_text }) {
+function copyStrings(target, source, fields) {
+  for (const field of fields) {
+    if (source[field] === undefined) continue;
+    if (typeof source[field] !== "string") throw new TypeError(`${field} must be a string`);
+    target[field] = source[field];
+  }
+}
+
+function copyNumbers(target, source, fields, nullable = []) {
+  for (const field of fields) {
+    if (source[field] === undefined) continue;
+    if (source[field] === null && nullable.includes(field)) {
+      target[field] = null;
+    } else if (typeof source[field] === "number" && Number.isFinite(source[field])) {
+      target[field] = source[field];
+    } else {
+      throw new TypeError(`${field} must be a finite number`);
+    }
+  }
+}
+
+function copyBooleans(target, source, fields) {
+  for (const field of fields) {
+    if (source[field] === undefined) continue;
+    if (typeof source[field] !== "boolean") throw new TypeError(`${field} must be a boolean`);
+    target[field] = source[field];
+  }
+}
+
+function storedUrl(value) {
+  if (typeof value !== "string") throw new TypeError("source_url must be a string URL");
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new TypeError("source_url must be a string URL");
+  }
+  if (!["http:", "https:", "blob:"].includes(url.protocol)) throw new TypeError("source_url must be metadata");
+  return value;
+}
+
+function storedVersions(versions) {
+  if (!versions || Object.getPrototypeOf(versions) !== Object.prototype) throw new TypeError("versions must be metadata");
+  const value = {};
+  for (const [key, version] of Object.entries(versions)) {
+    if (typeof version === "string") value[key] = version;
+    else if (version && Object.getPrototypeOf(version) === Object.prototype) value[key] = storedVersions(version);
+    else throw new TypeError("versions must contain strings");
+  }
+  return value;
+}
+
+function storedBlock(source) {
+  if (!source || Object.getPrototypeOf(source) !== Object.prototype) throw new TypeError("block must be metadata");
   const block = {};
-  if (block_id !== undefined) block.block_id = block_id;
-  if (bbox !== undefined) block.bbox = bbox;
-  if (src_text !== undefined) block.src_text = src_text;
-  if (trans_text !== undefined) block.trans_text = trans_text;
+  copyStrings(block, source, ["block_id", "src_text", "trans_text"]);
+  const { bbox } = source;
+  if (bbox !== undefined) {
+    if (!Array.isArray(bbox) || bbox.length !== 4 || !bbox.every((value) => typeof value === "number" && Number.isFinite(value))) {
+      throw new TypeError("bbox must be four finite numbers");
+    }
+    block.bbox = [...bbox];
+  }
   return block;
 }
 
@@ -47,8 +91,16 @@ function storedCrop(crop) {
 
 function storedPage(record, now) {
   const value = { schema_version: PAGE_SCHEMA, updated_at: now, last_accessed_at: record.last_accessed_at || now };
-  for (const field of PAGE_FIELDS) if (field !== "crop" && record[field] !== undefined) value[field] = record[field];
-  if (record.crop !== undefined) value.crop = storedCrop(record.crop);
+  copyStrings(value, record, ["page_artifact_key", "analysis_key", "ocr_key", "overlay_key", "src_lang", "dst_lang", "state"]);
+  if (record.source_url !== undefined) value.source_url = storedUrl(record.source_url);
+  copyNumbers(value, record, ["natural_width", "natural_height", "image_w", "image_h", "created_at"], ["image_w", "image_h"]);
+  copyBooleans(value, record, ["analysis_known", "ocr_done"]);
+  if (record.last_error !== undefined) {
+    if (record.last_error !== null && typeof record.last_error !== "string") throw new TypeError("last_error must be a string");
+    value.last_error = record.last_error;
+  }
+  if (record.versions !== undefined) value.versions = storedVersions(record.versions);
+  value.crop = storedCrop(record.crop ?? "full");
   value.blocks = (record.blocks || []).map(storedBlock);
   return value;
 }
@@ -57,14 +109,18 @@ function storedDescriptor(descriptor) {
   if (descriptor === undefined) return undefined;
   if (!descriptor || Object.getPrototypeOf(descriptor) !== Object.prototype) throw new TypeError("descriptor must be metadata");
   const value = {};
-  for (const field of DESCRIPTOR_FIELDS) if (descriptor[field] !== undefined) value[field] = descriptor[field];
-  if (descriptor.crop !== undefined) value.crop = storedCrop(descriptor.crop);
+  copyStrings(value, descriptor, ["job_id", "request_id", "src_lang", "dst_lang", "scope", "page_artifact_key"]);
+  if (descriptor.source_url !== undefined) value.source_url = storedUrl(descriptor.source_url);
+  copyNumbers(value, descriptor, ["natural_width", "natural_height", "priority", "distance"]);
+  value.crop = storedCrop(descriptor.crop ?? "full");
   return value;
 }
 
 function storedJob(record) {
   const value = {};
-  for (const field of JOB_FIELDS) if (record[field] !== undefined) value[field] = record[field];
+  copyStrings(value, record, ["job_id", "request_id", "scope", "src_lang", "dst_lang", "state", "page_artifact_key"]);
+  copyNumbers(value, record, ["created_at"]);
+  copyBooleans(value, record, ["waiting_for_health"]);
   const descriptor = storedDescriptor(record.descriptor);
   if (descriptor !== undefined) value.descriptor = descriptor;
   return value;

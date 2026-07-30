@@ -83,6 +83,24 @@ function page(key, state, access, text = "x") {
     safeCache.putPage({ ...page("image-crop", "complete", 2), crop: "data:image/png;base64,AAAA" }),
     TypeError
   );
+  await assert.rejects(
+    safeCache.putPage({ ...page("image-source", "complete", 2), source_url: "data:image/png;base64,AAAA" }),
+    TypeError
+  );
+  await assert.rejects(
+    safeCache.putPage({ ...page("object-source", "complete", 2), source_url: new Uint8Array([1]) }),
+    TypeError
+  );
+  await assert.rejects(
+    safeCache.putPage({ ...page("object-width", "complete", 2), natural_width: { pixels: 1200 } }),
+    TypeError
+  );
+  await assert.rejects(
+    safeCache.putPage({ ...page("binary-block", "complete", 2), blocks: [{ block_id: "b", src_text: new Uint8Array([1]) }] }),
+    TypeError
+  );
+  await safeCache.putPage(page("default-crop", "complete", 2));
+  assert.strictEqual((await safeCache.getPage("default-crop")).crop, "full");
   const canonicalCrop = { left: 0.1, top: 0.2, right: 0.8, bottom: 0.9 };
   await safeCache.putPage({ ...page("canonical-crop", "complete", 3), crop: canonicalCrop });
   assert.deepStrictEqual((await safeCache.getPage("canonical-crop")).crop, canonicalCrop);
@@ -96,6 +114,19 @@ function page(key, state, access, text = "x") {
   const savedJob = safeStorage.rows["mt:job:safe-job"];
   assert.strictEqual(savedJob.image_bytes, undefined);
   assert.strictEqual(savedJob.descriptor.prepared_crop, undefined);
+  const descriptorCrop = { left: 0.2, top: 0.3, right: 0.7, bottom: 0.8 };
+  await safeCache.putJob({ job_id: "rect-job", descriptor: { source_url: "blob:https://x/id", crop: descriptorCrop } });
+  assert.deepStrictEqual(safeStorage.rows["mt:job:rect-job"].descriptor.crop, descriptorCrop);
+  await safeCache.putJob({ job_id: "default-job-crop", descriptor: { source_url: "https://x/page.jpg", crop: null } });
+  assert.strictEqual(safeStorage.rows["mt:job:default-job-crop"].descriptor.crop, "full");
+  await assert.rejects(
+    safeCache.putJob({ job_id: "data-source-job", descriptor: { source_url: "data:image/png;base64,AAAA" } }),
+    TypeError
+  );
+  await assert.rejects(
+    safeCache.putJob({ job_id: "object-source-job", descriptor: { source_url: { href: "https://x/page.jpg" } } }),
+    TypeError
+  );
   await assert.rejects(
     safeCache.putJob({
       job_id: "bad-job",
