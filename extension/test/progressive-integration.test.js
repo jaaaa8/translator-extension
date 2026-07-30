@@ -53,7 +53,7 @@ function ndjson(rows) {
 }
 
 function createServer() {
-  const calls = { source: 0, ocrStream: 0, translate: 0 };
+  const calls = { source: 0, ocrStream: 0, translate: 0, activeSource: 0, peakSource: 0 };
   const held = new Map();
   const heldSource = new Map();
   const heldTranslation = new Map();
@@ -89,9 +89,15 @@ function createServer() {
         }
         return { ok: true, json: async () => server.clone({ items: body.items.map((item) => ({ id: item.id, translation: `${item.text} translated` })) }) };
       }
+      if (url.endsWith("/ocr")) {
+        return { ok: true, json: async () => server.clone({ image_w: 1000, image_h: 1600, blocks: [] }) };
+      }
       calls.source++;
+      calls.activeSource++;
+      calls.peakSource = Math.max(calls.peakSource, calls.activeSource);
       const name = /\/([A-D])\.jpg/.exec(url)?.[1];
       if (heldSource.has(name)) await heldSource.get(name).promise;
+      calls.activeSource--;
       if (faults.source.has(name)) return { ok: false, status: 500 };
       return { ok: true, blob: async () => new Blob([url]) };
     },
@@ -200,6 +206,7 @@ function createIntegration({ server = createServer(), session = storageSession()
     text: () => rendered.flatMap((node) => node.children).filter((node) => !node.removed).map((node) => node.textContent).join(" "),
     summary: () => new Promise((resolve) => runtimeMessages.emit({ type: "benchmarkSummary" }, {}, resolve)),
     pageStatus: () => new Promise((resolve) => runtimeMessages.emit({ type: "pageStatus" }, {}, resolve)),
+    legacyOcr(name) { return new Promise((resolve) => runtimeMessages.emit({ type: "ocrImage", url: `https://reader/${name}.jpg`, srcLang: "ja" }, {}, resolve)); },
     sendRenderMetric(requestId, value) { pair.content.postMessage({ type: "render_metric", request_id: requestId, first_overlay_ms: value }); },
   };
 }
@@ -348,5 +355,22 @@ function createIntegration({ server = createServer(), session = storageSession()
   await faults.click();
   assert.ok(faultServer.calls.ocrStream >= validPageCalls.ocrStream);
   assert.strictEqual(faults.text(), "A translated");
+
+  const mixedServer = createServer();
+  for (const name of ["A", "B", "C", "D"]) mixedServer.holdSource(name);
+  const mixed = createIntegration({ server: mixedServer, pages: [
+    { name: "A", rect: sameRect }, { name: "B", rect: sameRect },
+  ] });
+  const progressiveMixed = mixed.clickLoaded();
+  await eventually(() => mixedServer.calls.source === 2, "progressive slots occupied");
+  const legacyMixed = [mixed.legacyOcr("C"), mixed.legacyOcr("D")];
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.ok(mixedServer.calls.peakSource <= 2, `mixed OCR peak ${mixedServer.calls.peakSource}`);
+  for (const name of ["A", "B"]) mixedServer.finishSource(name);
+  await eventually(() => mixedServer.calls.source === 4, "legacy fetches after progressive slots");
+  for (const name of ["C", "D"]) mixedServer.finishSource(name);
+  assert.strictEqual((await progressiveMixed).blocks, 2);
+  assert.ok((await Promise.all(legacyMixed)).every((row) => row.ok));
   console.log("progressive-integration.test.js OK");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

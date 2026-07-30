@@ -136,7 +136,10 @@ function pumpTasks() {
       continue;
     }
     activeTasks++;
-    Promise.resolve().then(task.run)
+    let running;
+    try { running = task.run(); }
+    catch (error) { running = Promise.reject(error); }
+    Promise.resolve(running)
       .catch(task.fail)
       .finally(() => {
         activeTasks--;
@@ -175,13 +178,16 @@ function admitRequestJobs(request) {
 // ponytail: cache OCR trong memory của service worker — mất khi worker ngủ,
 // nâng lên chrome.storage.session nếu thấy OCR lại nhiều
 const ocrInFlight = new Map();
-const queue = [];
-let active = 0;
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "ocrImage") {
-    queue.push({ msg, sendResponse });
-    pump();
+    enqueueTask({
+      tier: msg.prewarm ? PRIORITY.prewarm : PRIORITY.background,
+      cancelled: () => false,
+      run: () => ocrImage(msg).then(sendResponse),
+      fail: (error) => sendResponse({ ok: false, error: String(error) }),
+      done() {},
+    });
     return true; // giữ kênh trả lời async
   }
   if (msg.type === "translateTexts") {
@@ -214,20 +220,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 });
-
-function pump() {
-  while (active < MAX_CONCURRENT && queue.length) {
-    const job = queue.shift();
-    active++;
-    ocrImage(job.msg)
-      .then((res) => job.sendResponse(res))
-      .catch((e) => job.sendResponse({ ok: false, error: String(e) }))
-      .finally(() => {
-        active--;
-        pump();
-      });
-  }
-}
 
 function ocrKey({ url, srcLang, crop }) {
   return `${url}|${srcLang}|${crop ? `${crop.left},${crop.top},${crop.right},${crop.bottom}` : "full"}`;
