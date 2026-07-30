@@ -24,6 +24,8 @@
 
     <h2>Reader: visible scope should translate only this page</h2>
     <div class="controls">
+      <button id="pageA">Trang A</button>
+      <button id="pageB">Trang B</button>
       <button id="swapSource">Đổi src cùng img</button>
       <button id="replacePage">Thay img node</button>
       <button id="moveViewport">Đẩy vào/ra viewport</button>
@@ -35,6 +37,11 @@
     <script>
       const page = () => document.getElementById("readerPage");
       const otherSource = (img) => (img.src.endsWith("ja_page.png") ? "es_page.png" : "ja_page.png");
+      const sources = { A: "ja_page.png", B: "es_page.png" };
+
+      for (const name of ["A", "B"]) {
+        document.getElementById("page" + name).onclick = () => { page().src = sources[name]; };
+      }
 
       document.getElementById("swapSource").onclick = () => {
         const img = page();

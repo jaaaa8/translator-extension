@@ -4,6 +4,45 @@ const SERVER = "http://127.0.0.1:8910";
 const MAX_CONCURRENT = 2;
 const MAX_OUTSTANDING_PER_REQUEST = 4;
 const PRIORITY = Object.freeze({ foreground: 0, background: 1, prewarm: 2 });
+const metricSamples = [];
+
+function now() { return typeof performance === "undefined" ? Date.now() : performance.now(); }
+function mark(producer, name) { producer.timings[name] ??= now(); }
+function producerMetrics(producer) {
+  const elapsed = (name) => producer.timings[name] == null
+    ? null : Math.round(producer.timings[name] - producer.timings.accepted);
+  return {
+    queue_wait_ms: elapsed("started"),
+    fetch_ms: Math.round(producer.durations.fetch_ms || 0),
+    analysis_ms: Math.round(producer.durations.analysis_ms || 0),
+    first_ocr_ms: elapsed("first_ocr"),
+    first_translation_ms: elapsed("first_translation"),
+    total_ms: Math.round(now() - producer.timings.accepted),
+  };
+}
+function recordMetrics(sample) {
+  metricSamples.push(sample);
+  if (metricSamples.length > 100) metricSamples.shift();
+}
+function percentile(values, ratio) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.ceil(sorted.length * ratio) - 1];
+}
+function benchmarkSummary() {
+  const summary = Object.fromEntries(
+    ["first_overlay_ms", "first_translation_ms", "total_ms", "cancel_latency_ms"].map((field) => {
+      const values = metricSamples.map((row) => row[field]).filter(Number.isFinite);
+      return [field, { p50: percentile(values, 0.5), p95: percentile(values, 0.95) }];
+    })
+  );
+  summary.counters = Object.fromEntries(
+    ["translation_calls", "rate_limited", "stale_work"].map((field) => [
+      field, metricSamples.reduce((total, row) => total + (row[field] || 0), 0),
+    ])
+  );
+  return summary;
+}
 
 function canonicalCrop(crop) {
   if (!crop) return "full";
@@ -155,6 +194,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "pageStatus") {
     ready.then(() => pageCache.status()).then(sendResponse).catch((error) => sendResponse({ error: String(error) }));
     return true;
+  }
+  if (msg.type === "benchmarkSummary") {
+    sendResponse(benchmarkSummary());
+    return;
   }
   if (msg.type === "prewarmJob") {
     ready.then(async () => {
@@ -323,7 +366,7 @@ function consumerKey(requestId, jobId) {
 }
 
 function createRequest(port, message) {
-  const request = { requestId: message.request_id, scope: message.scope, srcLang: message.src_lang, dstLang: message.dst_lang, port, jobs: new Map(), jobsBySourceCrop: new Map(), expectedJobIds: new Set((message.jobs || []).map((row) => row.job_id)), pendingJobs: [], outstanding: 0, connected: true, done: new Set(), hits: 0, translated: 0, failed: 0 };
+  const request = { requestId: message.request_id, scope: message.scope, srcLang: message.src_lang, dstLang: message.dst_lang, port, jobs: new Map(), jobsBySourceCrop: new Map(), expectedJobIds: new Set((message.jobs || []).map((row) => row.job_id)), pendingJobs: [], outstanding: 0, connected: true, done: new Set(), hits: 0, translated: 0, failed: 0, acceptedAt: now(), firstOverlayMs: null, metricRows: [], counters: { translation_calls: 0, rate_limited: 0, stale_work: 0 }, cancelLatencyMs: null };
   for (const row of message.jobs || []) request.jobsBySourceCrop.set(sourceCropKey(row), row);
   return request;
 }
@@ -336,9 +379,9 @@ function persist(producer) {
   return producer.persistChain;
 }
 function createProducer(descriptor, keys, page) {
-  const now = Date.now();
-  const record = page || { schema_version: serverVersions.page_schema, page_artifact_key: keys.pageArtifactKey, analysis_key: keys.analysisKey, ocr_key: keys.ocrKey, overlay_key: keys.overlayKey, source_url: descriptor.source_url, crop: keys.crop, natural_width: descriptor.natural_width, natural_height: descriptor.natural_height, src_lang: descriptor.src_lang, dst_lang: descriptor.dst_lang, versions: serverVersions, state: "queued", analysis_known: false, ocr_done: false, image_w: null, image_h: null, blocks: [], created_at: now, updated_at: now, last_accessed_at: now, last_error: null };
-  return { pageKey: keys.pageArtifactKey, analysisKey: keys.analysisKey, ocrKey: keys.ocrKey, descriptor, page: record, consumers: new Map(), jobIds: new Set(), persistUntilDone: false, prewarmOnly: descriptor.scope === "prewarm", state: "queued", pendingTranslations: new Map(), attemptedTranslationIds: new Set(), translationBatches: 0, translationChain: Promise.resolve(), persistChain: Promise.resolve(), cancelled: false, retired: false };
+  const createdAt = Date.now();
+  const record = page || { schema_version: serverVersions.page_schema, page_artifact_key: keys.pageArtifactKey, analysis_key: keys.analysisKey, ocr_key: keys.ocrKey, overlay_key: keys.overlayKey, source_url: descriptor.source_url, crop: keys.crop, natural_width: descriptor.natural_width, natural_height: descriptor.natural_height, src_lang: descriptor.src_lang, dst_lang: descriptor.dst_lang, versions: serverVersions, state: "queued", analysis_known: false, ocr_done: false, image_w: null, image_h: null, blocks: [], created_at: createdAt, updated_at: createdAt, last_accessed_at: createdAt, last_error: null };
+  return { pageKey: keys.pageArtifactKey, analysisKey: keys.analysisKey, ocrKey: keys.ocrKey, descriptor, page: record, consumers: new Map(), jobIds: new Set(), persistUntilDone: false, prewarmOnly: descriptor.scope === "prewarm", state: "queued", pendingTranslations: new Map(), attemptedTranslationIds: new Set(), translationBatches: 0, translationChain: Promise.resolve(), persistChain: Promise.resolve(), cancelled: false, retired: false, timings: { accepted: now() }, durations: { fetch_ms: 0, analysis_ms: 0 }, counters: { translation_calls: 0, rate_limited: 0, stale_work: 0 } };
 }
 async function attachDescriptor(request, descriptor, ledger) {
   if (!serverVersions) { if (request.scope === "visible") await pageCache.putJob({ ...ledger, waiting_for_health: true }); offlineJobs.push({ request, descriptor, ledger }); return; }
@@ -390,13 +433,32 @@ async function acceptScope(port, message) {
   if (message.replaces_request_id) releaseRequest(message.replaces_request_id, request);
   admitRequestJobs(request);
 }
-function completeJob(request, jobId, translated, failed, hit) {
+function completeJob(request, jobId, translated, failed, hit, metrics = null, counters = null) {
   if (!request) return;
   if (request.done.has(jobId)) return; request.done.add(jobId); request.translated += translated; request.failed += failed; if (hit) request.hits++;
+  if (metrics) request.metricRows.push(metrics);
+  if (counters) for (const key of Object.keys(request.counters)) request.counters[key] += counters[key] || 0;
   void pageCache?.removeJob(jobId);
   if (request.done.size === request.expectedJobIds.size) scopeDone(request);
 }
-function scopeDone(request) { request.port?.postMessage({ type: "scope_done", request_id: request.requestId, images: request.done.size, translated: request.translated, failed: request.failed, cache_hit: request.done.size > 0 && request.hits === request.done.size }); requests.delete(request.requestId); }
+function scopeMetrics(request) {
+  const rows = request.metricRows;
+  const value = (field, fallback = null) => {
+    const values = rows.map((row) => row[field]).filter(Number.isFinite);
+    return values.length ? Math.max(...values) : fallback;
+  };
+  return {
+    queue_wait_ms: value("queue_wait_ms"), fetch_ms: value("fetch_ms", 0),
+    analysis_ms: value("analysis_ms", 0), first_ocr_ms: value("first_ocr_ms"),
+    first_translation_ms: value("first_translation_ms"), total_ms: Math.round(now() - request.acceptedAt),
+  };
+}
+function scopeDone(request) {
+  const metrics = scopeMetrics(request);
+  recordMetrics({ ...metrics, first_overlay_ms: request.firstOverlayMs, cancel_latency_ms: request.cancelLatencyMs, ...request.counters });
+  request.port?.postMessage({ type: "scope_done", request_id: request.requestId, images: request.done.size, translated: request.translated, failed: request.failed, cache_hit: request.done.size > 0 && request.hits === request.done.size, metrics });
+  requests.delete(request.requestId);
+}
 function resetAnalysisDeferred(stage) {
   stage.ready = new Promise((resolve, reject) => {
     stage.resolve = resolve;
@@ -438,7 +500,7 @@ function attachStage(map, key, producer) {
   return stage;
 }
 function appendCrop(form, crop) { if (crop && crop !== "full") for (const key of ["left", "top", "right", "bottom"]) form.append(`crop_${key}`, crop[key]); }
-async function openOcrStream(producer, image) { const form = new FormData(); form.append("analysis_key", producer.analysisKey); form.append("ocr_key", producer.ocrKey); form.append("src_lang", producer.descriptor.src_lang); appendCrop(form, producer.descriptor.crop); if (image) { const response = await fetch(producer.descriptor.source_url, { signal: producer.ocrStage.controller.signal }); if (!response.ok) throw new Error(`fetch image HTTP ${response.status}`); form.append("image", await response.blob(), "page.png"); } return fetch(`${SERVER}/ocr-stream`, { method: "POST", body: form, signal: producer.ocrStage.controller.signal }); }
+async function openOcrStream(producer, image) { const form = new FormData(); form.append("analysis_key", producer.analysisKey); form.append("ocr_key", producer.ocrKey); form.append("src_lang", producer.descriptor.src_lang); appendCrop(form, producer.descriptor.crop); if (image) { const started = now(); const response = await fetch(producer.descriptor.source_url, { signal: producer.ocrStage.controller.signal }); producer.durations.fetch_ms += now() - started; if (!response.ok) throw new Error(`fetch image HTTP ${response.status}`); form.append("image", await response.blob(), "page.png"); } return fetch(`${SERVER}/ocr-stream`, { method: "POST", body: form, signal: producer.ocrStage.controller.signal }); }
 async function needsAnalysisImage(producer, analysis) {
   if (producer.page.analysis_known || analysis.complete) return false;
   while (analysis.owner && analysis.owner !== producer.ocrKey) {
@@ -501,6 +563,7 @@ async function consumeOcr(producer) {
       for await (const event of readNdjson(response)) {
         if (event.type === "job_error") throw new Error(`${event.stage}:${event.code}`);
         if (event.type === "analysis_ready") {
+          producer.durations.analysis_ms = event.analysis_ms || producer.durations.analysis_ms;
           resolveAnalysisStage(analysis, event);
           for (const item of stage.consumers.values()) {
             item.page.analysis_known = true;
@@ -515,7 +578,7 @@ async function consumeOcr(producer) {
           }
           continue;
         }
-        if (event.type === "ocr_block") stage.blocks.set(event.block_id, ocrBlockFromEvent(event));
+        if (event.type === "ocr_block") { mark(producer, "first_ocr"); stage.blocks.set(event.block_id, ocrBlockFromEvent(event)); }
         if (event.type === "ocr_block_error") stage.blockErrors.push(event);
         for (const item of stage.consumers.values()) {
           if (event.type === "ocr_block") await applyOcrBlock(item, event);
@@ -557,6 +620,7 @@ function applyTranslation(producer, item) {
   const block = producer.page.blocks.find((row) => row.block_id === item.id);
   if (!block) return;
   block.trans_text = item.translation || item.text;
+  mark(producer, "first_translation");
   block.state = "complete";
   emit(producer, "translation", { ...block, image_w: producer.page.image_w, image_h: producer.page.image_h });
 }
@@ -579,6 +643,7 @@ async function flushTranslationBatch(producer) {
       await persist(producer);
       return;
     }
+    producer.counters.translation_calls++;
     const data = await postJson(`${SERVER}/translate-items`, {
       src_lang: producer.descriptor.src_lang,
       dst_lang: producer.descriptor.dst_lang,
@@ -595,6 +660,7 @@ async function flushTranslationBatch(producer) {
       if (!producer.retired) applyTranslation(producer, item);
     }
   } catch (error) {
+    if (String(error).includes("429")) producer.counters.rate_limited++;
     if (producer.retired) return;
     producer.page.last_error = String(error);
     for (const block of blocks) {
@@ -608,13 +674,13 @@ async function flushTranslations(producer) {
   producer.translationChain = producer.translationChain.then(() => flushTranslationBatch(producer));
   return producer.translationChain;
 }
-async function runProducer(producer) { producer.state = producer.page.state = "running"; try { if (!producer.page.ocr_done) await consumeOcr(producer); if (producer.retired) return; if (producer.prewarmOnly) { releaseProducerStages(producer); producers.delete(producer.pageKey); producer.jobIds.clear(); return; } for (const block of producer.page.blocks) queueTranslation(producer, block); await flushTranslations(producer); if (!producer.retired) await finishProducer(producer); } catch (error) { if (!producer.retired) await failProducer(producer, error); } }
+async function runProducer(producer) { mark(producer, "started"); producer.state = producer.page.state = "running"; try { if (!producer.page.ocr_done) await consumeOcr(producer); if (producer.retired) return; if (producer.prewarmOnly) { releaseProducerStages(producer); producers.delete(producer.pageKey); producer.jobIds.clear(); return; } for (const block of producer.page.blocks) queueTranslation(producer, block); await flushTranslations(producer); if (!producer.retired) await finishProducer(producer); } catch (error) { if (!producer.retired) await failProducer(producer, error); } }
 async function removeProducerJobs(producer) {
   await Promise.all([...producer.jobIds].map((jobId) => pageCache?.removeJob(jobId)));
   producer.jobIds.clear();
 }
-async function finishProducer(producer) { const failed = producer.page.blocks.filter((b) => !b.trans_text).length; producer.page.state = failed || producer.blockErrors ? "partial" : "complete"; await persist(producer); await producer.persistChain; emit(producer, "image_done", { translated: producer.page.blocks.length - failed, failed: failed + (producer.blockErrors || 0) }); for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, producer.page.blocks.length - failed, failed + (producer.blockErrors || 0), false); await removeProducerJobs(producer); releaseProducerStages(producer); producers.delete(producer.pageKey); }
-async function failProducer(producer, error) { producer.page.last_error = String(error); producer.page.state = producer.page.analysis_known || producer.page.blocks.length ? "partial" : "failed"; await persist(producer); emit(producer, "image_done", { translated: 0, failed: 1 }); for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, 0, 1, false); await removeProducerJobs(producer); releaseProducerStages(producer); producers.delete(producer.pageKey); }
+async function finishProducer(producer) { const failed = producer.page.blocks.filter((b) => !b.trans_text).length; producer.page.state = failed || producer.blockErrors ? "partial" : "complete"; await persist(producer); await producer.persistChain; emit(producer, "image_done", { translated: producer.page.blocks.length - failed, failed: failed + (producer.blockErrors || 0) }); const metrics = producerMetrics(producer); for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, producer.page.blocks.length - failed, failed + (producer.blockErrors || 0), false, metrics, producer.counters); await removeProducerJobs(producer); releaseProducerStages(producer); producers.delete(producer.pageKey); }
+async function failProducer(producer, error) { producer.page.last_error = String(error); producer.page.state = producer.page.analysis_known || producer.page.blocks.length ? "partial" : "failed"; await persist(producer); emit(producer, "image_done", { translated: 0, failed: 1 }); const metrics = producerMetrics(producer); for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, 0, 1, false, metrics, producer.counters); await removeProducerJobs(producer); releaseProducerStages(producer); producers.delete(producer.pageKey); }
 function removeQueuedTasks(producer) { for (const task of taskQueue) if (task.producer === producer) task.cancelled = () => true; }
 function demoteQueuedTasks(producer) {
   for (const task of taskQueue) if (task.producer === producer) task.tier = PRIORITY.background;
@@ -645,6 +711,7 @@ function retireProducer(producer) {
   if (producer.retired) return;
   const persistArtifact = producer.persistUntilDone;
   producer.retired = true;
+  producer.counters.stale_work++;
   producer.cancelled = true;
   producer.persistUntilDone = false;
   clearTimeout(producer.translationTimer);
@@ -668,7 +735,9 @@ function releaseRequest(requestId, replacement = null) {
   const request = requests.get(requestId);
   if (!request) return;
   request.connected = false;
-  for (const producer of new Set(request.jobs.values())) {
+  request.cancelLatencyMs = Math.round(now() - request.acceptedAt);
+  const releasedProducers = new Set(request.jobs.values());
+  for (const producer of releasedProducers) {
     const releasedConsumers = [];
     for (const [key, consumer] of producer.consumers) {
       if (consumer.requestId !== requestId) continue;
@@ -697,6 +766,11 @@ function releaseRequest(requestId, replacement = null) {
     offlineJobs.splice(index, 1);
     void pageCache?.removeJob(row.descriptor.job_id);
   }
+  const counters = { ...request.counters };
+  for (const producer of releasedProducers) {
+    for (const key of Object.keys(counters)) counters[key] += producer.counters[key] || 0;
+  }
+  recordMetrics({ ...scopeMetrics(request), first_overlay_ms: request.firstOverlayMs, cancel_latency_ms: request.cancelLatencyMs, ...counters });
   requests.delete(requestId);
 }
 function disconnectPort(port) { ports.delete(port); for (const request of requests.values()) if (request.port === port) releaseRequest(request.requestId); }
@@ -723,6 +797,10 @@ if (chrome.runtime.onConnect && chrome.runtime.onConnect.addListener) {
           });
       }
       if (message.type === "cancel_request") releaseRequest(message.request_id);
+      if (message.type === "render_metric") {
+        const request = requests.get(message.request_id);
+        if (request && Number.isFinite(message.first_overlay_ms)) request.firstOverlayMs ??= message.first_overlay_ms;
+      }
     });
     port.onDisconnect.addListener(() => disconnectPort(port));
   });
