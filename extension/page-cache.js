@@ -3,6 +3,11 @@ const PAGE_PREFIX = "mt:page:";
 const JOB_PREFIX = "mt:job:";
 const ACTIVE_STATES = new Set(["queued", "running"]);
 const TERMINAL_STATES = new Set(["partial", "complete", "failed"]);
+const PAGE_FIELDS = [
+  "page_artifact_key", "analysis_key", "ocr_key", "overlay_key", "source_url", "crop",
+  "natural_width", "natural_height", "src_lang", "dst_lang", "versions", "state",
+  "analysis_known", "ocr_done", "image_w", "image_h", "created_at", "last_error",
+];
 
 class CacheFullError extends Error {}
 
@@ -10,6 +15,23 @@ function pageStorageKey(key) { return PAGE_PREFIX + key; }
 function jobStorageKey(key) { return JOB_PREFIX + key; }
 function recordBytes(key, value) {
   return new TextEncoder().encode(JSON.stringify({ [key]: value })).byteLength;
+}
+
+function storedBlock({ block_id, bbox, src_text, trans_text }) {
+  const block = {};
+  if (block_id !== undefined) block.block_id = block_id;
+  if (bbox !== undefined) block.bbox = bbox;
+  if (src_text !== undefined) block.src_text = src_text;
+  if (trans_text !== undefined) block.trans_text = trans_text;
+  return block;
+}
+
+function storedPage(record, now) {
+  if (record.crop !== undefined && typeof record.crop !== "string") throw new TypeError("crop must be metadata");
+  const value = { schema_version: PAGE_SCHEMA, updated_at: now, last_accessed_at: record.last_accessed_at || now };
+  for (const field of PAGE_FIELDS) if (record[field] !== undefined) value[field] = record[field];
+  value.blocks = (record.blocks || []).map(storedBlock);
+  return value;
 }
 
 class PageCache {
@@ -39,7 +61,15 @@ class PageCache {
   async findPage(predicate) {
     const rows = await this._all();
     for (const [key, row] of Object.entries(rows)) {
-      if (key.startsWith(PAGE_PREFIX) && row.schema_version === PAGE_SCHEMA && predicate(row)) return row;
+      if (key.startsWith(PAGE_PREFIX) && row.schema_version === PAGE_SCHEMA && predicate(row)) {
+        row.last_accessed_at = this.now();
+        try {
+          await this.storage.set({ [key]: row });
+        } catch {
+          // Access-time bookkeeping must not turn a valid hit into a render failure.
+        }
+        return row;
+      }
     }
     return null;
   }
@@ -107,13 +137,7 @@ class PageCache {
   }
 
   async putPage(record) {
-    const now = this.now();
-    const value = {
-      ...record,
-      schema_version: PAGE_SCHEMA,
-      updated_at: now,
-      last_accessed_at: record.last_accessed_at || now,
-    };
+    const value = storedPage(record, this.now());
     return this._put(pageStorageKey(record.page_artifact_key), value);
   }
 

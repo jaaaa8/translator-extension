@@ -60,6 +60,30 @@ function page(key, state, access, text = "x") {
   assert.ok(await activeOnly.getPage("active-1"));
   assert.ok(await activeOnly.getPage("active-2"));
 
+  const safeStorage = fakeStorage();
+  const safeCache = new PageCache(safeStorage);
+  await safeCache.putPage({
+    ...page("safe", "complete", 1),
+    source_url: "https://x/page.jpg",
+    crop: "full",
+    blocks: [{ block_id: "b1", bbox: [1, 2, 3, 4], src_text: "hola", trans_text: "xin chao" }],
+    image_bytes: new Uint8Array([1, 2, 3]),
+    prepared_crop: "data:image/png;base64,AAAA",
+  });
+  const saved = safeStorage.rows["mt:page:safe"];
+  assert.deepStrictEqual(saved.blocks, [{ block_id: "b1", bbox: [1, 2, 3, 4], src_text: "hola", trans_text: "xin chao" }]);
+  assert.strictEqual(saved.image_bytes, undefined);
+  assert.strictEqual(saved.prepared_crop, undefined);
+
+  let tick = 3;
+  const lruCache = new PageCache(fakeStorage(), { budgetBytes: 800, now: () => tick });
+  await lruCache.putPage(page("frequently-found", "complete", 1, "a".repeat(150)));
+  await lruCache.putPage(page("less-recent", "complete", 2, "b".repeat(150)));
+  await lruCache.findPage((row) => row.page_artifact_key === "frequently-found");
+  await lruCache.putPage(page("incoming", "complete", 3, "c".repeat(150)));
+  assert.ok(await lruCache.getPage("frequently-found"));
+  assert.strictEqual(await lruCache.getPage("less-recent"), null);
+
   console.log("page-cache.test.js OK");
 })().catch((error) => {
   console.error(error);
