@@ -186,4 +186,14 @@ assert.throws(
 assert.strictEqual(viewportDistance(offscreenImage, 800, 600), 300);
 assert.strictEqual(sourceSignature(doneImage), '[[' + JSON.stringify(doneImage.src) + ',"","","",""]]');
 
+const signatureSource = { srcset: "page.webp 640w", sizes: "100vw", media: "(min-width: 1px)", getAttribute(name) { return this[name] || ""; } };
+const signaturePicture = { tagName: "PICTURE", querySelectorAll: () => [signatureSource] };
+const signatureImage = fakeImage({ src: "https://x/signature.jpg" });
+signatureImage.parentElement = signaturePicture;
+const signature = sourceSignature(signatureImage);
+signatureSource.srcset = "page-new.webp 1280w";
+assert.notStrictEqual(sourceSignature(signatureImage), signature);
+signatureSource.media = "(min-width: 2px)";
+assert.notStrictEqual(sourceSignature(signatureImage), signature);
+
 console.log("srcset.test.js OK");

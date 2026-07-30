@@ -24,6 +24,19 @@ function createApp() {
   a.ports()[0].emit({ type: "scope_done", request_id: newStart.request_id, images: 1, translated: 0, failed: 0 });
   assert.strictEqual((await newest).ok, true);
 
+  const zero = createApp();
+  const oldPage = zero.context.translatePage("loaded");
+  const oldPageStart = zero.ports()[0].sent[0];
+  zero.image.complete = false;
+  const emptyPage = zero.context.translatePage("loaded");
+  const emptyStart = zero.ports()[0].sent[1];
+  assert.strictEqual(emptyStart.jobs.length, 0);
+  assert.strictEqual(emptyStart.replaces_request_id, oldPageStart.request_id);
+  assert.strictEqual((await Promise.race([oldPage, Promise.resolve({ error: "pending" })])).error, "superseded");
+  zero.ports()[0].emit({ type: "translation", request_id: oldPageStart.request_id, job_id: oldPageStart.jobs[0].job_id, block_id: "old", bbox: [0, 0, 1, 1], trans_text: "old", image_w: 1, image_h: 1 });
+  zero.ports()[0].emit({ type: "scope_done", request_id: emptyStart.request_id, images: 0, translated: 0, failed: 0 });
+  assert.strictEqual((await emptyPage).ok, true);
+
   const b = createApp();
   const pending = b.context.translatePage("loaded");
   const active = b.ports()[0].sent[0];
