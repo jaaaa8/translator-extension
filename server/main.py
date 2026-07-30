@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from . import config
-from .translator import TranslateError
+from .translator import TranslateError, _normalize_items
 
 LANGS = ["ja", "es"]
 
@@ -163,12 +163,11 @@ def translate_items(body: TranslateItemsBody):
     if len({row["id"] for row in rows}) != len(rows):
         return JSONResponse(status_code=422, content={"error": "duplicate input id"})
     try:
-        return {
-            "items": get_pipeline().translator.translate_items(
-                rows, body.src_lang, body.dst_lang
-            )
-        }
-    except TranslateError as error:
+        translated = get_pipeline().translator.translate_items(
+            rows, body.src_lang, body.dst_lang
+        )
+        return {"items": _normalize_items(translated, [row["id"] for row in rows])}
+    except (TranslateError, ValueError) as error:
         return JSONResponse(status_code=502, content={"error": f"gemini: {error}"})
 
 

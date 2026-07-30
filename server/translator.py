@@ -30,6 +30,10 @@ Return each input id exactly once; do not invent ids.
 
 def _decode_items(raw, expected_ids):
     out = json.loads(raw)
+    return _normalize_items(out, expected_ids)
+
+
+def _normalize_items(out, expected_ids):
     if not isinstance(out, list):
         raise ValueError("expected an array")
     rows = {}

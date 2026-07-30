@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 import server.main as main
@@ -9,8 +10,9 @@ PNG = cv2.imencode(".png", np.zeros((100, 100, 3), np.uint8))[1].tobytes()
 
 
 class FakeTranslator:
-    def __init__(self, error=None):
+    def __init__(self, error=None, item_reply=None):
         self.error = error
+        self.item_reply = item_reply
 
     def translate(self, texts, src, dst):
         if self.error:
@@ -20,6 +22,8 @@ class FakeTranslator:
     def translate_items(self, items, src, dst):
         if self.error:
             raise self.error
+        if self.item_reply is not None:
+            return self.item_reply
         return [
             {"id": item["id"], "translation": f"{dst}:{item['text']}"}
             for item in reversed(items)
@@ -29,9 +33,9 @@ class FakeTranslator:
 class FakePipeline:
     langs = ["ja", "es"]
 
-    def __init__(self, error=None):
+    def __init__(self, error=None, item_reply=None):
         self.error = error
-        self.translator = FakeTranslator(error)
+        self.translator = FakeTranslator(error, item_reply)
         self.last_crop = None
 
     def process(self, data, src, dst):
@@ -146,7 +150,24 @@ def test_translate_items_ok(monkeypatch):
         json={"items": [{"id": "b1", "text": "hola"}, {"id": "b2", "text": "adios"}], "src_lang": "es"},
     )
     assert r.status_code == 200
-    assert r.json() == {"items": [{"id": "b2", "translation": "vi:adios"}, {"id": "b1", "translation": "vi:hola"}]}
+    assert r.json() == {"items": [{"id": "b1", "translation": "vi:hola"}, {"id": "b2", "translation": "vi:adios"}]}
+
+
+@pytest.mark.parametrize(
+    "item_reply",
+    [
+        [{"id": "b1", "translation": "one"}],
+        [{"id": "b1", "translation": "one"}, {"id": "foreign", "translation": "two"}],
+        [{"id": "b1", "translation": "one"}, {"id": "b1", "translation": "two"}],
+    ],
+)
+def test_translate_items_rejects_invalid_translator_id_set(monkeypatch, item_reply):
+    monkeypatch.setattr(main, "_pipeline", FakePipeline(item_reply=item_reply))
+    r = TestClient(main.app).post(
+        "/translate-items",
+        json={"items": [{"id": "b1", "text": "one"}, {"id": "b2", "text": "two"}], "src_lang": "es"},
+    )
+    assert r.status_code == 502
 
 
 def test_translate_items_rejects_duplicate_input_id(monkeypatch):
