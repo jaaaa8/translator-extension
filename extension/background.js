@@ -379,7 +379,7 @@ function accepted(request, descriptor, page, cacheHit) {
 }
 function replayPage(request, jobId, page, cacheHit) {
   if (page.image_w) request.port?.postMessage({ type: "progress", request_id: request.requestId, job_id: jobId, image_w: page.image_w, image_h: page.image_h });
-  for (const block of page.blocks) if (block.trans_text) request.port?.postMessage({ type: "translation", request_id: request.requestId, job_id: jobId, block_id: block.block_id, bbox: block.bbox, src_text: block.src_text, trans_text: block.trans_text, cache_hit: cacheHit });
+  for (const block of page.blocks) if (block.trans_text) request.port?.postMessage({ type: "translation", request_id: request.requestId, job_id: jobId, block_id: block.block_id, bbox: block.bbox, src_text: block.src_text, trans_text: block.trans_text, image_w: page.image_w, image_h: page.image_h, cache_hit: cacheHit });
   if (cacheHit) completeJob(request, jobId, page.blocks.length, 0, true);
 }
 async function acceptScope(port, message) {
@@ -558,7 +558,7 @@ function applyTranslation(producer, item) {
   if (!block) return;
   block.trans_text = item.translation || item.text;
   block.state = "complete";
-  emit(producer, "translation", { ...block });
+  emit(producer, "translation", { ...block, image_w: producer.page.image_w, image_h: producer.page.image_h });
 }
 async function flushTranslationBatch(producer) {
   clearTimeout(producer.translationTimer);

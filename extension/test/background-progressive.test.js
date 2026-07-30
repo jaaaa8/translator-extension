@@ -322,7 +322,11 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     back.receive(app.startScope("return-request", "visible", app.job("return-job", "https://x/detached.jpg")));
     const done = await app.waitFor("scope_done", back);
     assert.strictEqual(done.cache_hit, true);
-    assert.ok(back.sent.some((event) => event.type === "translation" && event.cache_hit));
+    const replayed = back.sent.find((event) => event.type === "translation" && event.cache_hit);
+    assert.deepStrictEqual(
+      { image_w: replayed.image_w, image_h: replayed.image_h },
+      { image_w: 100, image_h: 200 }
+    );
     assert.deepStrictEqual(server.counts, calls);
   });
 
@@ -743,7 +747,11 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const done = await app.waitFor("scope_done", port);
     assert.ok(port.sent.some((event) => event.type === "progress" && event.image_w === 100));
     assert.ok(port.sent.some((event) => event.type === "block_error" && event.block_id === "bad"));
-    assert.ok(port.sent.some((event) => event.type === "translation" && event.block_id === "good"));
+    const translation = port.sent.find((event) => event.type === "translation" && event.block_id === "good");
+    assert.deepStrictEqual(
+      { image_w: translation.image_w, image_h: translation.image_h },
+      { image_w: 100, image_h: 200 }
+    );
     assert.deepStrictEqual({ translated: done.translated, failed: done.failed }, { translated: 1, failed: 1 });
     assert.strictEqual(app.page(keys.pageArtifactKey).state, "partial");
   });
