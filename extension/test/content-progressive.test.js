@@ -25,6 +25,22 @@ function done(app, request) { app.port.emit({ type: "scope_done", request_id: re
   await fixture.context.prewarmPage("ja");
   assert.strictEqual(fixture.runtimeMessages.length, 0);
 
+  const localhostFixture = createContentVm(fakePort(), "http://localhost:8910/?acceptance=loaded");
+  await localhostFixture.context.prewarmPage("ja");
+  assert.strictEqual(localhostFixture.runtimeMessages.length, 0);
+
+  const other127Port = createContentVm(fakePort(), "http://127.0.0.1:8911/?acceptance=loaded");
+  await other127Port.context.prewarmPage("ja");
+  assert.strictEqual(other127Port.runtimeMessages.length, 1);
+
+  const otherLocalhostPort = createContentVm(fakePort(), "http://localhost:8911/?acceptance=loaded");
+  await otherLocalhostPort.context.prewarmPage("ja");
+  assert.strictEqual(otherLocalhostPort.runtimeMessages.length, 1);
+
+  const missingAcceptance = createContentVm(fakePort(), "http://127.0.0.1:8910/");
+  await missingAcceptance.context.prewarmPage("ja");
+  assert.strictEqual(missingAcceptance.runtimeMessages.length, 1);
+
   const normal = createContentVm(fakePort(), "https://example.test/?acceptance=loaded");
   await normal.context.prewarmPage("ja");
   assert.strictEqual(normal.runtimeMessages.filter((message) => message.type === "prewarmJob").length, 1);
