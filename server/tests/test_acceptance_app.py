@@ -403,3 +403,22 @@ def test_translation_rejects_unsupported_duplicate_and_mixed_page_inputs():
             ],
         })
         assert mixed.status_code == 422
+
+
+def test_fixture_declares_all_acceptance_modes_and_panel_controls():
+    with client() as http:
+        html = http.get("/fixture.html?acceptance=reader").text
+    for token in [
+        'acceptance === "reader"',
+        'acceptance === "loaded"',
+        'acceptance === "faults"',
+        'id="acceptancePanel"',
+        'id="acceptanceStage"',
+        'id="acceptancePage"',
+        'id="acceptanceState"',
+        'data-action="reset"',
+        'data-action="hold"',
+        'data-action="release"',
+        'data-action="faults"',
+    ]:
+        assert token in html

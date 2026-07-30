@@ -11,6 +11,16 @@
       #readerFrame { width: 80vw; height: 80vh; margin: 20px auto; overflow: hidden; }
       #readerPage { width: 100%; height: 100%; object-fit: contain; transition: transform 0.2s; }
       #readerPage.out { transform: translateX(120vw); }
+      #webtoon.acceptanceLoaded { position: relative; height: 350vh; }
+      #webtoon.acceptanceLoaded img { position: absolute; left: 15%; margin: 0; }
+      #webtoon img.acceptanceFarAbove { top: -200vh; }
+      #webtoon img.acceptanceNear { top: 20px; }
+      #webtoon img.acceptanceFarBelow { top: 300vh; }
+      #acceptancePanel {
+        position: fixed; right: 12px; top: 12px; z-index: 1000;
+        max-width: 45vw; padding: 10px; background: white; border: 1px solid #777;
+      }
+      #acceptanceState { max-height: 45vh; overflow: auto; }
     </style>
   </head>
   <body>
@@ -34,10 +44,31 @@
       <img id="readerPage" src="ja_page.png" />
     </div>
 
+    <aside id="acceptancePanel" hidden>
+      <strong>Acceptance controls</strong>
+      <select id="acceptanceStage">
+        <option value="source">source</option>
+        <option value="ocr">ocr</option>
+        <option value="translation">translation</option>
+      </select>
+      <select id="acceptancePage">
+        <option>A</option><option>B</option><option>C</option><option>D</option>
+      </select>
+      <button data-action="reset">Reset</button>
+      <button data-action="hold">Hold</button>
+      <button data-action="release">Release</button>
+      <button data-action="faults">Fault preset</button>
+      <pre id="acceptanceState"></pre>
+    </aside>
+
     <script>
+      const acceptance = new URLSearchParams(location.search).get("acceptance");
+      const acceptanceSources = Object.fromEntries(
+        ["A", "B", "C", "D"].map((page) => [page, `/assets/${page}.png`])
+      );
       const page = () => document.getElementById("readerPage");
-      const otherSource = (img) => (img.src.endsWith("ja_page.png") ? "es_page.png" : "ja_page.png");
       const sources = { A: "ja_page.png", B: "es_page.png" };
+      const otherSource = (img) => (img.src.endsWith(sources.A) ? sources.B : sources.A);
 
       for (const name of ["A", "B"]) {
         document.getElementById("page" + name).onclick = () => { page().src = sources[name]; };
@@ -57,6 +88,98 @@
       };
 
       document.getElementById("moveViewport").onclick = () => page().classList.toggle("out");
+
+      if (acceptance === "reader") {
+        const webtoon = document.getElementById("webtoon");
+        webtoon.previousElementSibling.remove();
+        webtoon.remove();
+        document.querySelector(".spacer").remove();
+        sources.A = acceptanceSources.A;
+        sources.B = acceptanceSources.B;
+        page().src = sources.A;
+      }
+      if (acceptance === "loaded" || acceptance === "faults") {
+        const webtoon = document.getElementById("webtoon");
+        const names = acceptance === "loaded" ? ["A", "B", "C"] : ["A", "B", "C", "D"];
+        if (acceptance === "loaded") webtoon.classList.add("acceptanceLoaded");
+        webtoon.replaceChildren(...names.map((name, index) => {
+          const image = new Image();
+          image.src = acceptanceSources[name];
+          image.alt = `Acceptance page ${name}`;
+          if (acceptance === "loaded") {
+            image.className = ["acceptanceFarAbove", "acceptanceNear", "acceptanceFarBelow"][index];
+          }
+          return image;
+        }));
+        document.querySelector(".controls").previousElementSibling.remove();
+        document.querySelector(".controls").remove();
+        document.getElementById("readerFrame").remove();
+      }
+
+      const validAcceptance = ["reader", "loaded", "faults"].includes(acceptance);
+      const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(location.hostname);
+      if (validAcceptance && loopback) {
+        const panel = document.getElementById("acceptancePanel");
+        const stage = document.getElementById("acceptanceStage");
+        const selectedPage = document.getElementById("acceptancePage");
+        const output = document.getElementById("acceptanceState");
+        const refresh = async () => {
+          try {
+            const response = await fetch("/__acceptance/state");
+            if (!response.ok) throw new Error(`State request failed: ${response.status}`);
+            output.textContent = JSON.stringify(await response.json(), null, 2);
+          } catch (error) {
+            output.textContent = String(error);
+          }
+        };
+        const post = async (path, body) => {
+          try {
+            const response = await fetch(path, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body),
+            });
+            if (!response.ok) throw new Error(`Control request failed: ${response.status}`);
+          } catch (error) {
+            output.textContent = String(error);
+            return;
+          }
+          await refresh();
+        };
+
+        panel.onclick = (event) => {
+          const action = event.target.dataset.action;
+          if (action === "reset") void post("/__acceptance/reset", {});
+          if (action === "hold") {
+            const hold = { source: [], ocr: [], translation: [] };
+            hold[stage.value] = [selectedPage.value];
+            void post("/__acceptance/config", {
+              hold,
+              fail: { source_after_load: [], ocr_block: [], translation_batch: [] },
+              blocks: {},
+            });
+          }
+          if (action === "release") {
+            void post(`/__acceptance/release/${stage.value}/${selectedPage.value}`, {});
+          }
+          if (action === "faults") {
+            void post("/__acceptance/config", {
+              hold: { source: ["A"], ocr: ["A"], translation: ["A"] },
+              fail: {
+                source_after_load: ["C"],
+                ocr_block: ["B"],
+                translation_batch: ["D"],
+              },
+              blocks: { A: 1, B: 2, D: 4 },
+            });
+          }
+        };
+
+        panel.hidden = false;
+        void refresh();
+        const poll = setInterval(refresh, 500);
+        addEventListener("pagehide", () => clearInterval(poll), { once: true });
+      }
     </script>
   </body>
 </html>
