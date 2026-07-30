@@ -19,15 +19,20 @@ function copyStrings(target, source, fields) {
   }
 }
 
+function storedNumber(value, field) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new TypeError(`${field} must be a finite number`);
+  }
+  return value;
+}
+
 function copyNumbers(target, source, fields, nullable = []) {
   for (const field of fields) {
     if (source[field] === undefined) continue;
     if (source[field] === null && nullable.includes(field)) {
       target[field] = null;
-    } else if (typeof source[field] === "number" && Number.isFinite(source[field])) {
-      target[field] = source[field];
     } else {
-      throw new TypeError(`${field} must be a finite number`);
+      target[field] = storedNumber(source[field], field);
     }
   }
 }
@@ -49,6 +54,17 @@ function storedUrl(value) {
     throw new TypeError("source_url must be a string URL");
   }
   if (!["http:", "https:", "blob:"].includes(url.protocol)) throw new TypeError("source_url must be metadata");
+  if (url.protocol === "blob:") {
+    let origin;
+    try {
+      origin = new URL(url.pathname);
+    } catch {
+      throw new TypeError("source_url must be metadata");
+    }
+    if (!["http:", "https:", "chrome-extension:"].includes(origin.protocol)) {
+      throw new TypeError("source_url must be metadata");
+    }
+  }
   return value;
 }
 
@@ -66,7 +82,13 @@ function storedVersions(versions) {
 function storedBlock(source) {
   if (!source || Object.getPrototypeOf(source) !== Object.prototype) throw new TypeError("block must be metadata");
   const block = {};
-  copyStrings(block, source, ["block_id", "src_text", "trans_text"]);
+  copyStrings(block, source, ["block_id", "src_text", "state"]);
+  if (source.trans_text !== undefined) {
+    if (source.trans_text !== null && typeof source.trans_text !== "string") {
+      throw new TypeError("trans_text must be a string or null");
+    }
+    block.trans_text = source.trans_text;
+  }
   const { bbox } = source;
   if (bbox !== undefined) {
     if (!Array.isArray(bbox) || bbox.length !== 4 || !bbox.every((value) => typeof value === "number" && Number.isFinite(value))) {
@@ -90,7 +112,11 @@ function storedCrop(crop) {
 }
 
 function storedPage(record, now) {
-  const value = { schema_version: PAGE_SCHEMA, updated_at: now, last_accessed_at: record.last_accessed_at || now };
+  const value = {
+    schema_version: PAGE_SCHEMA,
+    updated_at: storedNumber(now, "updated_at"),
+    last_accessed_at: storedNumber(record.last_accessed_at ?? now, "last_accessed_at"),
+  };
   copyStrings(value, record, ["page_artifact_key", "analysis_key", "ocr_key", "overlay_key", "src_lang", "dst_lang", "state"]);
   if (record.source_url !== undefined) value.source_url = storedUrl(record.source_url);
   copyNumbers(value, record, ["natural_width", "natural_height", "image_w", "image_h", "created_at"], ["image_w", "image_h"]);

@@ -79,6 +79,16 @@ function page(key, state, access, text = "x") {
   assert.strictEqual(saved.image_bytes, undefined);
   assert.strictEqual(saved.prepared_crop, undefined);
 
+  const resumableBlock = {
+    block_id: "b2",
+    bbox: [5, 6, 7, 8],
+    src_text: "hola",
+    trans_text: null,
+    state: "ocr_complete",
+  };
+  await safeCache.putPage({ ...page("resumable", "running", 2), blocks: [resumableBlock] });
+  assert.deepStrictEqual(safeStorage.rows["mt:page:resumable"].blocks, [resumableBlock]);
+
   await assert.rejects(
     safeCache.putPage({ ...page("image-crop", "complete", 2), crop: "data:image/png;base64,AAAA" }),
     TypeError
@@ -88,6 +98,11 @@ function page(key, state, access, text = "x") {
     TypeError
   );
   await assert.rejects(
+    safeCache.putPage({ ...page("nested-image-source", "complete", 2), source_url: "blob:data:image/png;base64,AAAA" }),
+    TypeError
+  );
+  assert.strictEqual(safeStorage.rows["mt:page:nested-image-source"], undefined);
+  await assert.rejects(
     safeCache.putPage({ ...page("object-source", "complete", 2), source_url: new Uint8Array([1]) }),
     TypeError
   );
@@ -95,6 +110,11 @@ function page(key, state, access, text = "x") {
     safeCache.putPage({ ...page("object-width", "complete", 2), natural_width: { pixels: 1200 } }),
     TypeError
   );
+  await assert.rejects(
+    safeCache.putPage({ ...page("binary-access-time", "complete", 2), last_accessed_at: new Uint8Array([1]) }),
+    TypeError
+  );
+  assert.strictEqual(safeStorage.rows["mt:page:binary-access-time"], undefined);
   await assert.rejects(
     safeCache.putPage({ ...page("binary-block", "complete", 2), blocks: [{ block_id: "b", src_text: new Uint8Array([1]) }] }),
     TypeError
@@ -123,6 +143,11 @@ function page(key, state, access, text = "x") {
     safeCache.putJob({ job_id: "data-source-job", descriptor: { source_url: "data:image/png;base64,AAAA" } }),
     TypeError
   );
+  await assert.rejects(
+    safeCache.putJob({ job_id: "nested-data-source-job", descriptor: { source_url: "blob:data:image/png;base64,AAAA" } }),
+    TypeError
+  );
+  assert.strictEqual(safeStorage.rows["mt:job:nested-data-source-job"], undefined);
   await assert.rejects(
     safeCache.putJob({ job_id: "object-source-job", descriptor: { source_url: { href: "https://x/page.jpg" } } }),
     TypeError
