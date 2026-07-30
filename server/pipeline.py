@@ -174,6 +174,8 @@ class Pipeline:
                 return
             try:
                 with self._ocr_lock:
+                    if cancelled():
+                        return
                     text = engine.read(region.crop_rgb).strip()
             except Exception:
                 record.failures[region.block_id] = "recognizer_failed"

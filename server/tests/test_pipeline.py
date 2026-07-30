@@ -1,6 +1,6 @@
 import time
 from concurrent.futures import ThreadPoolExecutor
-from threading import Lock
+from threading import Event, Lock, Thread
 
 import cv2
 import numpy as np
@@ -309,3 +309,39 @@ def test_cancel_is_checked_between_engine_reads():
     pipeline.analyze(encode_png(300, 200), None, "a1")
     events = list(pipeline.iter_ocr("a1", "es", "o1", lambda: cancelled[0]))
     assert engine.calls == 1
+
+
+def test_cancelled_while_waiting_for_ocr_lock_does_not_start_a_read():
+    checked = Event()
+    allow_precheck_return = Event()
+    precheck_returned = Event()
+    cancelled = Event()
+    engine = CountingEngine()
+    pipeline = Pipeline(
+        detector=CountingDetector(),
+        ocr=SharedOcr(engine),
+        translator=FakeTranslator(),
+    )
+    pipeline.analyze(encode_png(300, 200), None, "a1")
+
+    def cancellation_requested():
+        if not checked.is_set():
+            checked.set()
+            assert allow_precheck_return.wait(1)
+            precheck_returned.set()
+            return False
+        return cancelled.is_set()
+
+    worker = Thread(
+        target=lambda: list(pipeline.iter_ocr("a1", "es", "o1", cancellation_requested))
+    )
+    worker.start()
+    assert checked.wait(1)
+    with pipeline._ocr_lock:
+        allow_precheck_return.set()
+        assert precheck_returned.wait(1)
+        cancelled.set()
+    worker.join(1)
+
+    assert not worker.is_alive()
+    assert engine.calls == 0
