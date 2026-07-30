@@ -163,30 +163,28 @@ class PageCache {
     return this.storage.get(null);
   }
 
+  async _touch(key, row) {
+    try {
+      const touched = { ...row, last_accessed_at: storedNumber(this.now(), "last_accessed_at") };
+      await this.storage.set({ [key]: touched });
+      return touched;
+    } catch {
+      return row;
+    }
+  }
+
   async getPage(pageKey) {
     const key = pageStorageKey(pageKey);
     const row = (await this.storage.get(key))[key];
     if (!row || row.schema_version !== PAGE_SCHEMA) return null;
-    row.last_accessed_at = this.now();
-    try {
-      await this.storage.set({ [key]: row });
-    } catch {
-      // Access-time bookkeeping must not turn a valid hit into a render failure.
-    }
-    return row;
+    return this._touch(key, row);
   }
 
   async findPage(predicate) {
     const rows = await this._all();
     for (const [key, row] of Object.entries(rows)) {
       if (key.startsWith(PAGE_PREFIX) && row.schema_version === PAGE_SCHEMA && predicate(row)) {
-        row.last_accessed_at = this.now();
-        try {
-          await this.storage.set({ [key]: row });
-        } catch {
-          // Access-time bookkeeping must not turn a valid hit into a render failure.
-        }
-        return row;
+        return this._touch(key, row);
       }
     }
     return null;

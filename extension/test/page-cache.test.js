@@ -170,6 +170,17 @@ function page(key, state, access, text = "x") {
   assert.ok(await lruCache.getPage("frequently-found"));
   assert.strictEqual(await lruCache.getPage("less-recent"), null);
 
+  let unsafeNow = 2;
+  const unsafeClockStorage = fakeStorage();
+  const unsafeClockCache = new PageCache(unsafeClockStorage, { now: () => unsafeNow });
+  await unsafeClockCache.putPage(page("unsafe-get", "complete", 1));
+  await unsafeClockCache.putPage(page("unsafe-find", "complete", 1));
+  unsafeNow = new Uint8Array([1]);
+  assert.strictEqual((await unsafeClockCache.getPage("unsafe-get")).last_accessed_at, 1);
+  assert.strictEqual(unsafeClockStorage.rows["mt:page:unsafe-get"].last_accessed_at, 1);
+  assert.strictEqual((await unsafeClockCache.findPage((row) => row.page_artifact_key === "unsafe-find")).last_accessed_at, 1);
+  assert.strictEqual(unsafeClockStorage.rows["mt:page:unsafe-find"].last_accessed_at, 1);
+
   console.log("page-cache.test.js OK");
 })().catch((error) => {
   console.error(error);
