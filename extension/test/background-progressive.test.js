@@ -58,7 +58,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
 
   const parsed = [];
   for await (const row of context.readNdjson(
-    responseFrom(['{"type":"a"}\n{"ty', 'pe":"b"}\n'])
+    responseFrom(['{"type":"a"}\n{"ty', 'pe":"b"}'])
   )) parsed.push(row.type);
   assert.deepStrictEqual(parsed, ["a", "b"]);
 
@@ -68,6 +68,84 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     { tier: 0, sequence: 3 },
   ].sort(context.compareTasks);
   assert.deepStrictEqual(order.map((row) => row.tier), [0, 1, 2]);
+
+  const starts = [];
+  const releases = [];
+  const task = (name, tier) => ({
+    tier,
+    cancelled: () => false,
+    run: () => {
+      starts.push(name);
+      return new Promise((resolve) => releases.push(resolve));
+    },
+    fail: (error) => { throw error; },
+    done() {},
+  });
+  context.enqueueTask(task("blocker-a", 0));
+  context.enqueueTask(task("blocker-b", 0));
+  context.enqueueTask(task("prewarm", 2));
+  context.enqueueTask(task("detached-visible", 1));
+  await Promise.resolve();
+  assert.deepStrictEqual(starts, ["blocker-a", "blocker-b"]);
+  releases.shift()();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepStrictEqual(starts, ["blocker-a", "blocker-b", "detached-visible"]);
+  releases.shift()();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepStrictEqual(starts, ["blocker-a", "blocker-b", "detached-visible", "prewarm"]);
+  releases.splice(0).forEach((release) => release());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  let failures = 0;
+  let synchronousDone = 0;
+  context.enqueueTask({
+    tier: 0,
+    cancelled: () => false,
+    run: () => { throw new Error("synchronous task failure"); },
+    fail: () => { failures++; },
+    done: () => { synchronousDone++; },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const afterFailure = [];
+  context.enqueueTask({
+    tier: 0,
+    cancelled: () => false,
+    run: () => { afterFailure.push("ran"); },
+    fail: (error) => { throw error; },
+    done() {},
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.strictEqual(failures, 1);
+  assert.strictEqual(synchronousDone, 1);
+  assert.deepStrictEqual(afterFailure, ["ran"]);
+
+  const producerStarts = [];
+  context.runProducer = (producer) => {
+    producerStarts.push(producer.descriptor.job_id);
+    return Promise.resolve();
+  };
+  context.failProducer = (producer, error) => { throw error; };
+  context.enqueueTask(task("admission-blocker-a", 0));
+  context.enqueueTask(task("admission-blocker-b", 0));
+  const request = {
+    connected: false,
+    outstanding: 0,
+    pendingJobs: [0, 1, 2, 3, 4].map((job_id) => ({
+      descriptor: { job_id, priority: job_id === 0 ? 2 : 1, distance: job_id },
+    })),
+  };
+  context.admitRequestJobs(request);
+  await Promise.resolve();
+  assert.strictEqual(request.outstanding, 4);
+  assert.strictEqual(request.pendingJobs.length, 1);
+  releases.shift()();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepStrictEqual(producerStarts.slice(0, 2), [1, 2]);
+  releases.splice(0).forEach((release) => release());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepStrictEqual(producerStarts, [1, 2, 3, 4, 0]);
+  assert.strictEqual(request.outstanding, 0);
+  assert.strictEqual(request.pendingJobs.length, 0);
   console.log("background-progressive.test.js transport OK");
 })().catch((error) => {
   console.error(error);

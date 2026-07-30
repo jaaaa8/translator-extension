@@ -88,7 +88,7 @@ function pumpTasks() {
       continue;
     }
     activeTasks++;
-    Promise.resolve(task.run())
+    Promise.resolve().then(task.run)
       .catch(task.fail)
       .finally(() => {
         activeTasks--;
@@ -103,7 +103,11 @@ function admitRequestJobs(request) {
     const producer = request.pendingJobs.shift();
     request.outstanding++;
     enqueueTask({
-      tier: request.connected ? PRIORITY.foreground : PRIORITY.background,
+      tier: producer.descriptor.priority === PRIORITY.prewarm || request.priority === PRIORITY.prewarm
+        ? PRIORITY.prewarm
+        : producer.descriptor.priority === PRIORITY.background || request.priority === PRIORITY.background
+          ? PRIORITY.background
+          : request.connected ? PRIORITY.foreground : PRIORITY.background,
       distance: producer.descriptor.distance || 0,
       cancelled: () => producer.cancelled === true,
       run: () => runProducer(producer),
