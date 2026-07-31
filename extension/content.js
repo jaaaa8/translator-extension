@@ -1,210 +1,156 @@
-const MIN_SIZE = 400; // lọc banner/avatar/icon theo spec
-
+const MIN_SIZE = 400;
 let enabled = true;
 let srcLang = "ja";
 let dstLang = "vi";
-
-const translated = new WeakMap(); // img -> bestSource đã hoàn tất
-const overlays = new Map(); // img -> owned overlay state
+let currentRequestId = null;
+let port = null;
 let pruneFrame = 0;
+const overlays = new Map();
+const imageRequests = new WeakMap();
+const jobBindings = new Map();
+const pendingScopes = new Map();
+const activeScopeMessages = new Map();
 
-chrome.storage.local.get(["enabled", "srcLang", "dstLang"]).then((v) => {
-  enabled = v.enabled !== false;
-  srcLang = v.srcLang || "ja";
-  dstLang = v.dstLang || "vi";
+chrome.storage.local.get(["enabled", "srcLang", "dstLang"]).then((value) => {
+  enabled = value.enabled !== false;
+  srcLang = value.srcLang || "ja";
+  dstLang = value.dstLang || "vi";
 });
-
-chrome.storage.onChanged.addListener((ch) => {
-  if (ch.srcLang) srcLang = ch.srcLang.newValue;
-  if (ch.dstLang) dstLang = ch.dstLang.newValue;
-  if (ch.enabled) {
-    enabled = ch.enabled.newValue;
-    // ẩn/hiện thay vì xóa — bật lại không tốn call dịch mới
-    for (const { container } of overlays.values())
-      container.style.display = enabled ? "" : "none";
+chrome.storage.onChanged.addListener((changes) => {
+  if (changes.srcLang) srcLang = changes.srcLang.newValue;
+  if (changes.dstLang) dstLang = changes.dstLang.newValue;
+  if (changes.enabled) {
+    enabled = changes.enabled.newValue;
+    for (const { container } of overlays.values()) container.style.display = enabled ? "" : "none";
+  }
+});
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === "translatePage") {
+    translatePage(message.scope, message.srcLang, message.dstLang).then(sendResponse);
+    return true;
+  }
+  if (message.type === "prewarmPage") {
+    prewarmPage(message.srcLang);
+    sendResponse({ ok: true });
   }
 });
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === "translatePage") {
-    translatePage(msg.scope).then(sendResponse);
-    return true; // async response
-  }
-});
+function cleanupRequest(requestId, result) {
+  const pending = pendingScopes.get(requestId);
+  pendingScopes.delete(requestId);
+  activeScopeMessages.delete(requestId);
+  for (const [jobId, binding] of jobBindings) if (binding.requestId === requestId) jobBindings.delete(jobId);
+  if (pending && result) pending.resolve(result);
+}
 
-// Both manual actions batch local OCR results into one Gemini request.
-async function translatePage(scope) {
-  const requestSrcLang = srcLang;
-  const requestDstLang = dstLang;
+function translationPort() {
+  if (port) return port;
+  port = chrome.runtime.connect({ name: "translation" });
+  port.onMessage.addListener(handleEvent);
+  port.onDisconnect.addListener(() => {
+    port = null;
+    queueMicrotask(() => {
+      if (port) return;
+      const requestId = currentRequestId;
+      const message = activeScopeMessages.get(requestId);
+      if (message && pendingScopes.has(requestId)) translationPort().postMessage({ ...message, replaces_request_id: null });
+    });
+  });
+  return port;
+}
+
+function snapshotJobs(scope, requestId, requestSrcLang, requestDstLang) {
+  const images = [...document.querySelectorAll("img")];
+  const candidates = selectCandidates(images, scope, innerWidth, innerHeight, MIN_SIZE);
+  for (const img of images) {
+    if (scope !== "loaded" && !isViewportVisible(img, innerWidth, innerHeight)) continue;
+    imageRequests.set(img, requestId);
+    const overlay = overlays.get(img);
+    if (overlay && (overlay.srcLang !== requestSrcLang || overlay.dstLang !== requestDstLang || sourceSignature(img) !== overlay.sourceSignature)) removeOverlay(img);
+  }
+  return candidates.map((candidate) => {
+    const jobId = crypto.randomUUID();
+    const cropSignature = JSON.stringify(candidate.crop || "full");
+    const overlay = overlays.get(candidate.img);
+    if (overlay && overlay.cropSignature !== cropSignature) removeOverlay(candidate.img);
+    jobBindings.set(jobId, { img: candidate.img, requestId, source: candidate.source, sourceSignature: candidate.source_signature, cropSignature, scope, srcLang: requestSrcLang, dstLang: requestDstLang });
+    return { job_id: jobId, source_url: candidate.source, crop: candidate.crop, natural_width: candidate.natural_width, natural_height: candidate.natural_height, distance: candidate.distance, priority: isViewportVisible(candidate.img, innerWidth, innerHeight) ? 0 : 1 };
+  });
+}
+
+function translatePage(scope, requestSrcLang = srcLang, requestDstLang = dstLang) {
+  const requestId = crypto.randomUUID();
+  const replacesRequestId = currentRequestId;
+  if (replacesRequestId) cleanupRequest(replacesRequestId, { ok: false, error: "superseded" });
+  currentRequestId = requestId;
+  srcLang = requestSrcLang;
+  dstLang = requestDstLang;
   let jobs;
-  try {
-    jobs = selectCandidates(
-      document.querySelectorAll("img"),
-      scope,
-      translated,
-      innerWidth,
-      innerHeight,
-      MIN_SIZE
-    );
-  } catch (e) {
-    return { ok: false, error: e.message || String(e) };
-  }
-  if (!jobs.length) return { ok: true, images: 0, blocks: 0 };
-
-  // background giới hạn 2 request /ocr đồng thời
-  const ocrResults = await Promise.all(
-    jobs.map(({ source }) =>
-      chrome.runtime.sendMessage({
-        type: "ocrImage",
-        url: source,
-        srcLang: requestSrcLang,
-      })
-    )
-  );
-
-  const texts = [];
-  const slots = []; // ảnh OCR thành công + vị trí text của nó trong mảng chung
-  ocrResults.forEach((res, i) => {
-    if (!res || !res.ok) {
-      if (res) console.warn("[MangaTranslator] ocr:", res.error);
-      return; // không done → lần bấm sau thử lại
-    }
-    const indices = res.blocks.map((b) => texts.push(b.src_text) - 1);
-    slots.push({ ...jobs[i], data: res, indices });
-  });
-
-  if (!texts.length) {
-    let images = 0;
-    for (const slot of slots) {
-      if (!isCurrentSource(slot.img, slot.source)) continue;
-      translated.set(slot.img, slot.source);
-      images++;
-    }
-    return { ok: true, images, blocks: 0 };
-  }
-
-  const tr = await chrome.runtime.sendMessage({
-    type: "translateTexts",
-    texts,
-    srcLang: requestSrcLang,
-    dstLang: requestDstLang,
-  });
-  if (!tr || !tr.ok) return { ok: false, error: tr ? tr.error : "mất kết nối background" };
-
-  let images = 0;
-  let blocks = 0;
-  for (const slot of slots) {
-    if (!isCurrentSource(slot.img, slot.source)) continue;
-    slot.data.blocks.forEach((block, i) => (block.trans_text = tr.translations[slot.indices[i]]));
-    if (slot.data.blocks.length) renderOverlay(slot.img, slot.data, slot.source, scope);
-    translated.set(slot.img, slot.source);
-    images++;
-    blocks += slot.data.blocks.length;
-  }
-  return { ok: true, images, blocks };
+  try { jobs = snapshotJobs(scope, requestId, srcLang, dstLang); }
+  catch (error) { return Promise.resolve({ ok: false, error: error.message || String(error) }); }
+  const done = new Promise((resolve) => pendingScopes.set(requestId, { resolve, startedAt: performance.now(), firstOverlayMs: null }));
+  const message = { type: "start_scope", request_id: requestId, replaces_request_id: replacesRequestId, scope, src_lang: srcLang, dst_lang: dstLang, jobs };
+  activeScopeMessages.set(requestId, message);
+  translationPort().postMessage(message);
+  return done;
 }
 
-// ---- overlay ----
-
-function removeOverlay(img) {
-  const overlay = overlays.get(img);
-  if (!overlay) return;
-  overlay.resizeObserver.disconnect();
-  if (overlay.intersectionObserver) overlay.intersectionObserver.disconnect();
-  overlay.container.remove();
-  overlays.delete(img);
-  translated.delete(img);
+function validBinding(event) {
+  const binding = jobBindings.get(event.job_id);
+  if (!binding || binding.requestId !== event.request_id) return null;
+  if (imageRequests.get(binding.img) !== event.request_id || !binding.img.isConnected) return null;
+  if (!isCurrentSource(binding.img, binding.source, binding.scope) || sourceSignature(binding.img) !== binding.sourceSignature) return null;
+  return binding.srcLang === srcLang && binding.dstLang === dstLang ? binding : null;
 }
 
-function pruneOverlays() {
-  for (const [img, overlay] of overlays) {
-    if (!isCurrentSource(img, overlay.source)) removeOverlay(img);
+function handleEvent(event) {
+  if (event.type === "translation") { const binding = validBinding(event); if (binding) upsertOverlayBlock(binding.img, binding, event); return; }
+  if (event.type === "image_done") { const binding = validBinding(event); if (binding && event.translated === 0) removeOverlay(binding.img); return; }
+  if (event.type === "scope_error") return cleanupRequest(event.request_id, { ok: false, error: event.code || event.error });
+  if (event.type === "scope_done") {
+    const pending = pendingScopes.get(event.request_id);
+    if (!pending) return;
+    cleanupRequest(event.request_id, { ok: true, images: event.images, blocks: event.translated, failed: event.failed, cacheHit: event.cache_hit === true, first_overlay_ms: pending.firstOverlayMs, metrics: event.metrics });
   }
 }
 
-function schedulePrune() {
-  if (pruneFrame) return;
-  pruneFrame = requestAnimationFrame(() => {
-    pruneFrame = 0;
-    pruneOverlays();
-  });
-}
-
-function renderOverlay(img, data, source, scope) {
-  removeOverlay(img);
-
+function ensureOverlay(img, binding, event) {
+  let overlay = overlays.get(img);
+  if (overlay && overlay.requestId !== binding.requestId) {
+    if (overlay.source === binding.source && overlay.sourceSignature === binding.sourceSignature && overlay.cropSignature === binding.cropSignature && overlay.srcLang === binding.srcLang && overlay.dstLang === binding.dstLang) overlay.requestId = binding.requestId;
+    else { removeOverlay(img); overlay = null; }
+  }
+  if (overlay) return overlay;
   const container = document.createElement("div");
   container.className = "mt-overlay";
   if (!enabled) container.style.display = "none";
-  for (const block of data.blocks) {
-    const element = document.createElement("div");
-    element.className = "mt-bubble";
-    element.textContent = block.trans_text;
-    container.appendChild(element);
-  }
   document.body.appendChild(container);
+  overlay = { container, source: binding.source, sourceSignature: binding.sourceSignature, cropSignature: binding.cropSignature, scope: binding.scope, requestId: binding.requestId, srcLang: binding.srcLang, dstLang: binding.dstLang, imageW: event.image_w, imageH: event.image_h, blocks: new Map(), resizeObserver: new ResizeObserver(() => position(img)) };
+  overlays.set(img, overlay);
+  overlay.resizeObserver.observe(img);
+  return overlay;
+}
 
-  const resizeObserver = new ResizeObserver(() => position(img));
-  const intersectionObserver =
-    scope === "visible"
-      ? new IntersectionObserver(([entry]) => {
-          if (
-            overlays.get(img)?.intersectionObserver === intersectionObserver &&
-            !entry.isIntersecting
-          ) removeOverlay(img);
-        })
-      : null;
-
-  overlays.set(img, { container, data, source, scope, resizeObserver, intersectionObserver });
+function upsertOverlayBlock(img, binding, event) {
+  const overlay = ensureOverlay(img, binding, event);
+  overlay.imageW = event.image_w;
+  overlay.imageH = event.image_h;
+  let block = overlay.blocks.get(event.block_id);
+  if (!block) { const element = document.createElement("div"); element.className = "mt-bubble"; overlay.container.appendChild(element); block = { element, bbox: event.bbox }; overlay.blocks.set(event.block_id, block); }
+  block.bbox = event.bbox;
+  block.element.textContent = event.trans_text;
   position(img);
-  resizeObserver.observe(img);
-  if (intersectionObserver) intersectionObserver.observe(img);
+  const pending = pendingScopes.get(binding.requestId);
+  if (pending && pending.firstOverlayMs == null) { pending.firstOverlayMs = Math.round(performance.now() - pending.startedAt); translationPort().postMessage({ type: "render_metric", request_id: binding.requestId, first_overlay_ms: pending.firstOverlayMs }); }
 }
 
-// Định vị theo TỌA ĐỘ TÀI LIỆU (spec): container absolute với top/left = vị trí
-// ảnh + scroll hiện tại → trình duyệt tự cuộn overlay cùng ảnh, không cần scroll listener.
-function position(img) {
-  const o = overlays.get(img);
-  if (!o) return;
-  const r = img.getBoundingClientRect();
-  o.container.style.left = r.left + scrollX + "px";
-  o.container.style.top = r.top + scrollY + "px";
-  o.container.style.width = r.width + "px";
-  o.container.style.height = r.height + "px";
-
-  const scale = r.width / img.naturalWidth; // bbox theo pixel ảnh gốc (spec)
-  o.data.blocks.forEach((b, i) => {
-    const [x, y, w, h] = b.bbox;
-    const el = o.container.children[i];
-    el.style.left = x * scale + "px";
-    el.style.top = y * scale + "px";
-    el.style.width = w * scale + "px";
-    el.style.height = h * scale + "px";
-    fitText(el);
-  });
-}
-
-// Auto-fit: giảm font tới khi chữ nằm gọn trong bubble, sàn 10px (spec)
-function fitText(el) {
-  let size = 18;
-  el.style.fontSize = size + "px";
-  while (size > 10 && (el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth)) {
-    size--;
-    el.style.fontSize = size + "px";
-  }
-}
-
-function repositionOverlays() {
-  schedulePrune();
-  for (const img of overlays.keys()) position(img);
-}
-
-new MutationObserver(schedulePrune).observe(document.body, {
-  subtree: true,
-  childList: true,
-  attributes: true,
-  attributeFilter: ["src", "srcset", "sizes", "media", "type"],
-});
-
+function removeOverlay(img) { const overlay = overlays.get(img); if (!overlay) return; overlay.resizeObserver.disconnect(); overlay.container.remove(); overlays.delete(img); }
+function pruneOverlays() { for (const [img, overlay] of overlays) if (!img.isConnected || sourceSignature(img) !== overlay.sourceSignature || !isCurrentSource(img, overlay.source, overlay.scope)) removeOverlay(img); }
+function schedulePrune() { if (!pruneFrame) pruneFrame = requestAnimationFrame(() => { pruneFrame = 0; pruneOverlays(); }); }
+function position(img) { const overlay = overlays.get(img); if (!overlay) return; const rect = renderedImageRect(img); Object.assign(overlay.container.style, { left: rect.left + scrollX + "px", top: rect.top + scrollY + "px", width: rect.width + "px", height: rect.height + "px" }); for (const block of overlay.blocks.values()) { const [x, y, w, h] = block.bbox; Object.assign(block.element.style, { left: x * rect.width / overlay.imageW + "px", top: y * rect.height / overlay.imageH + "px", width: w * rect.width / overlay.imageW + "px", height: h * rect.height / overlay.imageH + "px" }); fitText(block.element); } }
+function fitText(element) { let size = 18; element.style.fontSize = size + "px"; while (size > 10 && (element.scrollHeight > element.clientHeight || element.scrollWidth > element.clientWidth)) element.style.fontSize = --size + "px"; }
+function repositionOverlays() { schedulePrune(); for (const img of overlays.keys()) position(img); }
+async function prewarmPage(requestSrcLang) { if (typeof location !== "undefined" && (location.hostname === "127.0.0.1" || location.hostname === "localhost") && location.port === "8910" && new URL(location.href).searchParams.has("acceptance")) return; try { const jobs = selectCandidates(document.querySelectorAll("img"), "visible", innerWidth, innerHeight, MIN_SIZE); const selected = jobs.sort((a, b) => visibleArea(b.img, innerWidth, innerHeight) - visibleArea(a.img, innerWidth, innerHeight))[0]; if (selected) await chrome.runtime.sendMessage({ type: "prewarmJob", source_url: selected.source, crop: selected.crop, natural_width: selected.natural_width, natural_height: selected.natural_height, src_lang: requestSrcLang }); } catch (error) { console.warn("[MangaTranslator] prewarm:", error); } }
+new MutationObserver(schedulePrune).observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["src", "srcset", "sizes", "media", "type"] });
 new ResizeObserver(repositionOverlays).observe(document.documentElement);
 window.addEventListener("resize", repositionOverlays);

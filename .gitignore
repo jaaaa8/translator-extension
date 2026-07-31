@@ -7,3 +7,24 @@ server/vendor/
 *.onnx
 .worktrees/
 .superpowers/sdd/
+
+# State/cache cua tool, khong phai source
+.codegraph/
+.codex/
+.tokensave/
+.claude/
+graphify-out/
+
+# Log va thu muc tam khi chay benchmark/acceptance
+.tmp-task10-browser/
+log.txt
+
+# UI state cua Obsidian (config con lai van track)
+MangaTranslatorBrowser/.obsidian/workspace.json
+
+# Khoa ky extension - khong bao gio commit
+*.pem
+*.crx
+
+# Thu muc la, khong thuoc project
+m5/

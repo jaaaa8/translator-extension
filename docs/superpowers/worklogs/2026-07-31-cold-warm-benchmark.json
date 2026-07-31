@@ -1,0 +1,948 @@
+{
+  "captured_at": "2026-07-30T21:28:57.888Z",
+  "chrome": "Chrome/150.0.7871.187",
+  "node": "v24.15.0",
+  "extension_id": "dkfmlgjnanglgccfjfojakbdpgdlepbi",
+  "extension_path": "D:\\MangaTranslator\\.worktrees\\progressive-session-translation\\extension",
+  "fixture": "http://127.0.0.1:8000/fixture.html?benchmark=cold",
+  "server_health": {
+    "status": "ok",
+    "device": "cuda",
+    "langs": [
+      "ja",
+      "es"
+    ],
+    "versions": {
+      "detector": "comic-text-detector-v1",
+      "dedupe": "iou-0.5-area-bbox-v2",
+      "prep": "upscale48-border8-v1",
+      "recognizers": {
+        "ja": "manga-ocr-v1",
+        "es": "paddleocr-es-v1"
+      },
+      "translator_model": "gemini-flash-lite-latest",
+      "prompt": "comic-items-v1",
+      "policy": "microbatch-3-8-250-500-v1",
+      "page_schema": "page-v1"
+    }
+  },
+  "cold": {
+    "first_overlay_ms": {
+      "n": 20,
+      "p50": 984,
+      "p95": 1322,
+      "max": 1401
+    },
+    "total_ms": {
+      "n": 20,
+      "p50": 986,
+      "p95": 1323,
+      "max": 1402
+    },
+    "first_translation_ms": {
+      "n": 20,
+      "p50": 977,
+      "p95": 1315,
+      "max": 1393
+    },
+    "first_ocr_ms": {
+      "n": 20,
+      "p50": 207,
+      "p95": 240,
+      "max": 538
+    },
+    "queue_wait_ms": {
+      "n": 20,
+      "p50": 1,
+      "p95": 2,
+      "max": 3
+    },
+    "fetch_ms": {
+      "n": 20,
+      "p50": 4,
+      "p95": 4,
+      "max": 5
+    },
+    "analysis_ms": {
+      "n": 20,
+      "p50": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "blocks": {
+      "n": 20,
+      "p50": 1,
+      "p95": 1,
+      "max": 1
+    },
+    "cache_hits": 0,
+    "failed": 0,
+    "unique_sources": 20,
+    "summary": {
+      "first_overlay_ms": {
+        "p50": 984,
+        "p95": 1322
+      },
+      "first_translation_ms": {
+        "p50": 977,
+        "p95": 1315
+      },
+      "total_ms": {
+        "p50": 986,
+        "p95": 1323
+      },
+      "cancel_latency_ms": {
+        "p50": null,
+        "p95": null
+      },
+      "counters": {
+        "translation_calls": 21,
+        "rate_limited": 0,
+        "stale_work": 0
+      }
+    },
+    "samples": [
+      {
+        "index": 1,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=1",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 1320,
+        "metrics": {
+          "queue_wait_ms": 2,
+          "fetch_ms": 5,
+          "analysis_ms": 0,
+          "first_ocr_ms": 538,
+          "first_translation_ms": 1314,
+          "total_ms": 1321
+        },
+        "driver_ms": 1328
+      },
+      {
+        "index": 2,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=2",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 1401,
+        "metrics": {
+          "queue_wait_ms": 2,
+          "fetch_ms": 4,
+          "analysis_ms": 0,
+          "first_ocr_ms": 201,
+          "first_translation_ms": 1393,
+          "total_ms": 1402
+        },
+        "driver_ms": 1408
+      },
+      {
+        "index": 3,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=3",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 969,
+        "metrics": {
+          "queue_wait_ms": 2,
+          "fetch_ms": 3,
+          "analysis_ms": 0,
+          "first_ocr_ms": 204,
+          "first_translation_ms": 963,
+          "total_ms": 971
+        },
+        "driver_ms": 974
+      },
+      {
+        "index": 4,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=4",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 1042,
+        "metrics": {
+          "queue_wait_ms": 1,
+          "fetch_ms": 4,
+          "analysis_ms": 0,
+          "first_ocr_ms": 221,
+          "first_translation_ms": 1036,
+          "total_ms": 1042
+        },
+        "driver_ms": 1046
+      },
+      {
+        "index": 5,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=5",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 929,
+        "metrics": {
+          "queue_wait_ms": 1,
+          "fetch_ms": 4,
+          "analysis_ms": 0,
+          "first_ocr_ms": 204,
+          "first_translation_ms": 922,
+          "total_ms": 931
+        },
+        "driver_ms": 936
+      },
+      {
+        "index": 6,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=6",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 996,
+        "metrics": {
+          "queue_wait_ms": 1,
+          "fetch_ms": 4,
+          "analysis_ms": 0,
+          "first_ocr_ms": 200,
+          "first_translation_ms": 991,
+          "total_ms": 1000
+        },
+        "driver_ms": 1004
+      },
+      {
+        "index": 7,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=7",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 974,
+        "metrics": {
+          "queue_wait_ms": 1,
+          "fetch_ms": 3,
+          "analysis_ms": 0,
+          "first_ocr_ms": 232,
+          "first_translation_ms": 969,
+          "total_ms": 975
+        },
+        "driver_ms": 978
+      },
+      {
+        "index": 8,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=8",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 998,
+        "metrics": {
+          "queue_wait_ms": 1,
+          "fetch_ms": 4,
+          "analysis_ms": 0,
+          "first_ocr_ms": 227,
+          "first_translation_ms": 991,
+          "total_ms": 1001
+        },
+        "driver_ms": 1005
+      },
+      {
+        "index": 9,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=9",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 913,
+        "metrics": {
+          "queue_wait_ms": 2,
+          "fetch_ms": 4,
+          "analysis_ms": 0,
+          "first_ocr_ms": 227,
+          "first_translation_ms": 906,
+          "total_ms": 915
+        },
+        "driver_ms": 920
+      },
+      {
+        "index": 10,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=10",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 1170,
+        "metrics": {
+          "queue_wait_ms": 1,
+          "fetch_ms": 4,
+          "analysis_ms": 0,
+          "first_ocr_ms": 215,
+          "first_translation_ms": 1164,
+          "total_ms": 1174
+        },
+        "driver_ms": 1177
+      },
+      {
+        "index": 11,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=11",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 1017,
+        "metrics": {
+          "queue_wait_ms": 1,
+          "fetch_ms": 3,
+          "analysis_ms": 0,
+          "first_ocr_ms": 221,
+          "first_translation_ms": 1011,
+          "total_ms": 1019
+        },
+        "driver_ms": 1021
+      },
+      {
+        "index": 12,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=12",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 907,
+        "metrics": {
+          "queue_wait_ms": 2,
+          "fetch_ms": 4,
+          "analysis_ms": 0,
+          "first_ocr_ms": 214,
+          "first_translation_ms": 900,
+          "total_ms": 911
+        },
+        "driver_ms": 916
+      },
+      {
+        "index": 13,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=13",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 1031,
+        "metrics": {
+          "queue_wait_ms": 1,
+          "fetch_ms": 3,
+          "analysis_ms": 0,
+          "first_ocr_ms": 240,
+          "first_translation_ms": 1025,
+          "total_ms": 1036
+        },
+        "driver_ms": 1040
+      },
+      {
+        "index": 14,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=14",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 927,
+        "metrics": {
+          "queue_wait_ms": 1,
+          "fetch_ms": 3,
+          "analysis_ms": 0,
+          "first_ocr_ms": 207,
+          "first_translation_ms": 921,
+          "total_ms": 933
+        },
+        "driver_ms": 937
+      },
+      {
+        "index": 15,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=15",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 984,
+        "metrics": {
+          "queue_wait_ms": 2,
+          "fetch_ms": 4,
+          "analysis_ms": 0,
+          "first_ocr_ms": 196,
+          "first_translation_ms": 979,
+          "total_ms": 986
+        },
+        "driver_ms": 988
+      },
+      {
+        "index": 16,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=16",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 1322,
+        "metrics": {
+          "queue_wait_ms": 1,
+          "fetch_ms": 4,
+          "analysis_ms": 0,
+          "first_ocr_ms": 198,
+          "first_translation_ms": 1315,
+          "total_ms": 1323
+        },
+        "driver_ms": 1327
+      },
+      {
+        "index": 17,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=17",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 941,
+        "metrics": {
+          "queue_wait_ms": 3,
+          "fetch_ms": 4,
+          "analysis_ms": 0,
+          "first_ocr_ms": 196,
+          "first_translation_ms": 934,
+          "total_ms": 943
+        },
+        "driver_ms": 946
+      },
+      {
+        "index": 18,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=18",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 943,
+        "metrics": {
+          "queue_wait_ms": 2,
+          "fetch_ms": 4,
+          "analysis_ms": 0,
+          "first_ocr_ms": 219,
+          "first_translation_ms": 937,
+          "total_ms": 948
+        },
+        "driver_ms": 951
+      },
+      {
+        "index": 19,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=19",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 940,
+        "metrics": {
+          "queue_wait_ms": 2,
+          "fetch_ms": 3,
+          "analysis_ms": 0,
+          "first_ocr_ms": 206,
+          "first_translation_ms": 933,
+          "total_ms": 943
+        },
+        "driver_ms": 946
+      },
+      {
+        "index": 20,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=20",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": false,
+        "first_overlay_ms": 985,
+        "metrics": {
+          "queue_wait_ms": 2,
+          "fetch_ms": 3,
+          "analysis_ms": 0,
+          "first_ocr_ms": 201,
+          "first_translation_ms": 977,
+          "total_ms": 990
+        },
+        "driver_ms": 997
+      }
+    ]
+  },
+  "warm": {
+    "first_overlay_ms": {
+      "n": 20,
+      "p50": 4,
+      "p95": 8,
+      "max": 8
+    },
+    "total_ms": {
+      "n": 20,
+      "p50": 3,
+      "p95": 6,
+      "max": 6
+    },
+    "first_translation_ms": {
+      "n": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "max": null
+    },
+    "first_ocr_ms": {
+      "n": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "max": null
+    },
+    "queue_wait_ms": {
+      "n": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "max": null
+    },
+    "fetch_ms": {
+      "n": 20,
+      "p50": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "analysis_ms": {
+      "n": 20,
+      "p50": 0,
+      "p95": 0,
+      "max": 0
+    },
+    "blocks": {
+      "n": 20,
+      "p50": 1,
+      "p95": 1,
+      "max": 1
+    },
+    "cache_hits": 20,
+    "failed": 0,
+    "unique_sources": 20,
+    "summary": {
+      "first_overlay_ms": {
+        "p50": 4,
+        "p95": 8
+      },
+      "first_translation_ms": {
+        "p50": null,
+        "p95": null
+      },
+      "total_ms": {
+        "p50": 3,
+        "p95": 6
+      },
+      "cancel_latency_ms": {
+        "p50": null,
+        "p95": null
+      },
+      "counters": {
+        "translation_calls": 0,
+        "rate_limited": 0,
+        "stale_work": 0
+      }
+    },
+    "samples": [
+      {
+        "index": 1,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=1",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 3,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 2
+        },
+        "driver_ms": 6
+      },
+      {
+        "index": 2,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=2",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 4,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 3
+        },
+        "driver_ms": 9
+      },
+      {
+        "index": 3,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=3",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 4,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 3
+        },
+        "driver_ms": 8
+      },
+      {
+        "index": 4,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=4",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 8,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 6
+        },
+        "driver_ms": 11
+      },
+      {
+        "index": 5,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=5",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 5,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 4
+        },
+        "driver_ms": 7
+      },
+      {
+        "index": 6,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=6",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 8,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 6
+        },
+        "driver_ms": 13
+      },
+      {
+        "index": 7,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=7",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 6,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 4
+        },
+        "driver_ms": 9
+      },
+      {
+        "index": 8,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=8",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 4,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 2
+        },
+        "driver_ms": 8
+      },
+      {
+        "index": 9,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=9",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 4,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 3
+        },
+        "driver_ms": 7
+      },
+      {
+        "index": 10,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=10",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 4,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 2
+        },
+        "driver_ms": 7
+      },
+      {
+        "index": 11,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=11",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 4,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 2
+        },
+        "driver_ms": 8
+      },
+      {
+        "index": 12,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=12",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 5,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 4
+        },
+        "driver_ms": 8
+      },
+      {
+        "index": 13,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=13",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 3,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 2
+        },
+        "driver_ms": 6
+      },
+      {
+        "index": 14,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=14",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 5,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 4
+        },
+        "driver_ms": 7
+      },
+      {
+        "index": 15,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=15",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 5,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 3
+        },
+        "driver_ms": 9
+      },
+      {
+        "index": 16,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=16",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 3,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 2
+        },
+        "driver_ms": 6
+      },
+      {
+        "index": 17,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=17",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 5,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 3
+        },
+        "driver_ms": 8
+      },
+      {
+        "index": 18,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=18",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 3,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 2
+        },
+        "driver_ms": 6
+      },
+      {
+        "index": 19,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=19",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 4,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 3
+        },
+        "driver_ms": 8
+      },
+      {
+        "index": 20,
+        "source": "http://127.0.0.1:8000/ja_page.png?benchmark=20",
+        "ok": true,
+        "images": 1,
+        "blocks": 1,
+        "failed": 0,
+        "cacheHit": true,
+        "first_overlay_ms": 4,
+        "metrics": {
+          "queue_wait_ms": null,
+          "fetch_ms": 0,
+          "analysis_ms": 0,
+          "first_ocr_ms": null,
+          "first_translation_ms": null,
+          "total_ms": 2
+        },
+        "driver_ms": 6
+      }
+    ]
+  }
+}

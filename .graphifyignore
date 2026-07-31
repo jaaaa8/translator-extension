@@ -1,0 +1,6 @@
+# Tooling noise — not project structure
+.codex/
+.claude/
+.tokensave/
+graphify-out/
+MangaTranslatorBrowser/.obsidian/

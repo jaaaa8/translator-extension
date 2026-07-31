@@ -4,7 +4,12 @@ const {
   eligible,
   isViewportVisible,
   isCurrentSource,
+  viewportCrop,
+  visibleArea,
   selectCandidates,
+  viewportDistance,
+  sourceSignature,
+  renderedImageRect,
 } = require("../srcset.js");
 
 // srcset nhiều biến thể → chọn URL có descriptor lớn nhất
@@ -85,12 +90,12 @@ const offscreenImage = fakeImage({
 });
 const smallImage = fakeImage({ src: "https://x/icon.jpg", naturalWidth: 100, naturalHeight: 100 });
 const incompleteImage = fakeImage({ src: "https://x/loading.jpg", complete: false });
-const translated = new WeakMap([[doneImage, doneImage.src]]);
-
-assert.deepStrictEqual(
-  selectCandidates([doneImage, offscreenImage, smallImage, incompleteImage], "loaded", translated, 800, 600),
-  [{ img: offscreenImage, source: offscreenImage.src }]
-);
+const loadedJobs = selectCandidates([doneImage, offscreenImage, smallImage, incompleteImage], "loaded", 800, 600);
+assert.strictEqual(loadedJobs.length, 2);
+assert.strictEqual(loadedJobs[0].natural_width, doneImage.naturalWidth);
+assert.strictEqual(loadedJobs[0].natural_height, doneImage.naturalHeight);
+assert.strictEqual(typeof loadedJobs[0].distance, "number");
+assert.strictEqual(typeof loadedJobs[0].source_signature, "string");
 
 const visibleImage = fakeImage({ src: "https://x/visible.jpg" });
 const partiallyVisibleImage = fakeImage({
@@ -102,18 +107,63 @@ const zeroSizeImage = fakeImage({
   rect: { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 },
 });
 assert.deepStrictEqual(
-  selectCandidates([visibleImage, partiallyVisibleImage, offscreenImage], "visible", new WeakMap(), 800, 600),
-  [
-    { img: visibleImage, source: visibleImage.src },
-    { img: partiallyVisibleImage, source: partiallyVisibleImage.src },
-  ]
+  selectCandidates([visibleImage, partiallyVisibleImage, offscreenImage], "visible", 800, 600).map(({ img, source, crop }) => ({ img, source, crop })),
+  [{ img: visibleImage, source: visibleImage.src, crop: null }, { img: partiallyVisibleImage, source: partiallyVisibleImage.src, crop: { left: 0, top: 0.725, right: 1, bottom: 1 } }]
 );
 
 doneImage.src = "https://x/new-page.jpg";
 assert.deepStrictEqual(
-  selectCandidates([doneImage], "loaded", translated, 800, 600),
-  [{ img: doneImage, source: doneImage.src }]
+  selectCandidates([doneImage], "loaded", 800, 600).map(({ img, source, crop }) => ({ img, source, crop })),
+  [{ img: doneImage, source: doneImage.src, crop: null }]
 );
+
+const croppedImage = fakeImage({
+  src: "https://x/original.jpg",
+  rect: { left: 0, top: -300, right: 600, bottom: 100, width: 600, height: 400 },
+});
+croppedImage.currentSrc = "https://x/current-1000.jpg";
+
+assert.deepStrictEqual(viewportCrop(croppedImage, 800, 600), {
+  left: 0,
+  top: 0.725,
+  right: 1,
+  bottom: 1,
+});
+
+const [visibleJob] = selectCandidates(
+  [croppedImage],
+  "visible",
+  800,
+  600
+);
+assert.strictEqual(visibleJob.source, croppedImage.currentSrc);
+assert.deepStrictEqual(visibleJob.crop, { left: 0, top: 0.725, right: 1, bottom: 1 });
+
+const twoXImage = fakeImage({
+  src: "https://x/fallback-1x.jpg",
+  naturalWidth: 1000,
+  naturalHeight: 1000,
+  rect: { left: -100, top: -100, right: 300, bottom: 300, width: 400, height: 400 },
+});
+twoXImage.currentSrc = "https://x/selected-2x.jpg";
+const twoXCrop = viewportCrop(twoXImage, 200, 200);
+twoXImage.naturalWidth = 2000;
+twoXImage.naturalHeight = 2000;
+assert.deepStrictEqual(twoXCrop, { left: 0.2, top: 0.2, right: 0.8, bottom: 0.8 });
+assert.deepStrictEqual(viewportCrop(twoXImage, 200, 200), twoXCrop);
+assert.deepStrictEqual(
+  selectCandidates([twoXImage], "visible", 200, 200)[0].crop,
+  twoXCrop
+);
+
+const fullJob = selectCandidates(
+  [visibleImage],
+  "visible",
+  800,
+  600
+)[0];
+assert.strictEqual(fullJob.crop, null);
+assert.strictEqual(isCurrentSource(croppedImage, croppedImage.currentSrc, "visible"), true);
 
 assert.strictEqual(eligible(visibleImage), true);
 assert.strictEqual(eligible(smallImage), false);
@@ -121,6 +171,7 @@ assert.strictEqual(isViewportVisible(visibleImage, 800, 600), true);
 assert.strictEqual(isViewportVisible(partiallyVisibleImage, 800, 600), true);
 assert.strictEqual(isViewportVisible(offscreenImage, 800, 600), false);
 assert.strictEqual(isViewportVisible(zeroSizeImage, 800, 600), false);
+assert.strictEqual(visibleArea(visibleImage, 800, 600), 300000);
 
 const currentImage = fakeImage({ src: "https://x/current.jpg" });
 assert.strictEqual(isCurrentSource(currentImage, currentImage.src), true);
@@ -130,8 +181,53 @@ currentImage.isConnected = false;
 assert.strictEqual(isCurrentSource(currentImage, currentImage.src), false);
 
 assert.throws(
-  () => selectCandidates([], "auto", new WeakMap(), 800, 600),
+  () => selectCandidates([], "auto", 800, 600),
   /scope không hỗ trợ/
 );
+assert.strictEqual(viewportDistance(offscreenImage, 800, 600), 300);
+assert.strictEqual(sourceSignature(doneImage), '[[' + JSON.stringify(doneImage.src) + ',"","","",""]]');
+
+const containedImage = fakeImage({
+  naturalWidth: 800,
+  naturalHeight: 1200,
+  rect: { left: 100, top: 50, right: 1300, bottom: 650, width: 1200, height: 600 },
+});
+const previousGetComputedStyle = global.getComputedStyle;
+global.getComputedStyle = () => ({ objectFit: "contain", objectPosition: "50% 50%" });
+assert.deepStrictEqual(renderedImageRect(containedImage), {
+  left: 500, top: 50, right: 900, bottom: 650, width: 400, height: 600,
+});
+assert.strictEqual(visibleArea(containedImage, 450, 700), 0);
+assert.strictEqual(isViewportVisible(containedImage, 450, 700), false);
+assert.strictEqual(viewportDistance(containedImage, 450, 700), 50);
+assert.deepStrictEqual(viewportCrop(containedImage, 700, 700, 0), {
+  left: 0, top: 0, right: 0.5, bottom: 1,
+});
+
+global.getComputedStyle = () => ({ objectFit: "scale-down", objectPosition: "50% 50%" });
+const scaleDownImage = fakeImage({
+  naturalWidth: 200,
+  naturalHeight: 100,
+  rect: { left: 0, top: 0, right: 400, bottom: 400, width: 400, height: 400 },
+});
+assert.deepStrictEqual(renderedImageRect(scaleDownImage), {
+  left: 100, top: 150, right: 300, bottom: 250, width: 200, height: 100,
+});
+global.getComputedStyle = previousGetComputedStyle;
+
+const signatureSource = { srcset: "page.webp 640w", sizes: "100vw", media: "(min-width: 1px)", getAttribute(name) { return this[name] || ""; } };
+const signaturePicture = { tagName: "PICTURE", querySelectorAll: () => [signatureSource] };
+const signatureImage = fakeImage({ src: "https://x/signature.jpg" });
+signatureImage.parentElement = signaturePicture;
+const signature1 = sourceSignature(signatureImage);
+signatureSource.srcset = "page-new.webp 1280w";
+const signature2 = sourceSignature(signatureImage);
+assert.notStrictEqual(signature2, signature1);
+signatureSource.media = "(min-width: 2px)";
+const signature3 = sourceSignature(signatureImage);
+assert.notStrictEqual(signature3, signature2);
+signatureSource.sizes = "50vw";
+const signature4 = sourceSignature(signatureImage);
+assert.notStrictEqual(signature4, signature3);
 
 console.log("srcset.test.js OK");

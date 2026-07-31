@@ -6,7 +6,7 @@
       body { font-family: "Segoe UI", sans-serif; width: 220px; padding: 10px; }
       label { display: block; margin: 8px 0 2px; font-size: 12px; color: #555; }
       select { width: 100%; }
-      #status { margin-top: 10px; font-size: 12px; }
+      #status, #cacheStatus { margin-top: 10px; font-size: 12px; }
       .row { display: flex; align-items: center; gap: 6px; }
       .action { width: 100%; margin-top: 12px; padding: 8px; font-weight: bold; cursor: pointer; }
       .action + .action { margin-top: 6px; }
@@ -30,6 +30,7 @@
     <button id="translateLoaded" class="action">Dịch webtoon đã tải</button>
     <button id="translateVisible" class="action">Dịch trang đang xem</button>
     <div id="result" style="margin-top: 6px; font-size: 12px; color: #555"></div>
+    <div id="cacheStatus">Đang dịch nền: 0 · Đã cache: 0 · Lỗi: 0</div>
     <div id="status">● đang kiểm tra server…</div>
     <script src="popup.js"></script>
   </body>

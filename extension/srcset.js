@@ -32,37 +32,108 @@ function eligible(img, minSize = 400) {
   return img.naturalWidth >= minSize && img.naturalHeight >= minSize && Boolean(bestSource(img));
 }
 
-function isViewportVisible(img, viewportWidth, viewportHeight) {
+function sourceForScope(img, scope) {
+  return scope === "visible" ? img.currentSrc || img.src : bestSource(img);
+}
+
+function renderedImageRect(img) {
   const rect = img.getBoundingClientRect();
-  return Boolean(
-    img.getClientRects().length &&
-      rect.width > 0 &&
-      rect.height > 0 &&
-      rect.bottom > 0 &&
-      rect.right > 0 &&
-      rect.top < viewportHeight &&
-      rect.left < viewportWidth
-  );
+  if (typeof getComputedStyle !== "function" || !img.naturalWidth || !img.naturalHeight) return rect;
+  let style;
+  try { style = getComputedStyle(img); } catch { return rect; }
+  if (style.objectFit !== "contain" && style.objectFit !== "scale-down") return rect;
+  const match = String(style.objectPosition || "").match(/^(-?(?:\d+\.?\d*|\.\d+))%\s+(-?(?:\d+\.?\d*|\.\d+))%$/);
+  if (!match) return rect;
+  let scale = Math.min(rect.width / img.naturalWidth, rect.height / img.naturalHeight);
+  if (style.objectFit === "scale-down") scale = Math.min(1, scale);
+  const width = img.naturalWidth * scale;
+  const height = img.naturalHeight * scale;
+  const left = rect.left + (rect.width - width) * Number(match[1]) / 100;
+  const top = rect.top + (rect.height - height) * Number(match[2]) / 100;
+  return { left, top, right: left + width, bottom: top + height, width, height };
 }
 
-function isCurrentSource(img, source) {
-  return img.isConnected && bestSource(img) === source;
+function visibleArea(img, viewportWidth, viewportHeight) {
+  if (!img.getClientRects().length) return 0;
+  const rect = renderedImageRect(img);
+  const width = Math.max(0, Math.min(rect.right, viewportWidth) - Math.max(rect.left, 0));
+  const height = Math.max(0, Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0));
+  return width * height;
 }
 
-function selectCandidates(images, scope, translated, viewportWidth, viewportHeight, minSize = 400) {
+function normalized(value) {
+  return Math.round(Math.max(0, Math.min(1, value)) * 1e6) / 1e6;
+}
+
+function viewportCrop(img, viewportWidth, viewportHeight, padding = 0.1) {
+  const rect = renderedImageRect(img);
+  const left = Math.max(0, rect.left);
+  const top = Math.max(0, rect.top);
+  const right = Math.min(viewportWidth, rect.right);
+  const bottom = Math.min(viewportHeight, rect.bottom);
+  if (!img.getClientRects().length || right <= left || bottom <= top || rect.width <= 0 || rect.height <= 0) {
+    return null;
+  }
+
+  const padX = (right - left) * padding;
+  const padY = (bottom - top) * padding;
+  const crop = {
+    left: normalized((Math.max(rect.left, left - padX) - rect.left) / rect.width),
+    top: normalized((Math.max(rect.top, top - padY) - rect.top) / rect.height),
+    right: normalized((Math.min(rect.right, right + padX) - rect.left) / rect.width),
+    bottom: normalized((Math.min(rect.bottom, bottom + padY) - rect.top) / rect.height),
+  };
+  if (crop.left === 0 && crop.top === 0 && crop.right === 1 && crop.bottom === 1) return null;
+  return crop;
+}
+
+function isViewportVisible(img, viewportWidth, viewportHeight) {
+  return visibleArea(img, viewportWidth, viewportHeight) > 0;
+}
+
+function isCurrentSource(img, source, scope = "loaded") {
+  return img.isConnected && sourceForScope(img, scope) === source;
+}
+
+function viewportDistance(img, viewportWidth, viewportHeight) {
+  const rect = renderedImageRect(img);
+  const dx = rect.right < 0 ? -rect.right : rect.left > viewportWidth ? rect.left - viewportWidth : 0;
+  const dy = rect.bottom < 0 ? -rect.bottom : rect.top > viewportHeight ? rect.top - viewportHeight : 0;
+  return Math.hypot(dx, dy);
+}
+
+function sourceSignature(img) {
+  const picture = img.parentElement?.tagName === "PICTURE" ? img.parentElement : null;
+  const elements = picture?.querySelectorAll ? [...picture.querySelectorAll("source"), img] : [img];
+  return JSON.stringify(elements.map((element) => ["src", "srcset", "sizes", "media", "type"].map((name) => element.getAttribute?.(name) || element[name] || "")));
+}
+
+function selectCandidates(images, scope, viewportWidth, viewportHeight, minSize = 400) {
   if (scope !== "loaded" && scope !== "visible") throw new Error(`scope không hỗ trợ: ${scope}`);
 
   const jobs = [];
   for (const img of images) {
     if (!img.complete || !eligible(img, minSize)) continue;
-    const source = bestSource(img);
-    if (translated.get(img) === source) continue;
     if (scope === "visible" && !isViewportVisible(img, viewportWidth, viewportHeight)) continue;
-    jobs.push({ img, source });
+    const source = sourceForScope(img, scope);
+    const crop = scope === "visible" ? viewportCrop(img, viewportWidth, viewportHeight) : null;
+    jobs.push({ img, source, crop, natural_width: img.naturalWidth, natural_height: img.naturalHeight, distance: viewportDistance(img, viewportWidth, viewportHeight), source_signature: sourceSignature(img) });
   }
   return jobs;
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { bestSource, eligible, isViewportVisible, isCurrentSource, selectCandidates };
+  module.exports = {
+    bestSource,
+    eligible,
+    sourceForScope,
+    renderedImageRect,
+    visibleArea,
+    viewportCrop,
+    viewportDistance,
+    sourceSignature,
+    isViewportVisible,
+    isCurrentSource,
+    selectCandidates,
+  };
 }

@@ -1,9 +1,13 @@
+import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event, Lock, Thread
+
 import cv2
 import numpy as np
 import pytest
 
 from server.detector import TextRegion
-from server.pipeline import Pipeline, _prep_crop
+from server.pipeline import Pipeline, _dedupe_regions, _prep_crop
 
 
 class FakeDetector:
@@ -13,6 +17,12 @@ class FakeDetector:
             TextRegion(bbox=(20, 100, 80, 40), vertical=True),  # OCR trả rỗng → loại
             TextRegion(bbox=(20, 500, 80, 40), vertical=False),  # ngoài biên ảnh → loại
         ]
+
+
+class EdgeDetector:
+    def detect(self, img):
+        h, w = img.shape[:2]
+        return [TextRegion(bbox=(w - 1, h - 1, 1, 1), vertical=False)]
 
 
 class FakeEngine:
@@ -33,6 +43,48 @@ class FakeOcr:
 class FakeTranslator:
     def translate(self, texts, src, dst):
         return [f"{dst}:{t}" for t in texts]
+
+
+class OverlapDetector:
+    def __init__(self):
+        self.active = 0
+        self.max_active = 0
+        self.lock = Lock()
+
+    def detect(self, img):
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        time.sleep(0.02)
+        with self.lock:
+            self.active -= 1
+        return [TextRegion(bbox=(0, 0, 20, 20), vertical=False)]
+
+
+class OverlapEngine:
+    def __init__(self):
+        self.active = 0
+        self.max_active = 0
+        self.lock = Lock()
+
+    def read(self, crop):
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        time.sleep(0.1)
+        with self.lock:
+            self.active -= 1
+        return ""
+
+
+class SharedOcr:
+    langs = ["ja", "es"]
+
+    def __init__(self, engine):
+        self.engine = engine
+
+    def get(self, lang):
+        return self.engine
 
 
 def encode_png(w, h):
@@ -66,6 +118,60 @@ def test_empty_ocr_blocks_are_dropped_not_translated():
     assert len(out["blocks"]) == 1  # block OCR rỗng không xuất hiện
 
 
+def regions(*bboxes):
+    return [TextRegion(bbox=b, vertical=False) for b in bboxes]
+
+
+def bboxes(regs):
+    return [r.bbox for r in regs]
+
+
+def test_dedupe_drops_near_duplicate_boxes_keeping_the_larger():
+    # toạ độ thật từ mangadex.jpeg: detector trả hai box lệch nhau 1 pixel
+    kept = _dedupe_regions(regions((379, 141, 121, 89), (379, 141, 122, 89)))
+    assert bboxes(kept) == [(379, 141, 122, 89)]
+
+
+def test_dedupe_keeps_nested_boxes_with_small_overlap():
+    # trang ja: box nhỏ nằm TRỌN trong box lớn nhưng IoU chỉ ~0.02 — có thể là
+    # hiệu ứng âm thanh riêng, giữ cả hai để không mất chữ
+    inner, outer = (1293, 770, 29, 57), (1070, 770, 277, 307)
+    assert set(bboxes(_dedupe_regions(regions(inner, outer)))) == {inner, outer}
+
+
+def test_dedupe_keeps_partially_overlapping_boxes():
+    # hai vùng chữ dọc chồng nhau IoU ~0.35 — dưới ngưỡng, giữ cả hai
+    a, b = (1208, 772, 234, 331), (1070, 770, 277, 307)
+    assert len(_dedupe_regions(regions(a, b))) == 2
+
+
+class DupeDetector:
+    def detect(self, img):
+        return regions((10, 10, 100, 50), (10, 10, 101, 50))
+
+
+def test_duplicate_regions_are_ocred_once():
+    engine = CountingEngine()
+    pipeline = Pipeline(
+        detector=DupeDetector(),
+        ocr=SharedOcr(engine),
+        translator=FakeTranslator(),
+    )
+
+    out = pipeline.ocr_image(encode_png(300, 200), "es")
+    assert engine.calls == 1
+    assert out["blocks"] == [{"bbox": [10, 10, 101, 50], "src_text": "hola"}]
+
+
+class CountingEngine:
+    def __init__(self):
+        self.calls = 0
+
+    def read(self, crop):
+        self.calls += 1
+        return "hola"
+
+
 def test_bad_image_raises():
     with pytest.raises(ValueError):
         make_pipeline().process(b"not an image", "ja", "vi")
@@ -74,3 +180,168 @@ def test_bad_image_raises():
 def test_ocr_image_returns_blocks_without_translation():
     out = make_pipeline().ocr_image(encode_png(300, 200), "es")
     assert out["blocks"] == [{"bbox": [10, 10, 100, 50], "src_text": "hola"}]
+
+
+def test_ocr_image_crops_before_detection_and_offsets_blocks():
+    out = make_pipeline().ocr_image(
+        encode_png(301, 201),
+        "es",
+        crop=(0.1, 0.1, 0.5, 0.5),
+    )
+
+    assert out["image_w"] == 301 and out["image_h"] == 201
+    assert out["blocks"] == [{"bbox": [40, 30, 100, 50], "src_text": "hola"}]
+
+
+def test_ocr_image_converts_normalized_crop_with_floor_and_ceil():
+    pipeline = Pipeline(detector=EdgeDetector(), ocr=FakeOcr(), translator=FakeTranslator())
+
+    out = pipeline.ocr_image(encode_png(301, 201), "es", crop=(0.1, 0.1, 0.5, 0.5))
+
+    assert out["blocks"] == [{"bbox": [150, 100, 1, 1], "src_text": "hola"}]
+
+
+@pytest.mark.parametrize(
+    "crop",
+    [(-0.1, 0, 1, 1), (0, 0, 0, 1), (0.8, 0, 0.2, 1), (0, 0.8, 1, 0.2)],
+)
+def test_ocr_image_rejects_invalid_crop(crop):
+    with pytest.raises(ValueError, match="crop"):
+        make_pipeline().ocr_image(encode_png(300, 200), "es", crop=crop)
+
+
+def test_ocr_image_serializes_shared_models():
+    detector = OverlapDetector()
+    engine = OverlapEngine()
+    pipeline = Pipeline(detector=detector, ocr=SharedOcr(engine), translator=FakeTranslator())
+    image = encode_png(300, 200)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(lambda _: pipeline.ocr_image(image, "es"), range(2)))
+
+    assert detector.max_active == 1
+    assert engine.max_active == 1
+
+
+class CountingDetector:
+    def __init__(self):
+        self.calls = 0
+
+    def detect(self, image):
+        self.calls += 1
+        return [TextRegion(bbox=(10, 10, 40, 20), vertical=False)]
+
+
+class ThreeRegionDetector:
+    def detect(self, image):
+        return [
+            TextRegion(bbox=(10, 10, 40, 20), vertical=False),
+            TextRegion(bbox=(60, 10, 40, 20), vertical=False),
+            TextRegion(bbox=(110, 10, 40, 20), vertical=False),
+        ]
+
+
+class TwoRegionDetector:
+    def detect(self, image):
+        return [
+            TextRegion(bbox=(10, 10, 40, 20), vertical=False),
+            TextRegion(bbox=(60, 10, 40, 20), vertical=False),
+        ]
+
+
+class SequenceEngine:
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = 0
+
+    def read(self, crop):
+        self.calls += 1
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+class CancelAfterFirstEngine:
+    def __init__(self, cancelled):
+        self.cancelled = cancelled
+        self.calls = 0
+
+    def read(self, crop):
+        self.calls += 1
+        self.cancelled[0] = True
+        return "hola"
+
+
+def test_analysis_is_reused_across_recognizers():
+    detector = CountingDetector()
+    pipeline = Pipeline(detector=detector, ocr=FakeOcr(), translator=FakeTranslator())
+    data = encode_png(300, 200)
+    pipeline.analyze(data, None, "a1")
+    pipeline.analyze(data, None, "a1")
+    assert detector.calls == 1
+
+
+def test_iter_ocr_retries_only_failed_block():
+    engine = SequenceEngine(["hola", RuntimeError("bad"), "adios", "retry"])
+    pipeline = Pipeline(
+        detector=ThreeRegionDetector(),
+        ocr=SharedOcr(engine),
+        translator=FakeTranslator(),
+    )
+    pipeline.analyze(encode_png(300, 200), None, "a1")
+    first = list(pipeline.iter_ocr("a1", "es", "o1"))
+    assert [event["type"] for event in first].count("ocr_block_error") == 1
+    second = list(pipeline.iter_ocr("a1", "es", "o1"))
+    assert engine.calls == 4
+    assert second[-1]["type"] == "image_done"
+    assert second[-1]["failed"] == 0
+
+
+def test_cancel_is_checked_between_engine_reads():
+    cancelled = [False]
+    engine = CancelAfterFirstEngine(cancelled)
+    pipeline = Pipeline(
+        detector=TwoRegionDetector(),
+        ocr=SharedOcr(engine),
+        translator=FakeTranslator(),
+    )
+    pipeline.analyze(encode_png(300, 200), None, "a1")
+    events = list(pipeline.iter_ocr("a1", "es", "o1", lambda: cancelled[0]))
+    assert engine.calls == 1
+
+
+def test_cancelled_while_waiting_for_ocr_lock_does_not_start_a_read():
+    checked = Event()
+    allow_precheck_return = Event()
+    precheck_returned = Event()
+    cancelled = Event()
+    engine = CountingEngine()
+    pipeline = Pipeline(
+        detector=CountingDetector(),
+        ocr=SharedOcr(engine),
+        translator=FakeTranslator(),
+    )
+    pipeline.analyze(encode_png(300, 200), None, "a1")
+
+    def cancellation_requested():
+        if not checked.is_set():
+            checked.set()
+            assert allow_precheck_return.wait(1)
+            precheck_returned.set()
+            return False
+        return cancelled.is_set()
+
+    worker = Thread(
+        target=lambda: list(pipeline.iter_ocr("a1", "es", "o1", cancellation_requested))
+    )
+    worker.start()
+    assert checked.wait(1)
+    with pipeline._ocr_lock:
+        allow_precheck_return.set()
+        assert precheck_returned.wait(1)
+        cancelled.set()
+    worker.join(1)
+
+    assert not worker.is_alive()
+    assert engine.calls == 0

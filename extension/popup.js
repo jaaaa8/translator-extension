@@ -1,39 +1,85 @@
 const $ = (id) => document.getElementById(id);
+let srcLang = "ja";
+let settingsLoaded = false;
+let healthLoaded = false;
+let serverHealthy = false;
+let initialPrewarmed = false;
+
+function prewarmPage(requestSrcLang) {
+  chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
+    if (!tab) return;
+    chrome.tabs.sendMessage(tab.id, { type: "prewarmPage", srcLang: requestSrcLang }, () => void chrome.runtime.lastError);
+  });
+}
+
+function prewarmInitialPage() {
+  if (initialPrewarmed || !settingsLoaded || !healthLoaded || !serverHealthy) return;
+  initialPrewarmed = true;
+  prewarmPage(srcLang);
+}
 
 chrome.storage.local.get(["enabled", "srcLang", "dstLang"]).then((v) => {
   $("enabled").checked = v.enabled !== false;
-  $("srcLang").value = v.srcLang || "ja";
+  srcLang = v.srcLang || "ja";
+  $("srcLang").value = srcLang;
   $("dstLang").value = v.dstLang || "vi";
+  settingsLoaded = true;
+  prewarmInitialPage();
 });
 
 $("enabled").onchange = (e) => chrome.storage.local.set({ enabled: e.target.checked });
-$("srcLang").onchange = (e) => chrome.storage.local.set({ srcLang: e.target.value });
+$("srcLang").onchange = (e) => {
+  srcLang = e.target.value;
+  chrome.storage.local.set({ srcLang });
+  if (serverHealthy) prewarmPage(srcLang);
+};
 $("dstLang").onchange = (e) => chrome.storage.local.set({ dstLang: e.target.value });
 
 chrome.runtime.sendMessage({ type: "health" }).then((res) => {
   const ok = res && res.ok;
+  healthLoaded = true;
+  serverHealthy = ok;
   $("status").textContent = ok ? `● server: ${res.device}` : "● server offline";
   $("status").style.color = ok ? "#2a2" : "#d33";
+  prewarmInitialPage();
 });
 
-const actions = [$("translateLoaded"), $("translateVisible")];
-
-function setActionsDisabled(disabled) {
-  for (const button of actions) button.disabled = disabled;
+async function refreshPageStatus() {
+  const state = await chrome.runtime.sendMessage({ type: "pageStatus" });
+  const value = state || { background: 0, cached: 0, failed: 0 };
+  $("cacheStatus").textContent =
+    `Đang dịch nền: ${value.background} · Đã cache: ${value.cached} · Lỗi: ${value.failed}`;
 }
 
+refreshPageStatus();
+
+let actionSequence = 0;
+
 function translate(scope) {
-  setActionsDisabled(true);
-  $("result").textContent = "đang dịch… (OCR local + 1 call Gemini)";
+  const action = ++actionSequence;
+  const message = {
+    type: "translatePage",
+    scope,
+    srcLang: $("srcLang").value,
+    dstLang: $("dstLang").value,
+  };
+  $("result").textContent = "đang dịch…";
   chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-    chrome.tabs.sendMessage(tab.id, { type: "translatePage", scope }, (res) => {
-      setActionsDisabled(false);
+    if (!tab) return;
+    chrome.tabs.sendMessage(tab.id, message, (res) => {
+      if (action !== actionSequence) return;
       if (chrome.runtime.lastError) {
         $("result").textContent = "không kết nối được trang — F5 trang rồi thử lại";
         return;
       }
-      $("result").textContent =
-        res && res.ok ? `xong: ${res.images} ảnh, ${res.blocks} thoại` : `lỗi: ${res ? res.error : "?"}`;
+      if (res && res.ok && res.cacheHit) {
+        $("result").textContent = "Khôi phục từ cache";
+      } else {
+        $("result").textContent = res && res.ok
+          ? `xong: ${res.images} ảnh, ${res.blocks} thoại, ${res.failed || 0} lỗi`
+          : `lỗi: ${res ? res.error : "?"}`;
+      }
+      void refreshPageStatus();
     });
   });
 }
