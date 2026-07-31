@@ -261,8 +261,8 @@ Giữ thủ công (không auto-translate/auto-scroll). Dùng `bestSource()` củ
 
 ## Thread B — recall OCR hoàn tất ✅ (2026-07-28)
 
-- [x] Chọn ảnh full-res từ `srcset`.
-- [x] Pad + upscale crop trước OCR.
+- [x] Chọn ảnh full-res từ `srcset` thay vì phụ thuộc `currentSrc`.
+- [x] Pad + upscale crop trước OCR để giữ nét chữ nhỏ sát mép bóng.
 - [x] Decision gate: bỏ Task 4 vì detector đã bắt đủ bbox.
 - [x] Tự động: `pytest` **30 passed**; kiểm tra Node **pass**.
 - [x] Diagnostic: **13 block, 0 OCR rỗng** (trước: 13/4).
