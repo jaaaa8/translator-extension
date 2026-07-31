@@ -11,6 +11,10 @@ Thư mục `MangaTranslatorBrowser/` là một **Obsidian vault**. File tài li�
 
 Chỉ bỏ qua khi user nói rõ "sửa trực tiếp, khỏi dùng skill".
 
+## Git
+
+Repo quản lý theo version branch (`feat/v1`, `feat/v2`, `feat/v3`...). Đọc `GIT-RULES.md` trước khi tạo nhánh, commit hoặc mở PR.
+
 ## Ngôn ngữ
 
 Trả lời + tài liệu dự án bằng **tiếng Việt**.
