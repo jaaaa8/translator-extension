@@ -112,7 +112,8 @@ function handleEvent(event) {
     if (!pending) return;
     const pageMetrics = (event.page_metrics || []).map((row) => pending.firstOverlayByJob.has(row.job_id)
       ? { ...row, first_overlay_ms: pending.firstOverlayByJob.get(row.job_id) } : row);
-    cleanupRequest(event.request_id, { ok: true, images: event.images, blocks: event.translated, failed: event.failed, cacheHit: event.cache_hit === true, first_overlay_ms: pending.firstOverlayMs, metrics: event.metrics, page_metrics: pageMetrics });
+    const metrics = pending.firstOverlayMs == null ? event.metrics : { ...(event.metrics || {}), first_overlay_ms: Number.isFinite(event.metrics?.first_overlay_ms) ? Math.min(event.metrics.first_overlay_ms, pending.firstOverlayMs) : pending.firstOverlayMs };
+    cleanupRequest(event.request_id, { ok: true, images: event.images, blocks: event.translated, failed: event.failed, cacheHit: event.cache_hit === true, first_overlay_ms: pending.firstOverlayMs, metrics, page_metrics: pageMetrics });
   }
 }
 
