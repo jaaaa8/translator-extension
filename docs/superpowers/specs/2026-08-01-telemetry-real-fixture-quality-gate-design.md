@@ -4,7 +4,7 @@
 
 **Nhánh:** `feat/v3`
 
-**Trạng thái:** thiết kế đã được người dùng duyệt ngày 2026-08-01; đã hợp nhất review vòng 2 và chờ người dùng review lại tài liệu
+**Trạng thái:** thiết kế đã được người dùng duyệt ngày 2026-08-01; đã hợp nhất ghi chú plan và sẵn sàng lập implementation plan
 
 ## 1. Kết quả cần đạt
 
@@ -357,7 +357,7 @@ Fixture port `8000` và production OCR API port `8910` tiếp tục tách biệt
 - Test `batch_control` replay exact membership đã commit, còn `ordered_microbatch` replay đúng dãy size trên expected order dù timer runtime khác.
 - Test policy runner không gửi `kind` cho Gemini; evaluator mới được đọc field này.
 - Test evaluator bắt duplicate/missing ID, term inconsistency và fixture hash drift; Portuguese chỉ yêu cầu ba mục an toàn và ghi ba mục ngữ cảnh là `not_applicable`.
-- Test score trần `5/5` hoặc cao hơn ở `batch_control` cho kết quả `no_context_headroom`, không phải `blocked`.
+- Test `batch_control` có median `context_score >= 5` trên cả hai spread cho kết quả `no_context_headroom`, không phải `blocked`.
 - Test CI path không cần `GEMINI_API_KEY` và không tạo network request.
 
 ### Review thủ công
@@ -378,7 +378,7 @@ Fixture port `8000` và production OCR API port `8910` tiếp tục tách biệt
 
 ## 12. Quan hệ với các spec sau
 
-- **Spec B — reading order và page-context translation:** area-greedy dedupe vẫn chọn box lớn nhưng phải trả winner về theo thứ tự input; một stage reading-order riêng sau đó tạo `reading_order` và phải qua expected-order comparator của cả ba fixture. Stage này không được dựa duy nhất vào classifier `ja` hay trả nguyên vendor order. Probe nhận `reading_direction` từ manifest; production nhận giá trị độc lập, do người dùng kiểm soát và truyền trong request, để Portuguese manga có thể chọn RTL mà không giả thành tiếng Nhật. Spec B cũng thêm `pt`, sửa prompt/version/cache, triển khai policy thắng gate và acceptance webtoon `mỗi <img> = một page unit`.
+- **Spec B — reading order và page-context translation:** area-greedy dedupe vẫn chọn box lớn nhưng phải trả winner về theo thứ tự input; một stage reading-order riêng sau đó tạo `reading_order` và phải qua expected-order comparator của cả ba fixture. Stage này không được dựa duy nhất vào classifier `ja` hay trả nguyên vendor order. Probe nhận `reading_direction` từ manifest; production nhận giá trị độc lập, do người dùng kiểm soát và truyền trong request, để Portuguese manga có thể chọn RTL mà không giả thành tiếng Nhật. Production `/translate-items` phải mang cùng allowlist `id`, `text`, `reading_order`, `bbox` và page context chứa kích thước ảnh như `comic-page-eval-v1`; prompt/version/cache key phải đổi cùng contract này. Spec B cũng thêm `pt`, triển khai policy thắng gate và acceptance webtoon `mỗi <img> = một page unit`.
 - **Spec C — overlay an toàn:** xử lý `block_error`/`partial`, source-text erasure, mask/inpainting, vùng layout chữ dịch và clipping; dùng ba failure-reference làm visual acceptance.
 
 Spec B không bắt đầu thay đổi production policy trước khi Spec A có worklog gate. Spec C có thể thiết kế song song về hình học, nhưng production acceptance cuối phải dùng output policy đã chốt ở Spec B.
