@@ -193,7 +193,7 @@ git commit -m "feat: report server analysis cache telemetry"
 **Interfaces:**
 - Consumes: `analysis_ready.analysis_ms`, `analysis_cache_hit`; OCR `image_done`; translation batch response/error.
 - Produces: `scope_done.page_metrics: PageMetricRow[]` và giữ `scope_done.metrics` aggregate.
-- Produces: một trace row cho mỗi network Gemini call production hiện tại.
+- Produces: một trace row cho mỗi request extension → server `/translate-items`; server có thể retry hoặc đổi client Gemini bên trong, nên trace không phải một row cho mỗi Gemini attempt.
 - Preserves: microbatch 3/8 và timer hiện tại; không đổi translation policy.
 
 `PageMetricRow` phải có đúng shape tối thiểu sau:
@@ -288,7 +288,7 @@ function completeJob(
 - Lưu `analysis_cache_hit` từ event vào stage/producer.
 - Khi nhận OCR `image_done`, ghi `recognized`, `failed` và `mark(consumer, "ocr_done")`; consumer attach sau khi stage xong cũng nhận cùng mark tương đối.
 - Sau mỗi `applyTranslation()` thành công, gán `producer.timings.final_translation = now()`; đây là latest success, không dùng `??=`.
-- Trong `flushTranslationBatch()`, tạo một trace row quanh đúng network call, classify `success`, `rate_limited`, `invalid_response`, `failed`; cache-only path không giả thành network call.
+- Trong `flushTranslationBatch()`, tạo một trace row quanh đúng request extension → server `/translate-items`, classify `success`, `rate_limited`, `invalid_response`, `failed`; `duration_ms` gộp retry/failover phía server và cache-only path không giả thành network call.
 - `block_count` phải bằng `block_ids.length`, không lấy tổng block của producer.
 
 `producerMetrics()` trả thêm `ocr_done_ms`, `final_translation_ms`, OCR summary, `analysis_cache_hit` và bản copy trace. `scopeDone()` phát:

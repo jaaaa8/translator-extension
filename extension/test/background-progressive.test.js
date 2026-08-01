@@ -1039,7 +1039,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
 
   await scenario("rate-limited translation keeps its own trace and page rows remain per job", async () => {
     const server = createFakeServer();
-    server.queueTranslationResult({ response: { ok: false, status: 429, json: async () => ({ error: "quota exceeded" }) } });
+    server.queueTranslationResult({ response: { ok: false, status: 502, json: async () => ({ error: "gemini: 429 RESOURCE_EXHAUSTED" }) } });
     const app = createBackgroundApp({ server });
     await app.ready();
     const port = app.connect();
@@ -1053,6 +1053,24 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const good = done.page_metrics.find((row) => row.job_id === "good-job");
     assert.deepStrictEqual(rate.translation_batches.map((batch) => ({ status: batch.status, error_code: batch.error_code })), [{ status: "rate_limited", error_code: "rate_limited" }]);
     assert.deepStrictEqual(good.translation_batches.map((batch) => batch.status), ["success"]);
+    assert.strictEqual((await app.message({ type: "benchmarkSummary" })).counters.rate_limited, 1);
+    const counterRecords = [...vm.runInContext("metricSamplesByRequest.get('two-jobs').counter_records", app.context)];
+    assert.strictEqual(counterRecords.filter((record) => record.rate_limited > 0).length, 1);
+  });
+
+  await scenario("non-rate-limited 502 keeps a failed trace without incrementing the rate-limit counter", async () => {
+    const server = createFakeServer();
+    server.queueTranslationResult({ response: { ok: false, status: 502, json: async () => ({ error: "gemini: upstream unavailable" }) } });
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const port = app.connect();
+    port.receive(app.startScope("generic-502", "visible", app.job("generic-502-job", "https://x/generic-502.jpg")));
+    const done = await app.waitFor("scope_done", port);
+    assert.deepStrictEqual(
+      done.page_metrics[0].translation_batches.map((batch) => ({ status: batch.status, error_code: batch.error_code })),
+      [{ status: "failed", error_code: "translation_failed" }]
+    );
+    assert.strictEqual((await app.message({ type: "benchmarkSummary" })).counters.rate_limited, 0);
   });
 
   await scenario("hot artifact caches stay bounded", async () => {

@@ -10,7 +10,7 @@
 
 Spec A tạo một nền đo đủ tin cậy để Spec B quyết định chính sách dịch theo dữ liệu thay vì suy luận từ code:
 
-1. Thời gian từng stage của một trang thật được ghi đúng, gồm cả `analysis_ms`, thời điểm OCR hoàn tất và từng call Gemini.
+1. Thời gian từng stage của một trang thật được ghi đúng, gồm cả `analysis_ms`, thời điểm OCR hoàn tất và từng request extension → server `/translate-items`.
 2. Sáu ảnh người dùng cung cấp được đưa ra khỏi `server/vendor/` đang bị Git ignore và lưu đúng một bản trong fixture được track.
 3. Ba trang nguồn có ground truth về thứ tự đọc, transcript OCR cố định và metadata ngôn ngữ/bố cục.
 4. Chất lượng dịch được chấm tay theo rubric cố định; CI chỉ kiểm các guardrail có tính xác định và không gọi Gemini.
@@ -197,11 +197,11 @@ Metric trang gồm ít nhất:
 - warm page-cache hit trong `replayPage()` tạo row với `cache_hit: true`, các stage không chạy là `null` thay vì giả thành `0`;
 - lỗi trong `acceptScope()` trước khi có producer tạo row với `cache_hit: false`, các stage là `null` và `error_code` bằng mã đã phát trong `job_error`. `page_artifact_key` được phép `null` nếu lỗi xảy ra trước khi tạo key.
 
-`scope_done.metrics` vẫn là aggregate tương thích ngược, nhưng `scope_done.page_metrics` phải phát toàn bộ `request.metricRows` để record từng job thực sự rời service worker. Mỗi row gồm `job_id`, `page_artifact_key`, `cache_hit`, `error_code`, `accepted_offset_ms`, các metric trang ở trên, tổng `recognized`/`failed` và trace Gemini của đúng producer nếu có; không chứa source URL, API key hay text. Không được gọi giá trị `Math.max(...)` của nhiều row là metric của một trang.
+`scope_done.metrics` vẫn là aggregate tương thích ngược, nhưng `scope_done.page_metrics` phải phát toàn bộ `request.metricRows` để record từng job thực sự rời service worker. Mỗi row gồm `job_id`, `page_artifact_key`, `cache_hit`, `error_code`, `accepted_offset_ms`, các metric trang ở trên, tổng `recognized`/`failed` và trace request dịch của đúng producer nếu có; không chứa source URL, API key hay text. Không được gọi giá trị `Math.max(...)` của nhiều row là metric của một trang.
 
-### 5.2 Trace từng call Gemini
+### 5.2 Trace từng request dịch extension → server
 
-Mỗi call có một record không chứa source URL đầy đủ hoặc API key:
+Mỗi request extension → server `/translate-items` có một record không chứa source URL đầy đủ hoặc API key. Server có thể retry hoặc đổi client Gemini bên trong, nên số trace có thể ít hơn số Gemini attempt thật và `duration_ms` gộp thời gian retry/failover đó. Spec A không thêm telemetry attempt phía server:
 
 ```json
 {

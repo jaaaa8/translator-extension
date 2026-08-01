@@ -663,6 +663,7 @@ function applyTranslation(producer, item) {
   block.state = "complete";
   emit(producer, "translation", { ...block, image_w: producer.page.image_w, image_h: producer.page.image_h });
 }
+function isRateLimited(error) { return error.status === 429 || String(error).includes("429"); }
 async function flushTranslationBatch(producer) {
   clearTimeout(producer.translationTimer);
   producer.translationTimer = null;
@@ -698,7 +699,7 @@ async function flushTranslationBatch(producer) {
       if (actual.size !== data.items.length || actual.size !== expected.size || [...actual].some((id) => !expected.has(id))) throw new Error("translation id set mismatch");
       trace.status = "success";
     } catch (error) {
-      trace.status = error.status === 429 ? "rate_limited" : String(error).includes("translation id set mismatch") ? "invalid_response" : "failed";
+      trace.status = isRateLimited(error) ? "rate_limited" : String(error).includes("translation id set mismatch") ? "invalid_response" : "failed";
       trace.error_code = trace.status === "rate_limited" ? "rate_limited" : trace.status === "invalid_response" ? "invalid_response" : "translation_failed";
       throw error;
     } finally {
@@ -710,7 +711,7 @@ async function flushTranslationBatch(producer) {
       if (!producer.retired) applyTranslation(producer, item);
     }
   } catch (error) {
-    if (String(error).includes("429")) producer.counters.rate_limited++;
+    if (isRateLimited(error)) producer.counters.rate_limited++;
     if (producer.retired) return;
     producer.page.last_error = String(error);
     for (const block of blocks) {
