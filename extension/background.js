@@ -22,8 +22,8 @@ function producerMetrics(producer) {
     ? null : Math.round(producer.timings[name] - producer.timings.accepted);
   return {
     queue_wait_ms: elapsed("started"),
-    fetch_ms: Math.round(producer.durations.fetch_ms || 0),
-    analysis_ms: Math.round(Number.isFinite(producer.durations.analysis_ms) ? producer.durations.analysis_ms : 0),
+    fetch_ms: Number.isFinite(producer.durations.fetch_ms) ? Math.round(producer.durations.fetch_ms) : null,
+    analysis_ms: Number.isFinite(producer.durations.analysis_ms) ? Math.round(producer.durations.analysis_ms) : null,
     analysis_cache_hit: producer.analysisCacheHit,
     first_ocr_ms: elapsed("first_ocr"),
     ocr_done_ms: elapsed("ocr_done"),
@@ -315,7 +315,11 @@ async function postJson(url, body, timeout = 60000) {
       signal,
     });
     const data = await response.json();
-    if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+    if (!response.ok) {
+      const error = new Error(data.error || `HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
     return data;
   } finally {
     if (timer) clearTimeout(timer);
@@ -393,7 +397,7 @@ function persist(producer) {
 function createProducer(descriptor, keys, page) {
   const createdAt = Date.now();
   const record = page || { schema_version: serverVersions.page_schema, page_artifact_key: keys.pageArtifactKey, analysis_key: keys.analysisKey, ocr_key: keys.ocrKey, overlay_key: keys.overlayKey, source_url: descriptor.source_url, crop: keys.crop, natural_width: descriptor.natural_width, natural_height: descriptor.natural_height, src_lang: descriptor.src_lang, dst_lang: descriptor.dst_lang, versions: serverVersions, state: "queued", analysis_known: false, ocr_done: false, image_w: null, image_h: null, blocks: [], created_at: createdAt, updated_at: createdAt, last_accessed_at: createdAt, last_error: null };
-  return { pageKey: keys.pageArtifactKey, analysisKey: keys.analysisKey, ocrKey: keys.ocrKey, descriptor, page: record, consumers: new Map(), jobIds: new Set(), persistUntilDone: false, prewarmOnly: descriptor.scope === "prewarm", state: "queued", pendingTranslations: new Map(), attemptedTranslationIds: new Set(), translationBatches: 0, translationBatchTrace: [], translationChain: Promise.resolve(), persistChain: Promise.resolve(), cancelled: false, retired: false, timings: { accepted: now() }, durations: { fetch_ms: 0, analysis_ms: 0 }, analysisCacheHit: null, ocrSummary: null, counters: { translation_calls: 0, rate_limited: 0, stale_work: 0 } };
+  return { pageKey: keys.pageArtifactKey, analysisKey: keys.analysisKey, ocrKey: keys.ocrKey, descriptor, page: record, consumers: new Map(), jobIds: new Set(), persistUntilDone: false, prewarmOnly: descriptor.scope === "prewarm", state: "queued", pendingTranslations: new Map(), attemptedTranslationIds: new Set(), translationBatches: 0, translationBatchTrace: [], translationChain: Promise.resolve(), persistChain: Promise.resolve(), cancelled: false, retired: false, timings: { accepted: now() }, durations: { fetch_ms: null, analysis_ms: null }, analysisCacheHit: null, ocrSummary: null, counters: { translation_calls: 0, rate_limited: 0, stale_work: 0 } };
 }
 async function attachDescriptor(request, descriptor, ledger) {
   if (!serverVersions) { if (request.scope === "visible") await pageCache.putJob({ ...ledger, waiting_for_health: true }); offlineJobs.push({ request, descriptor, ledger }); return; }
@@ -502,6 +506,7 @@ function attachStage(map, key, producer) {
     producer.page.analysis_known = true;
     producer.page.image_w = stage.event?.image_w ?? producer.page.image_w;
     producer.page.image_h = stage.event?.image_h ?? producer.page.image_h;
+    if (Number.isFinite(stage.event?.analysis_ms)) producer.durations.analysis_ms = stage.event.analysis_ms;
     if (typeof stage.event?.analysis_cache_hit === "boolean") producer.analysisCacheHit = stage.event.analysis_cache_hit;
   } else if (map === ocrStages) {
     for (const block of stage.blocks.values()) {
@@ -511,6 +516,7 @@ function attachStage(map, key, producer) {
     }
     producer.blockErrors = Math.max(producer.blockErrors || 0, stage.blockErrors.length);
     if (stage.blockErrors.length) producer.page.last_error = stage.blockErrors[stage.blockErrors.length - 1].code || "ocr_block";
+    if (stage.blocks.size) mark(producer, "first_ocr");
     if (stage.ocrDone) {
       producer.page.ocr_done = true;
       producer.ocrSummary = stage.ocrSummary || null;
@@ -690,7 +696,7 @@ async function flushTranslationBatch(producer) {
       if (actual.size !== data.items.length || actual.size !== expected.size || [...actual].some((id) => !expected.has(id))) throw new Error("translation id set mismatch");
       trace.status = "success";
     } catch (error) {
-      trace.status = String(error).includes("429") ? "rate_limited" : String(error).includes("translation id set mismatch") ? "invalid_response" : "failed";
+      trace.status = error.status === 429 ? "rate_limited" : String(error).includes("translation id set mismatch") ? "invalid_response" : "failed";
       trace.error_code = trace.status === "rate_limited" ? "rate_limited" : trace.status === "invalid_response" ? "invalid_response" : "translation_failed";
       throw error;
     } finally {

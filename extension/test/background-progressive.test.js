@@ -699,6 +699,40 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     assert.strictEqual(app.storedJob("pending-new-job"), undefined);
   });
 
+  await scenario("late shared-stage consumer inherits analysis and OCR timing", async () => {
+    const server = createFakeServer();
+    server.setOcrRows("shared-timing", [
+      { type: "analysis_ready", image_w: 100, image_h: 200, analysis_ms: 17, analysis_cache_hit: true },
+      { type: "ocr_block", block_id: "shared-b1", bbox: [1, 2, 3, 4], src_text: "shared" },
+      { type: "image_done", recognized: 1, failed: 0 },
+    ]);
+    server.holdTranslation("vi");
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const first = app.connect();
+    first.receive(app.startScope("shared-timing-first", "loaded", app.job("shared-timing-first-job", "https://x/shared-timing.jpg")));
+    await waitUntil(() => server.counts.translate === 1, "first translation held after OCR completion");
+
+    const late = app.connect();
+    late.receive({
+      ...app.startScope("shared-timing-late", "loaded", app.job("shared-timing-late-job", "https://x/shared-timing.jpg")),
+      dst_lang: "en",
+    });
+    await app.waitFor("page_job_accepted", late);
+    server.releaseTranslation("vi");
+    const done = await app.waitFor("scope_done", late);
+    const row = done.page_metrics[0];
+    assert.deepStrictEqual(
+      { analysis_ms: row.analysis_ms, analysis_cache_hit: row.analysis_cache_hit, recognized: row.recognized, failed: row.failed },
+      { analysis_ms: 17, analysis_cache_hit: true, recognized: 1, failed: 0 }
+    );
+    assert.ok(Number.isFinite(row.first_ocr_ms));
+    assert.ok(Number.isFinite(row.ocr_done_ms));
+    assert.ok(row.ocr_done_ms >= row.first_ocr_ms);
+
+    await app.waitFor("scope_done", first);
+  });
+
   await scenario("target and recognizer changes reuse the deepest valid artifact", async () => {
     const app = createBackgroundApp();
     await app.ready();
@@ -784,7 +818,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     };
     const port = app.connect();
     port.receive(app.startScope("partial", "visible", job));
-    await app.waitFor("scope_done", port);
+    const done = await app.waitFor("scope_done", port);
     assert.deepStrictEqual(
       port.sent.filter((event) => event.type === "translation").map((event) => event.block_id),
       ["b1", "b2"]
@@ -795,6 +829,10 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       { source: 0, ocr: 0 }
     );
     assert.strictEqual(app.page(keys.pageArtifactKey).state, "complete");
+    assert.deepStrictEqual(
+      { fetch_ms: done.page_metrics[0].fetch_ms, analysis_ms: done.page_metrics[0].analysis_ms, first_ocr_ms: done.page_metrics[0].first_ocr_ms, ocr_done_ms: done.page_metrics[0].ocr_done_ms },
+      { fetch_ms: null, analysis_ms: null, first_ocr_ms: null, ocr_done_ms: null }
+    );
   });
 
   await scenario("OCR block failure keeps valid translated blocks", async () => {
@@ -936,7 +974,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
 
   await scenario("rate-limited translation keeps its own trace and page rows remain per job", async () => {
     const server = createFakeServer();
-    server.queueTranslationResult({ response: { ok: false, status: 429, json: async () => ({ error: "429 quota" }) } });
+    server.queueTranslationResult({ response: { ok: false, status: 429, json: async () => ({ error: "quota exceeded" }) } });
     const app = createBackgroundApp({ server });
     await app.ready();
     const port = app.connect();
