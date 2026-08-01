@@ -610,7 +610,7 @@ async function consumeOcr(producer) {
           }
           continue;
         }
-        if (event.type === "ocr_block") { mark(producer, "first_ocr"); stage.blocks.set(event.block_id, ocrBlockFromEvent(event)); }
+        if (event.type === "ocr_block") { stage.blocks.set(event.block_id, ocrBlockFromEvent(event)); }
         if (event.type === "ocr_block_error") stage.blockErrors.push(event);
         for (const item of stage.consumers.values()) {
           if (event.type === "ocr_block") await applyOcrBlock(item, event);

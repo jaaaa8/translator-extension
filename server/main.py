@@ -99,12 +99,12 @@ async def ocr_stream(
         return crop_or_error
     pipeline = get_pipeline()
     data = await image.read() if image is not None else None
-    analysis_started = time.perf_counter()
     cached_analysis = pipeline.get_analysis(analysis_key)
     if data is None and cached_analysis is None:
         return JSONResponse(status_code=409, content={"error": "analysis_missing"})
 
     async def stream():
+        analysis_started = time.perf_counter()
         try:
             analysis = cached_analysis
             if analysis is None:

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 
@@ -81,6 +82,26 @@ def test_ocr_stream_keeps_nonzero_duration_for_delayed_cache_hit(monkeypatch):
     ready = events(response)[0]
     assert ready["analysis_cache_hit"] is True
     assert ready["analysis_ms"] > 0
+
+
+def test_ocr_stream_excludes_delay_before_body_consumption(monkeypatch):
+    class Request:
+        async def is_disconnected(self):
+            return False
+
+    pipeline = FakeStreamPipeline()
+    pipeline.analyze(b"png", None, "a1")
+    clock = [1.0]
+    monkeypatch.setattr(main, "_pipeline", pipeline)
+    monkeypatch.setattr(main.time, "perf_counter", lambda: clock[0])
+
+    response = asyncio.run(main.ocr_stream(
+        Request(), analysis_key="a1", ocr_key="o1", src_lang="ja", image=None
+    ))
+    clock[0] = 11.0
+    ready = json.loads(asyncio.run(anext(response.body_iterator)))
+
+    assert ready["analysis_ms"] == 0
 
 
 def test_ocr_stream_reports_analysis_missing(monkeypatch):
