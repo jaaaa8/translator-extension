@@ -13,7 +13,7 @@ function emptyPageMetrics() {
   return {
     queue_wait_ms: null, fetch_ms: null, analysis_ms: null, analysis_cache_hit: null,
     first_ocr_ms: null, ocr_done_ms: null, first_translation_ms: null,
-    final_translation_ms: null, first_overlay_ms: null, total_ms: null,
+    final_translation_ms: null, first_overlay_ms: null, accepted_offset_ms: null, total_ms: null,
     recognized: null, failed: null, translation_batches: [],
   };
 }
@@ -455,7 +455,7 @@ async function acceptScope(port, message) {
 function completeJob(request, jobId, translated, failed, hit, metrics = null, counters = null, counterProducer = null, meta = {}) {
   if (!request) return;
   if (request.done.has(jobId)) return; request.done.add(jobId); request.translated += translated; request.failed += failed; if (hit) request.hits++;
-  request.metricRows.push({ job_id: jobId, page_artifact_key: meta.pageKey ?? null, cache_hit: hit, error_code: meta.errorCode ?? null, ...emptyPageMetrics(), ...(metrics || {}), first_overlay_ms: request.firstOverlayByJob.get(jobId) ?? null });
+  request.metricRows.push({ job_id: jobId, page_artifact_key: meta.pageKey ?? null, cache_hit: hit, error_code: meta.errorCode ?? null, ...emptyPageMetrics(), ...(metrics || {}), first_overlay_ms: request.firstOverlayByJob.get(jobId) ?? null, accepted_offset_ms: Number.isFinite(meta.acceptedAt) ? Math.round(meta.acceptedAt - request.acceptedAt) : null });
   if (counters && !request.countedCounterProducers.has(counterProducer)) {
     request.countedCounterProducers.add(counterProducer);
     for (const key of Object.keys(request.counters)) request.counters[key] += counters[key] || 0;
@@ -729,8 +729,8 @@ async function removeProducerJobs(producer) {
   await Promise.all([...producer.jobIds].map((jobId) => pageCache?.removeJob(jobId)));
   producer.jobIds.clear();
 }
-async function finishProducer(producer) { const failed = producer.page.blocks.filter((b) => !b.trans_text).length; producer.page.state = failed || producer.blockErrors ? "partial" : "complete"; await persist(producer); await producer.persistChain; emit(producer, "image_done", { translated: producer.page.blocks.length - failed, failed: failed + (producer.blockErrors || 0) }); const metrics = producerMetrics(producer); for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, producer.page.blocks.length - failed, failed + (producer.blockErrors || 0), false, metrics, producer.counters, producer, { pageKey: producer.pageKey }); await removeProducerJobs(producer); releaseProducerStages(producer); producers.delete(producer.pageKey); }
-async function failProducer(producer, error) { producer.page.last_error = String(error); producer.page.state = producer.page.analysis_known || producer.page.blocks.length ? "partial" : "failed"; await persist(producer); emit(producer, "image_done", { translated: 0, failed: 1 }); const metrics = producerMetrics(producer); for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, 0, 1, false, metrics, producer.counters, producer, { pageKey: producer.pageKey, errorCode: "request_failed" }); await removeProducerJobs(producer); releaseProducerStages(producer); producers.delete(producer.pageKey); }
+async function finishProducer(producer) { const failed = producer.page.blocks.filter((b) => !b.trans_text).length; producer.page.state = failed || producer.blockErrors ? "partial" : "complete"; await persist(producer); await producer.persistChain; emit(producer, "image_done", { translated: producer.page.blocks.length - failed, failed: failed + (producer.blockErrors || 0) }); const metrics = producerMetrics(producer); for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, producer.page.blocks.length - failed, failed + (producer.blockErrors || 0), false, metrics, producer.counters, producer, { pageKey: producer.pageKey, acceptedAt: producer.timings.accepted }); await removeProducerJobs(producer); releaseProducerStages(producer); producers.delete(producer.pageKey); }
+async function failProducer(producer, error) { producer.page.last_error = String(error); producer.page.state = producer.page.analysis_known || producer.page.blocks.length ? "partial" : "failed"; await persist(producer); emit(producer, "image_done", { translated: 0, failed: 1 }); const metrics = producerMetrics(producer); for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, 0, 1, false, metrics, producer.counters, producer, { pageKey: producer.pageKey, errorCode: "request_failed", acceptedAt: producer.timings.accepted }); await removeProducerJobs(producer); releaseProducerStages(producer); producers.delete(producer.pageKey); }
 function removeQueuedTasks(producer) { for (const task of taskQueue) if (task.producer === producer) task.cancelled = () => true; }
 function demoteQueuedTasks(producer) {
   for (const task of taskQueue) if (task.producer === producer) task.tier = PRIORITY.background;

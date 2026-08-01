@@ -16,7 +16,7 @@
 - Không gọi detector, OCR hoặc Gemini trong CI. Test tự động chỉ dùng fake/static capture.
 - Không thêm dependency. Dùng helper/cache/protocol hiện có và Python/Node stdlib.
 - Telemetry không chứa source URL, OCR text, translation text hoặc API key.
-- `analysis_ms` là duration; `*_done_ms` và `first_*_ms` là elapsed từ lúc producer được accepted. Stage không chạy dùng `null`, không giả thành `0`.
+- `analysis_ms` là duration; `*_done_ms` và `first_*_ms` là elapsed từ producer accepted, trừ `first_overlay_ms`; field này đo từ content scope start để giữ tương thích aggregate/benchmark. Mỗi row có `accepted_offset_ms`; producer-relative overlay xấp xỉ `first_overlay_ms - accepted_offset_ms`; sai số còn lại là IPC + MV3 worker wake. Stage không chạy dùng `null`.
 - Mỗi job hoàn tất tạo đúng một row trong `scope_done.page_metrics`, gồm cả warm page-cache hit và lỗi trước producer.
 - `first_overlay_ms` per-page là task xuyên `content.js` → message contract → `background.js`; không suy ra từ scope aggregate.
 - Fixture dùng port `8000`; API production dùng `8910`. `/health` không phải acceptance OCR → Gemini → overlay.
@@ -202,7 +202,7 @@ git commit -m "feat: report server analysis cache telemetry"
 {
   job_id, page_artifact_key, cache_hit, error_code, analysis_cache_hit,
   fetch_ms, analysis_ms, first_ocr_ms, ocr_done_ms,
-  first_translation_ms, final_translation_ms, first_overlay_ms, total_ms,
+  first_translation_ms, final_translation_ms, first_overlay_ms, accepted_offset_ms, total_ms,
   recognized, failed, translation_batches
 }
 ```

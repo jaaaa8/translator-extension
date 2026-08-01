@@ -158,7 +158,7 @@ Các ảnh tham chiếu lỗi không được đưa vào điểm chất lượng
 
 ## 5. Contract telemetry
 
-Mọi thời điểm phía extension tính tương đối từ lúc producer được accepted. Mọi duration dùng millisecond nguyên, không âm.
+`analysis_ms` là duration; `*_done_ms` và `first_*_ms` là elapsed từ producer accepted, trừ `first_overlay_ms`; field này đo từ content scope start để giữ tương thích aggregate/benchmark. Mỗi row có `accepted_offset_ms`; producer-relative overlay xấp xỉ `first_overlay_ms - accepted_offset_ms`; sai số còn lại là IPC + MV3 worker wake. Stage không chạy dùng `null`. Mọi duration dùng millisecond nguyên, không âm.
 
 ### 5.1 Analysis và OCR
 
@@ -186,9 +186,10 @@ Metric trang gồm ít nhất:
 - `first_translation_ms`;
 - `final_translation_ms`;
 - `first_overlay_ms`;
+- `accepted_offset_ms`;
 - `total_ms`.
 
-`analysis_ms` là duration stage; các trường có hậu tố `_done_ms`/`first_*_ms` là elapsed time từ producer accepted. Hai loại không được trộn trong báo cáo.
+`analysis_ms` là duration stage. `*_done_ms` và `first_*_ms` là elapsed từ producer accepted, trừ `first_overlay_ms`, được content đo từ scope start; `accepted_offset_ms` cho phép xấp xỉ producer-relative overlay bằng `first_overlay_ms - accepted_offset_ms`, với sai số IPC + MV3 worker wake. Stage không chạy là `null`.
 
 `completeJob()` phải nhận hoặc tạo đúng một metric row cho mỗi job hoàn tất. Có ba nguồn row:
 
@@ -196,7 +197,7 @@ Metric trang gồm ít nhất:
 - warm page-cache hit trong `replayPage()` tạo row với `cache_hit: true`, các stage không chạy là `null` thay vì giả thành `0`;
 - lỗi trong `acceptScope()` trước khi có producer tạo row với `cache_hit: false`, các stage là `null` và `error_code` bằng mã đã phát trong `job_error`. `page_artifact_key` được phép `null` nếu lỗi xảy ra trước khi tạo key.
 
-`scope_done.metrics` vẫn là aggregate tương thích ngược, nhưng `scope_done.page_metrics` phải phát toàn bộ `request.metricRows` để record từng job thực sự rời service worker. Mỗi row gồm `job_id`, `page_artifact_key`, `cache_hit`, `error_code`, các metric trang ở trên, tổng `recognized`/`failed` và trace Gemini của đúng producer nếu có; không chứa source URL, API key hay text. Không được gọi giá trị `Math.max(...)` của nhiều row là metric của một trang.
+`scope_done.metrics` vẫn là aggregate tương thích ngược, nhưng `scope_done.page_metrics` phải phát toàn bộ `request.metricRows` để record từng job thực sự rời service worker. Mỗi row gồm `job_id`, `page_artifact_key`, `cache_hit`, `error_code`, `accepted_offset_ms`, các metric trang ở trên, tổng `recognized`/`failed` và trace Gemini của đúng producer nếu có; không chứa source URL, API key hay text. Không được gọi giá trị `Math.max(...)` của nhiều row là metric của một trang.
 
 ### 5.2 Trace từng call Gemini
 

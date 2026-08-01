@@ -201,11 +201,11 @@ function createFakeServer() {
   };
 }
 
-function createBackgroundApp({ storage = fakeStorage(), server = createFakeServer() } = {}) {
+function createBackgroundApp({ storage = fakeStorage(), server = createFakeServer(), clock = performance } = {}) {
   let connectListener;
   const runtimeListeners = [];
   const context = {
-    Promise, Map, Set, URL, TextEncoder, TextDecoder, Buffer,
+    Promise, Map, Set, URL, TextEncoder, TextDecoder, Buffer, performance: clock,
     crypto: webcrypto, console, setTimeout, clearTimeout,
     AbortController, AbortSignal, FormData, Blob, structuredClone,
     importScripts: () => {},
@@ -329,6 +329,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     assert.ok(done.page_metrics[0].page_artifact_key);
     assert.strictEqual(done.page_metrics[0].fetch_ms, null);
     assert.strictEqual(done.page_metrics[0].first_overlay_ms, null);
+    assert.strictEqual(done.page_metrics[0].accepted_offset_ms, null);
     assert.strictEqual(done.page_metrics[0].recognized, 1);
     assert.strictEqual(done.page_metrics[0].failed, 0);
     const replayed = back.sent.find((event) => event.type === "translation" && event.cache_hit);
@@ -420,8 +421,8 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     assert.strictEqual(fullDone.failed, 1);
     assert.strictEqual(fullDone.page_metrics.length, 1);
     assert.deepStrictEqual(
-      { cache_hit: fullDone.page_metrics[0].cache_hit, error_code: fullDone.page_metrics[0].error_code, page_artifact_key: fullDone.page_metrics[0].page_artifact_key, fetch_ms: fullDone.page_metrics[0].fetch_ms },
-      { cache_hit: false, error_code: "cache_full", page_artifact_key: null, fetch_ms: null }
+      { cache_hit: fullDone.page_metrics[0].cache_hit, error_code: fullDone.page_metrics[0].error_code, page_artifact_key: fullDone.page_metrics[0].page_artifact_key, fetch_ms: fullDone.page_metrics[0].fetch_ms, accepted_offset_ms: fullDone.page_metrics[0].accepted_offset_ms },
+      { cache_hit: false, error_code: "cache_full", page_artifact_key: null, fetch_ms: null, accepted_offset_ms: null }
     );
 
     const loadedServer = createFakeServer();
@@ -916,6 +917,41 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const lateSample = JSON.parse(vm.runInContext("JSON.stringify(metricSamplesByRequest.get('late-metrics'))", app.context));
     assert.strictEqual(lateSample.first_overlay_ms, 7);
     assert.deepStrictEqual(lateSample.page_metrics.map((row) => [row.job_id, row.first_overlay_ms]), [["late-job", 7]]);
+  });
+
+  await scenario("producer accepted offsets preserve zero and shared negative values", async () => {
+    let tick = 0;
+    const server = createFakeServer();
+    server.holdSource("shared-offset");
+    const app = createBackgroundApp({ server, clock: { now: () => tick } });
+    await app.ready();
+    const first = app.connect();
+    first.receive(app.startScope("offset-first", "visible", app.job("offset-first-job", "https://x/shared-offset.jpg")));
+    await app.waitFor("page_job_accepted", first);
+    tick = 10;
+    const second = app.connect();
+    second.receive(app.startScope("offset-second", "visible", app.job("offset-second-job", "https://x/shared-offset.jpg")));
+    await app.waitFor("page_job_accepted", second);
+    server.releaseSource("shared-offset");
+    const firstDone = await app.waitFor("scope_done", first);
+    const secondDone = await app.waitFor("scope_done", second);
+    assert.strictEqual(firstDone.page_metrics[0].accepted_offset_ms, 0);
+    assert.strictEqual(secondDone.page_metrics[0].accepted_offset_ms, -10);
+  });
+
+  await scenario("late render metric patches its completed live row without adding another", async () => {
+    const server = createFakeServer();
+    server.holdSource("late-live-b");
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const port = app.connect();
+    port.receive({ ...app.startScope("late-live", "visible"), jobs: [app.job("late-live-a-job", "https://x/late-live-a.jpg"), app.job("late-live-b-job", "https://x/late-live-b.jpg")] });
+    await waitUntil(() => vm.runInContext("requests.get('late-live')?.done.has('late-live-a-job')", app.context), "first live row completion");
+    port.receive({ type: "render_metric", request_id: "late-live", job_id: "late-live-a-job", first_overlay_ms: 9 });
+    const liveRows = JSON.parse(vm.runInContext("JSON.stringify(requests.get('late-live').metricRows)", app.context));
+    assert.deepStrictEqual(liveRows.map((row) => [row.job_id, row.first_overlay_ms]), [["late-live-a-job", 9]]);
+    server.releaseSource("late-live-b");
+    await app.waitFor("scope_done", port);
   });
 
   await scenario("one failed image does not discard a valid sibling image", async () => {
