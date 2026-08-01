@@ -219,7 +219,7 @@ function createIntegration({ server = createServer(), session = storageSession()
   assert.ok(Number.isFinite(result.first_overlay_ms));
   assert.strictEqual(result.firstOverlayMs, undefined);
   assert.deepStrictEqual(Object.keys(result.metrics).sort(), [
-    "analysis_ms", "fetch_ms", "first_ocr_ms", "first_translation_ms", "queue_wait_ms", "total_ms",
+    "analysis_ms", "fetch_ms", "final_translation_ms", "first_ocr_ms", "first_translation_ms", "ocr_done_ms", "queue_wait_ms", "total_ms",
   ]);
   assert.ok(Object.values(result.metrics).every((value) => value === null || Number.isFinite(value)));
 

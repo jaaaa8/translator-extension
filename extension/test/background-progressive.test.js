@@ -173,6 +173,7 @@ function createFakeServer() {
       if (translationResults.length) {
         const result = translationResults.shift();
         if (result instanceof Error) throw result;
+        if (result.response) return result.response;
         return { ok: true, json: async () => result };
       }
       return { ok: true, json: async () => ({ items: body.items.map((item) => ({ id: item.id, translation: `${body.dst_lang}:${item.text}` })) }) };
@@ -322,6 +323,14 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     back.receive(app.startScope("return-request", "visible", app.job("return-job", "https://x/detached.jpg")));
     const done = await app.waitFor("scope_done", back);
     assert.strictEqual(done.cache_hit, true);
+    assert.strictEqual(done.page_metrics.length, 1);
+    assert.strictEqual(done.page_metrics[0].job_id, "return-job");
+    assert.strictEqual(done.page_metrics[0].cache_hit, true);
+    assert.ok(done.page_metrics[0].page_artifact_key);
+    assert.strictEqual(done.page_metrics[0].fetch_ms, null);
+    assert.strictEqual(done.page_metrics[0].first_overlay_ms, null);
+    assert.strictEqual(done.page_metrics[0].recognized, 1);
+    assert.strictEqual(done.page_metrics[0].failed, 0);
     const replayed = back.sent.find((event) => event.type === "translation" && event.cache_hit);
     assert.deepStrictEqual(
       { image_w: replayed.image_w, image_h: replayed.image_h },
@@ -409,6 +418,11 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     assert.strictEqual(error.code, "cache_full");
     const fullDone = await full.waitFor("scope_done", fullPort);
     assert.strictEqual(fullDone.failed, 1);
+    assert.strictEqual(fullDone.page_metrics.length, 1);
+    assert.deepStrictEqual(
+      { cache_hit: fullDone.page_metrics[0].cache_hit, error_code: fullDone.page_metrics[0].error_code, page_artifact_key: fullDone.page_metrics[0].page_artifact_key, fetch_ms: fullDone.page_metrics[0].fetch_ms },
+      { cache_hit: false, error_code: "cache_full", page_artifact_key: null, fetch_ms: null }
+    );
 
     const loadedServer = createFakeServer();
     loadedServer.setOnline(false);
@@ -809,6 +823,34 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     assert.strictEqual(app.page(keys.pageArtifactKey).state, "partial");
   });
 
+  await scenario("page metrics keep zero analysis timing and one network batch trace", async () => {
+    const server = createFakeServer();
+    server.setOcrRows("telemetry", [
+      { type: "analysis_ready", image_w: 100, image_h: 200, analysis_ms: 0, analysis_cache_hit: false },
+      ...[1, 2, 3].map((id) => ({ type: "ocr_block", block_id: `b${id}`, bbox: [id, id, id + 1, id + 1], src_text: `text-${id}` })),
+      { type: "image_done", recognized: 3, failed: 0 },
+    ]);
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const port = app.connect();
+    port.receive(app.startScope("telemetry", "visible", app.job("job-1", "https://x/telemetry.jpg")));
+    const done = await app.waitFor("scope_done", port);
+    assert.strictEqual(done.page_metrics.length, 1);
+    const row = done.page_metrics[0];
+    assert.strictEqual(row.job_id, "job-1");
+    assert.strictEqual(row.analysis_ms, 0);
+    assert.strictEqual(row.analysis_cache_hit, false);
+    assert.ok(Number.isFinite(row.ocr_done_ms));
+    assert.ok(Number.isFinite(row.final_translation_ms));
+    assert.deepStrictEqual(row.translation_batches[0].block_ids, ["b1", "b2", "b3"]);
+    assert.strictEqual(row.translation_batches[0].block_count, row.translation_batches[0].block_ids.length);
+    assert.strictEqual(row.translation_batches[0].status, "success");
+    assert.ok(row.ocr_done_ms >= row.first_ocr_ms);
+    assert.ok(row.final_translation_ms >= row.first_translation_ms);
+    assert.ok(row.translation_batches[0].duration_ms >= 0);
+    assert.strictEqual(Object.keys(row).some((key) => ["source_url", "text", "trans_text", "api_key"].includes(key)), false);
+  });
+
   await scenario("one failed image does not discard a valid sibling image", async () => {
     const server = createFakeServer();
     server.failSource("broken");
@@ -855,6 +897,13 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       ["b4"]
     );
     assert.deepStrictEqual({ translated: done.translated, failed: done.failed }, { translated: 1, failed: 3 });
+    assert.deepStrictEqual(
+      done.page_metrics[0].translation_batches.map((batch) => ({ block_ids: batch.block_ids, status: batch.status, error_code: batch.error_code })),
+      [
+        { block_ids: ["b1", "b2", "b3"], status: "failed", error_code: "translation_failed" },
+        { block_ids: ["b4"], status: "success", error_code: null },
+      ]
+    );
     assert.strictEqual(app.page(keys.pageArtifactKey).state, "partial");
   });
 
@@ -870,6 +919,10 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     first.receive(app.startScope("invalid-first", "visible", firstJob));
     const failed = await app.waitFor("scope_done", first);
     assert.deepStrictEqual({ translated: failed.translated, failed: failed.failed }, { translated: 0, failed: 1 });
+    assert.deepStrictEqual(
+      failed.page_metrics[0].translation_batches.map((batch) => ({ status: batch.status, error_code: batch.error_code })),
+      [{ status: "invalid_response", error_code: "invalid_response" }]
+    );
     assert.ok(first.sent.some((event) => event.type === "block_error" && event.stage === "translation"));
     assert.strictEqual(app.page(keys.pageArtifactKey).state, "partial");
 
@@ -879,6 +932,24 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     assert.deepStrictEqual({ translated: recovered.translated, failed: recovered.failed }, { translated: 1, failed: 0 });
     assert.deepStrictEqual(server.translationBatches, [["b1"], ["b1"]]);
     assert.strictEqual(app.page(keys.pageArtifactKey).state, "complete");
+  });
+
+  await scenario("rate-limited translation keeps its own trace and page rows remain per job", async () => {
+    const server = createFakeServer();
+    server.queueTranslationResult({ response: { ok: false, status: 429, json: async () => ({ error: "429 quota" }) } });
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const port = app.connect();
+    port.receive({
+      ...app.startScope("two-jobs", "visible"),
+      jobs: [app.job("rate-job", "https://x/rate.jpg"), app.job("good-job", "https://x/good.jpg")],
+    });
+    const done = await app.waitFor("scope_done", port);
+    assert.deepStrictEqual(done.page_metrics.map((row) => row.job_id).sort(), ["good-job", "rate-job"]);
+    const rate = done.page_metrics.find((row) => row.job_id === "rate-job");
+    const good = done.page_metrics.find((row) => row.job_id === "good-job");
+    assert.deepStrictEqual(rate.translation_batches.map((batch) => ({ status: batch.status, error_code: batch.error_code })), [{ status: "rate_limited", error_code: "rate_limited" }]);
+    assert.deepStrictEqual(good.translation_batches.map((batch) => batch.status), ["success"]);
   });
 
   await scenario("hot artifact caches stay bounded", async () => {
