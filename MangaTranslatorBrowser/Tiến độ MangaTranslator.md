@@ -859,3 +859,57 @@ Liên quan: [[Tiến độ MangaTranslator#Cập nhật Task 9–10 — 2026-07-
 ### Chốt nhánh
 
 Bằng chứng benchmark commit `daf80e2` trên nhánh mới `feat/v3`, sau đó fast-forward vào `feat/v2`. Review lại toàn bộ delta `326273e..daf80e2` (20 commit chưa nằm trong lần review sạch trước) **không có finding Critical/Important**: `metadataEqual` trả false cho giá trị mảng nhưng `versions` từ `/health` chỉ gồm object/string nên so version vẫn đúng, và `return` sớm cho prewarm trong `attachDescriptor` không treo request vì prewarm không có port lẫn hợp đồng completion. Gate trên cây đã merge: Node **9/9**, pytest **85 passed** với 3 warning quen thuộc.
+
+
+---
+
+## Spec A — tạm dừng sau Task 2 (2026-08-01)
+
+> [!info] Trạng thái phiên
+> Phiên Subagent-Driven Development được dừng theo yêu cầu của người dùng sau khi Task 1 và Task 2 đã qua review. Task 3 mới chỉ được trích brief trong workspace SDD; chưa giao implementer và chưa có code Task 3.
+
+### Spec và implementation plan đã chốt
+
+- Spec đã duyệt: `docs/superpowers/specs/2026-08-01-telemetry-real-fixture-quality-gate-design.md`.
+- Implementation plan: `docs/superpowers/plans/2026-08-01-telemetry-real-fixture-quality-gate.md`.
+- Mốc trên `feat/v3`: `71cad75` hoàn tất spec handoff; `d258ccf` thêm plan 8 task/48 bước TDD.
+- Ranh giới giữ nguyên: Spec A chỉ xây telemetry, fixture, policy probe và quality gate. Reading order/page-context translation thuộc Spec B; lỗi overlay chồng, crop trắng che chữ và trạng thái partial thuộc Spec C.
+
+### Phần đã triển khai trong worktree hiện tại
+
+- Worktree: `D:\MangaTranslator\.worktrees\spec-a-telemetry-quality-gate`
+- Branch: `feat/spec-a-telemetry-quality-gate`
+- HEAD khi dừng: `1a36e2f`
+
+- [x] **Task 1 — server analysis telemetry**
+  - Commit `43c0016`.
+  - Thêm `Pipeline.analyze_with_status()`, giữ wrapper `analyze()`.
+  - `analysis_ready` phát `analysis_ms` và `analysis_cache_hit`; hit sau khi chờ `_ocr_lock` vẫn được phân loại đúng.
+  - Verification: Python **88 passed**, 3 warning dependency/tooling có sẵn.
+  - Task review: PASS, không có Critical/Important/Minor.
+
+- [x] **Task 2 — per-job metric row và Gemini call trace**
+  - Commit triển khai `3949937`; fix review `1a36e2f`.
+  - `scope_done.page_metrics` có đúng một row/job cho producer, warm page-cache hit và lỗi trước producer; aggregate cũ vẫn giữ.
+  - Trace tách khỏi counter `translationBatches`, nên microbatch 3/8 production không đổi.
+  - Fix round 1 xử lý ba finding Important: stage không chạy phải là `null` thay vì `0`; late consumer phải kế thừa shared-stage timing; HTTP 429 phải phân loại theo status thay vì body text.
+  - Verification: toàn bộ JS suite **9/9 file pass**; scoped re-review xác nhận **3/3 addressed**, không có breakage mới.
+
+- [ ] **Task 3 — `first_overlay_ms` theo từng trang**
+  - Chưa triển khai. Chỉ có file brief ignored trong `.superpowers/sdd`; không có commit hoặc production diff.
+
+### Trạng thái checkout/worktree
+
+- Checkout chính `D:\MangaTranslator` vẫn ở `feat/v3`, HEAD `d258ccf` trước khi ghi worklog này.
+- Worktree hiện tại sạch tại HEAD `1a36e2f`; các commit Task 1–2 chưa merge/cherry-pick về `feat/v3`.
+- Người dùng xác nhận các `.worktrees` cũ được nhắc trong lịch sử trước đã bị xóa. Kiểm tra lúc dừng cho thấy chỉ còn worktree hiện tại `spec-a-telemetry-quality-gate`; không được nhầm các đường dẫn worktree cũ trong mục 2026-07-30/31 là workspace còn hoạt động.
+- Không xóa worktree hiện tại trước khi tích hợp các commit `43c0016`, `3949937`, `1a36e2f`.
+
+### Điểm tiếp tục ở phiên sau
+
+1. Mở ledger ignored: `.superpowers/sdd/2026-08-01-telemetry-real-fixture-quality-gate/progress.md`; Task 1–2 đã complete.
+2. Bắt đầu Task 3 từ brief hiện có và giữ message contract `render_metric` theo `job_id`; producer không được chờ UI.
+3. Sau Task 3 mới tiếp tục fixture/ground truth, policy probe, evaluator và manual worklog theo plan.
+4. Chưa có claim về policy Gemini mới, chất lượng Portuguese production hoặc fix overlay; các gate đó vẫn pending.
+
+#mangatranslator/spec-a/telemetry-quality-gate
