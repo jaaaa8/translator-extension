@@ -100,13 +100,17 @@ class Pipeline:
         return img, image_w, image_h, work, offset_x, offset_y
 
     def analyze(self, image_bytes, crop, analysis_key):
-        cached = self._analysis_cache.get(analysis_key)
+        artifact, _ = self.analyze_with_status(image_bytes, crop, analysis_key)
+        return artifact
+
+    def analyze_with_status(self, image_bytes, crop, analysis_key):
+        cached = self.get_analysis(analysis_key)
         if cached is not None:
-            return cached
+            return cached, True
         with self._ocr_lock:
-            cached = self._analysis_cache.get(analysis_key)
+            cached = self.get_analysis(analysis_key)
             if cached is not None:
-                return cached
+                return cached, True
             img, image_w, image_h, work, offset_x, offset_y = self._decode_crop(image_bytes, crop)
             work_h, work_w = work.shape[:2]
             regions = sorted(
@@ -140,7 +144,7 @@ class Pipeline:
                 sum(region.crop_rgb.nbytes for region in prepared),
             )
             self._analysis_cache.put(analysis_key, artifact)
-            return artifact
+            return artifact, False
 
     def iter_ocr(self, analysis_key, src_lang, ocr_key, cancelled=lambda: False):
         analysis = self._analysis_cache.get(analysis_key)

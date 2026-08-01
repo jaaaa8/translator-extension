@@ -1,4 +1,5 @@
 import json
+import time
 
 from fastapi.testclient import TestClient
 
@@ -19,6 +20,9 @@ class FakeStreamPipeline:
             {"key": key, "image_w": 100, "image_h": 200, "regions": [1, 2]},
         )()
         return self.analysis
+
+    def analyze_with_status(self, data, crop, key):
+        return self.analyze(data, crop, key), False
 
     def iter_ocr(self, analysis_key, src_lang, ocr_key, cancelled):
         yield {
@@ -47,14 +51,36 @@ def test_ocr_stream_cold_then_warm(monkeypatch):
         files={"image": ("page.png", b"png", "image/png")},
         data={"analysis_key": "a1", "ocr_key": "o1", "src_lang": "es"},
     )
-    assert [row["type"] for row in events(cold)] == [
+    cold_events = events(cold)
+    assert [row["type"] for row in cold_events] == [
         "analysis_ready", "ocr_block", "image_done"
     ]
+    assert cold_events[0]["analysis_cache_hit"] is False
+    assert isinstance(cold_events[0]["analysis_ms"], int) and cold_events[0]["analysis_ms"] >= 0
     warm = client.post(
         "/ocr-stream",
         data={"analysis_key": "a1", "ocr_key": "o2", "src_lang": "ja"},
     )
     assert warm.status_code == 200
+    assert events(warm)[0]["analysis_cache_hit"] is True
+
+
+def test_ocr_stream_keeps_nonzero_duration_for_delayed_cache_hit(monkeypatch):
+    class DelayedHitPipeline(FakeStreamPipeline):
+        def analyze_with_status(self, data, crop, key):
+            time.sleep(0.01)
+            return self.analyze(data, crop, key), True
+
+    monkeypatch.setattr(main, "_pipeline", DelayedHitPipeline())
+    response = TestClient(main.app).post(
+        "/ocr-stream",
+        files={"image": ("page.png", b"png", "image/png")},
+        data={"analysis_key": "a1", "ocr_key": "o1", "src_lang": "es"},
+    )
+
+    ready = events(response)[0]
+    assert ready["analysis_cache_hit"] is True
+    assert ready["analysis_ms"] > 0
 
 
 def test_ocr_stream_reports_analysis_missing(monkeypatch):

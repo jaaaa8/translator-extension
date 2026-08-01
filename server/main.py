@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 import asyncio
 import json
+import time
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -98,6 +99,7 @@ async def ocr_stream(
         return crop_or_error
     pipeline = get_pipeline()
     data = await image.read() if image is not None else None
+    analysis_started = time.perf_counter()
     cached_analysis = pipeline.get_analysis(analysis_key)
     if data is None and cached_analysis is None:
         return JSONResponse(status_code=409, content={"error": "analysis_missing"})
@@ -106,13 +108,20 @@ async def ocr_stream(
         try:
             analysis = cached_analysis
             if analysis is None:
-                analysis = await asyncio.to_thread(pipeline.analyze, data, crop_or_error, analysis_key)
+                analysis, analysis_cache_hit = await asyncio.to_thread(
+                    pipeline.analyze_with_status, data, crop_or_error, analysis_key
+                )
+            else:
+                analysis_cache_hit = True
+            analysis_ms = max(0, round((time.perf_counter() - analysis_started) * 1000))
             yield _ndjson({
                 "type": "analysis_ready",
                 "analysis_key": analysis_key,
                 "image_w": analysis.image_w,
                 "image_h": analysis.image_h,
                 "regions": len(analysis.regions),
+                "analysis_ms": analysis_ms,
+                "analysis_cache_hit": analysis_cache_hit,
             })
             iterator = pipeline._iter_ocr(analysis, analysis_key, src_lang, ocr_key, lambda: False)
             while not await request.is_disconnected():
@@ -157,7 +166,7 @@ def translate_items(body: TranslateItemsBody):
     if body.src_lang not in LANGS:
         return JSONResponse(
             status_code=422,
-            content={"error": f"src_lang khÃ´ng há»— trá»£: {body.src_lang}"},
+            content={"error": f"src_lang không hỗ trợ: {body.src_lang}"},
         )
     rows = [item.model_dump() for item in body.items]
     if len({row["id"] for row in rows}) != len(rows):
