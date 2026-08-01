@@ -4,7 +4,7 @@
 
 **Nhánh:** `feat/v3`
 
-**Trạng thái:** thiết kế đã được người dùng duyệt ngày 2026-08-01; chờ người dùng review tài liệu đã ghi
+**Trạng thái:** thiết kế đã được người dùng duyệt ngày 2026-08-01; đã hợp nhất review vòng 1 và chờ người dùng review lại tài liệu
 
 ## 1. Kết quả cần đạt
 
@@ -14,7 +14,7 @@ Spec A tạo một nền đo đủ tin cậy để Spec B quyết định chính
 2. Sáu ảnh người dùng cung cấp được đưa ra khỏi `server/vendor/` đang bị Git ignore và lưu đúng một bản trong fixture được track.
 3. Ba trang nguồn có ground truth về thứ tự đọc, transcript OCR cố định và metadata ngôn ngữ/bố cục.
 4. Chất lượng dịch được chấm tay theo rubric cố định; CI chỉ kiểm các guardrail có tính xác định và không gọi Gemini.
-5. Một batch control và ba candidate policy `ordered_microbatch`, `full_page`, `preview_then_full` có kết quả, latency, số call và lỗi được lưu thành worklog để làm gate cho Spec B.
+5. Một batch control và hai candidate chất lượng `ordered_microbatch`, `full_page` có kết quả, latency, số call và lỗi được lưu thành worklog để làm gate cho Spec B. `preview_then_full` chỉ là probe latency có điều kiện sau khi `full_page` qua quality gate.
 
 Spec A không chọn policy bằng cảm tính. Chất lượng là tiêu chí chính; latency và số call chỉ phá hòa giữa các policy có chất lượng đạt yêu cầu.
 
@@ -23,10 +23,22 @@ Spec A không chọn policy bằng cảm tính. Chất lượng là tiêu chí c
 Các điểm sau đã được đối chiếu với code hiện tại và fixture thật:
 
 - `server/main.py` phát `analysis_ready` nhưng không gửi `analysis_ms`; `extension/background.js` vẫn đọc trường này nên metric hiện luôn về `0`.
-- Vendor `comic_text_detector` đã gọi `sort_textblk_list()` trước khi trả `blk_list`. Thuật toán lật phải sang trái khi đa số block có nhãn `ja`, và có nhánh riêng cho ảnh ngang hai trang.
+- Vendor `comic_text_detector` đã gọi `sort_textblk_list()` trước khi trả `blk_list`. `blk.weight` tăng đơn điệu trên cả ba lần đo, xác nhận sorter đã chạy. Thuật toán lật phải sang trái khi đa số block có nhãn `ja`, và có nhánh riêng cho ảnh ngang hai trang.
 - `_dedupe_regions()` cần sort bản sao theo diện tích để greedy dedupe giữ box lớn hơn. Sau đó hàm đang trả luôn thứ tự diện tích; `Pipeline.analyze()` lại sort diện tích lần thứ hai. Hai bước này phá thứ tự vendor.
-- Hai fixture Nhật là spread ngang: `s-manga_ja_1.png` có 21 region, 20 region dọc; `s-manga_ja_2.png` có 17 region, tất cả dọc. Thứ tự vendor quan sát được đi nửa phải trước rồi nửa trái, hợp lý hơn thứ tự diện tích nhưng chưa được coi là ground truth cho tới khi manifest được người đọc xác nhận.
-- Fixture mang tên `mangadex_es.png` chứa tiếng Bồ Đào Nha. Vì các block không đạt đa số nhãn `ja`, vendor không lật phải sang trái dù bố cục trang vẫn là manga. `src_lang` và `reading_direction` vì thế phải là hai trường độc lập.
+- Phép đo `Detector(device="cpu")` trên ba ảnh nguồn hiện tại cho kết quả:
+
+| Trang | Kích thước | Detect → dedupe | Dọc | Nhãn classifier | `flip_lr` | Kendall τ: diện tích so với vendor |
+|---|---:|---:|---:|---|---|---:|
+| `mangadex_es.png` | 500×782 | 8 → 7 | 0 | `eng: 5`, `ja: 3` | `false` | `0.048` |
+| `s-manga_ja_1.png` | 1107×871 | 21 → 21 | 20 | `ja: 20`, `unknown: 1` | `true` | `-0.114` |
+| `s-manga_ja_2.png` | 1105×868 | 17 → 17 | 17 | `ja: 17` | `true` | `-0.029` |
+
+τ gần `0` trên cả ba trang chứng minh thứ tự diện tích không tương quan với thứ tự đọc. Dedupe chỉ loại một box trùng trên trang Portuguese; hai spread không bị dedupe thay đổi tập region. Đây là phép đo CPU; production CUDA có thể lệch nhẹ, nên manifest dùng anchor IoU và expected order do người đọc xác nhận thay vì đóng băng raw detector output.
+- Đối chiếu độc lập với nội dung ảnh cho thấy vendor đúng `17/17` region trên `s-manga_ja_2`, nhưng xếp sai một region trên `s-manga_ja_1`: `ＣＭによるイメージ向上と` thuộc panel trên bị đẩy xuống sau hai region của panel dưới. Region poster ngang `新人ヒーロー募集中！` là `sign`, không phải thoại.
+- Fixture mang tên `mangadex_es.png` chứa tiếng Bồ Đào Nha và đọc RTL, nhưng vendor trả LTR vì chỉ có `3/8` block mang nhãn `ja`, không vượt ngưỡng `4`. Vendor order vì thế là tín hiệu cần bảo toàn qua dedupe, không phải ground truth đủ để ship. `src_lang` và `reading_direction` phải là hai input độc lập.
+- Trang Portuguese có đúng bảy bóng thoại sau dedupe; detector tìm đủ cả bảy. Box thứ tám là duplicate cùng một bóng nhưng hai classifier label khác nhau (`eng` và `ja`). Hiện tượng “mất bóng” trong ảnh lỗi vì thế thuộc OCR/translation/overlay downstream, không phải detector bỏ sót.
+- `PaddleLatinEngine` đang hard-code `PaddleOCR(lang="es")`; thêm registry key `pt` sau này sẽ không tự đổi recognizer nếu constructor chưa đổi. Frozen transcript Portuguese của Spec A dùng chính engine hiện tại nên vẫn so sánh được qua ranh giới A → B; mọi thay đổi recognizer vẫn phải bump version và review diff.
+- Phép đối chứng review này chưa chạy OCR live hoặc Gemini. Mọi nhận định về chất lượng dịch vẫn là giả thuyết cho tới khi policy probe mục 6 có capture và chấm tay.
 - `finishProducer()` ghi trang thiếu bản dịch thành `partial`, trong khi `page-cache.js` chỉ tính `state === "failed"` vào bộ đếm `Lỗi:`.
 - `attemptedTranslationIds` sống trong một producer; `trans_text` nằm trong page artifact. Cả hai guard hiện ngăn block preview được đưa lại vào final full-page call nếu tái sử dụng đường queue hiện tại.
 - Mask bị bỏ trong `Detector.detect()` là text mask dùng cho inpainting, không phải balloon mask. Nó không tự giải quyết vùng layout của chữ dịch.
@@ -102,7 +114,10 @@ Mỗi trang nguồn có:
   "width": 500,
   "height": 782,
   "regions": [],
-  "term_groups": []
+  "term_groups": [],
+  "known_order_failures": [
+    "vendor trả LTR trong khi ground truth là RTL"
+  ]
 }
 ```
 
@@ -115,12 +130,15 @@ Mỗi phần tử `regions` dùng ID fixture độc lập với runtime `block_i
   "fixture_block_id": "b01",
   "bbox": [10, 20, 30, 40],
   "reading_order": 0,
+  "kind": "dialogue",
   "src_text": "transcript OCR đã review",
   "required": true
 }
 ```
 
-Expected order được người đọc xác nhận theo panel và chiều đọc manga. Với spread Nhật, toàn bộ nửa phải đi trước nửa trái. Với trang Portuguese, chiều đọc vẫn là RTL dù ngôn ngữ là Latin.
+`kind` chỉ nhận `dialogue`, `sfx` hoặc `sign`. Mọi kind vẫn được dịch và phải trả exact ID; chỉ `dialogue` tham gia điểm ngữ cảnh hội thoại. Cụ thể, poster ngang trên `s-manga_ja_1` phải được annotate là `sign`, không được giả làm lời thoại.
+
+Expected order được người đọc xác nhận độc lập theo panel và chiều đọc manga. Với spread Nhật, toàn bộ nửa phải đi trước nửa trái. Với trang Portuguese, chiều đọc vẫn là RTL dù ngôn ngữ là Latin. Tuyệt đối không sinh `reading_order` bằng cách dump `sort_textblk_list()`: vendor đã sai một region trên `s-manga_ja_1` và sai chiều toàn trang trên `mangadex_pt`. Hai sai lệch này phải nằm trong `known_order_failures` để reviewer có mốc kiểm tra, không xác nhận vòng tròn chính output vendor.
 
 Region detector được ghép với anchor manifest bằng IoU lớn hơn `0.5`. Mỗi required anchor phải ghép đúng một region, một region không được ghép hai anchor. Region mới hoặc mất region phải được báo trong kết quả diagnostic, không tự sửa manifest.
 
@@ -134,7 +152,9 @@ Ba ảnh overlay chỉ có metadata:
 - liên kết tới `source_page` tương ứng;
 - danh sách nhãn lỗi nhìn thấy, ví dụ `partial_translation`, `white_bbox_exposes_source`, `text_clipped`, `fragmented_blocks`.
 
-Chúng không được đưa vào điểm chất lượng Gemini. Spec C sẽ dùng chúng để xây visual acceptance.
+Không dùng nhãn `detector_missing_bubble` cho ảnh Portuguese: detector đã tìm đủ `7/7` bóng sau dedupe. Bóng không có overlay phải được ghi là `partial_translation` hoặc `overlay_missing` cho tới khi Spec C định vị chính xác stage downstream.
+
+Các ảnh tham chiếu lỗi không được đưa vào điểm chất lượng Gemini. Spec C sẽ dùng chúng để xây visual acceptance.
 
 ## 5. Contract telemetry
 
@@ -151,7 +171,9 @@ Event `analysis_ready` bổ sung:
 }
 ```
 
-- `analysis_ms` là thời gian request hiện tại thực sự chờ analysis. Cache hit trả `0` và `analysis_cache_hit: true`.
+- `analysis_ms` là wall time phía handler từ ngay trước khi gọi `Pipeline.analyze()` đến khi hàm trả về, gồm cả thời gian chờ `_ocr_lock`. Nó có thể lớn hơn `0` khi request miss cache lần đầu, chờ request khác phân tích, rồi hit cache ở lần kiểm tra thứ hai sau lock.
+- `analysis_cache_hit: true` khi request này không tự chạy detector, không phụ thuộc `analysis_ms` có bằng `0` hay không. `false` chỉ khi chính request thực thi decode + detect + chuẩn bị region.
+- Spec A chưa thêm `analysis_wait_ms`; chỉ tách lock wait thành metric riêng nếu số đo wall time sau này không đủ giải thích contention.
 - `ocr_done_ms` được background ghi khi nhận server `image_done` của OCR.
 - `recognized` và `failed` của OCR được giữ trong trace trang.
 
@@ -167,6 +189,8 @@ Metric trang gồm ít nhất:
 - `total_ms`.
 
 `analysis_ms` là duration stage; các trường có hậu tố `_done_ms`/`first_*_ms` là elapsed time từ producer accepted. Hai loại không được trộn trong báo cáo.
+
+`completeJob()` phải nhận hoặc tạo đúng một metric row cho mỗi job hoàn tất. Job chạy producer lấy row từ `producerMetrics()`; warm page-cache hit cũng tạo row với `cache_hit: true`, các stage không chạy là `null` thay vì giả thành `0`. `scope_done.metrics` vẫn là aggregate tương thích ngược, nhưng `scope_done.page_metrics` phải phát toàn bộ `request.metricRows` để record từng trang thực sự rời service worker. Mỗi row gồm `job_id`, `page_artifact_key`, `cache_hit`, các metric trang ở trên, tổng `recognized`/`failed` và trace Gemini của đúng producer; không chứa source URL, API key hay text. Không được gọi giá trị `Math.max(...)` của nhiều row là metric của một trang.
 
 ### 5.2 Trace từng call Gemini
 
@@ -196,26 +220,27 @@ Runner là lệnh thủ công, dùng Python stdlib và dependency Gemini đã c�
 
 Prompt evaluation `comic-page-eval-v1` chỉ thêm ngữ cảnh tối thiểu đã duyệt:
 
-- đây là các block hội thoại từ cùng một ảnh/trang manga hoặc comic;
-- item được cung cấp kèm `reading_order`, `bbox` và kích thước ảnh;
+- đây là các block văn bản từ cùng một ảnh/trang manga hoặc comic;
+- item được cung cấp kèm `reading_order`, `kind`, `bbox` và kích thước ảnh;
 - giữ nhất quán tên riêng, đại từ và mức lịch sự trong phạm vi trang;
 - dùng văn nói tự nhiên, súc tích;
 - trả mỗi exact ID đúng một lần.
 
 Prompt không suy đoán nhân vật, không dùng memory nhiều trang và không thêm glossary tự động. Mọi arm dùng cùng prompt này để policy probe không trộn thay đổi prompt với thay đổi ordering/batching.
 
-Runner tạo một control và ba candidate. Mọi arm đều dùng `source_name` đúng từ manifest; vì vậy fixture Portuguese không bị nhiễu bởi lỗi production đang gọi nó là Spanish. Tất cả candidate dùng cùng expected order để tách tác động của ordering khỏi tác động của batch policy:
+Runner tạo một control và hai candidate chất lượng. Mọi arm đều dùng `source_name` đúng từ manifest; vì vậy fixture Portuguese không bị nhiễu bởi lỗi production đang gọi nó là Spanish:
 
-1. `batch_control`: replay exact block order và batch membership của trace baseline hợp lệ, nhưng dùng prompt evaluation và tên ngôn ngữ đúng từ manifest. Đây là control cho ordering/batching hiện tại; nó không được gọi là production proof.
-2. `ordered_microbatch`: lấy danh sách đã xếp theo expected `reading_order`, rồi chia theo đúng dãy batch size của `batch_control`. So sánh control với candidate này đo riêng tác động của ordering.
+1. `batch_control`: replay exact block order và batch membership của baseline đã commit, nhưng dùng prompt evaluation và tên ngôn ngữ đúng từ manifest. Đây là control cho ordering/batching hiện tại; nó không được gọi là production proof.
+2. `ordered_microbatch`: lấy danh sách đã xếp theo expected `reading_order`, rồi chia theo đúng dãy batch size đã commit của `batch_control`. So sánh control với candidate này đo riêng tác động của ordering.
 3. `full_page`: gửi toàn bộ block một lần theo expected `reading_order`.
-4. `preview_then_full`: gửi batch đầu của `ordered_microbatch` làm preview, sau đó gửi lại toàn bộ block theo expected `reading_order`.
 
-`batch_control` lấy batch membership từ cold trace đầu tiên có OCR hoàn tất và đủ event thứ tự. Với Portuguese, implementation được phép chạy ảnh qua recognizer Latin hiện có bằng `src_lang=es` chỉ để capture OCR arrival/batch scheduling; text dịch của run này bị loại khỏi quality score. Đây không phải bằng chứng production hỗ trợ Portuguese. Nếu translation call của trace thất bại, membership vẫn hợp lệ khi trace đã ghi đủ `batch_id`, `block_ids` và thời điểm flush.
+Batch membership phụ thuộc timer `250/500 ms`, nên quality run không được tự capture lại rồi gọi đó là cùng control. Cold trace đầu tiên có OCR hoàn tất và đủ event thứ tự phải được review rồi commit vào `telemetry_validation.baseline_batches` trong worklog, gồm exact `block_ids`, `batch_sizes`, fixture SHA, commit, device và production policy version. `batch_control` đọc exact membership này; `ordered_microbatch` chỉ tái dùng dãy size trên expected order. Dữ liệu này không nằm trong manifest vì nó là artifact runtime phụ thuộc policy/máy, không phải ground truth của ảnh.
 
-Kết quả final của `preview_then_full` có cùng input/prompt contract với `full_page`; vì vậy policy này kế thừa điểm semantic của `full_page`. Ba paired run của `preview_then_full` chỉ dùng để đo TTFT, final latency, số call, rate-limit/invalid response và chi phí thay thế overlay. Final response vẫn được lưu để audit exact ID, nhưng không được quảng bá thành một thuật toán chất lượng khác chỉ vì sampling của Gemini cho câu chữ khác.
+Với Portuguese, implementation được phép chạy ảnh qua recognizer Latin hiện có bằng `src_lang=es` chỉ để capture OCR arrival/batch scheduling; text dịch của run này bị loại khỏi quality score. Đây không phải bằng chứng production hỗ trợ Portuguese. Nếu translation call của trace thất bại, membership vẫn hợp lệ khi trace đã ghi đủ `batch_id`, `block_ids` và thời điểm flush.
 
-Mỗi cặp `source_page × arm` chạy đúng ba attempt với cùng model, prompt và transcript. Rubric đầy đủ áp dụng cho `batch_control`, `ordered_microbatch` và `full_page`; `preview_then_full` kế thừa rubric của `full_page`. Runner giữ retry/failover giống production, nhưng không chạy thêm attempt để che lỗi. Nếu một arm có dưới hai response hợp lệ trên một trang, kết quả arm là `inconclusive`; candidate tương ứng không được chọn.
+`preview_then_full` không phải quality arm và không tham gia rubric ở mục 7. Chỉ sau khi `full_page` qua quality gate, nếu telemetry cho thấy first-overlay latency còn là trade-off cần đo, runner mới chạy ba paired attempt trên hai spread Nhật: gửi batch đầu làm preview rồi gửi lại toàn trang. Probe chỉ đo TTFT, final latency, số call, rate-limit/invalid response và exact ID; mặc định vẫn giữ `full_page` cho tới khi người dùng duyệt rõ trade-off. Cách chạy có điều kiện bỏ toàn bộ preview probe trên trang Portuguese không hỗ trợ production và ít phân biệt batching nhất.
+
+Mỗi cặp `source_page × quality arm` chạy đúng ba attempt với cùng model, prompt và transcript. Rubric đầy đủ áp dụng cho `batch_control`, `ordered_microbatch` và `full_page`; không chấm `preview_then_full`. Runner giữ retry/failover giống production, nhưng không chạy thêm attempt để che lỗi. Nếu một arm có dưới hai response hợp lệ trên một trang, kết quả arm là `inconclusive`; candidate tương ứng không được chọn.
 
 Mỗi capture lưu:
 
@@ -247,7 +272,13 @@ Mỗi response hợp lệ được người đọc chấm `0`, `1` hoặc `2` ch
 
 Reviewer đánh thêm `critical_error: true` nếu có sai nghĩa nghiêm trọng, bỏ thoại, bịa nội dung, nhầm người nói hoặc sai exact ID set. Tổng điểm tối đa là `12`, nhưng một critical error không được bù bằng điểm ở mục khác.
 
-Worklog lưu điểm từng attempt, ghi chú ngắn và reviewer. Không bắt buộc một bản dịch gold duy nhất vì nhiều cách dịch tự nhiên có thể cùng đúng.
+Để so sánh policy mà không cho các mục ít liên quan lấn át tín hiệu batching, evaluator tính thêm `context_score = tên riêng/thuật ngữ + đại từ/đối tượng + mạch toàn trang`, phạm vi `0..6`. Với mục `mạch toàn trang`, reviewer chỉ chấm các region `kind: dialogue`; `sign` và `sfx` vẫn phải đúng ID, đúng nghĩa và súc tích nhưng không bị giả định là một lượt hội thoại.
+
+Hai spread Nhật dùng `context_score` làm số so sánh policy. Trang Portuguese chỉ làm gate cho expected RTL order, exact ID và `critical_error`; điểm số của trang bảy block này vẫn được ghi để audit nhưng không có quyền quyết định candidate batching thắng hay thua.
+
+`preview_then_full` không xuất hiện trong bảng chấm chất lượng; nó chỉ có record latency có điều kiện như mục 6.
+
+Worklog lưu điểm từng attempt, `context_score`, ghi chú ngắn và reviewer. Không bắt buộc một bản dịch gold duy nhất vì nhiều cách dịch tự nhiên có thể cùng đúng.
 
 ### 7.2 Guardrail tự động trong CI
 
@@ -266,12 +297,12 @@ CI kiểm evaluator bằng capture tĩnh; CI tuyệt đối không gọi Gemini.
 
 ## 8. Quy tắc chọn policy cho Spec B
 
-1. Reading order đúng theo manifest là điều kiện bắt buộc, không phải biến tối ưu.
-2. Loại `ordered_microbatch` hoặc `full_page` nếu có `critical_error` hoặc `inconclusive` trên bất kỳ trang nguồn nào. `preview_then_full` chỉ hợp lệ khi `full_page` hợp lệ và chính nó có ít nhất hai paired run trả exact ID set.
-3. Tính median tổng điểm của ba attempt hợp lệ cho từng trang.
-4. Candidate phải không thấp hơn `batch_control` trên mọi trang. Nếu không candidate nào đạt, quality gate bị chặn và Spec B không được phép ship policy mới; production tạm giữ nguyên nhưng không được gọi là đã nghiệm thu.
-5. `full_page` chỉ thắng `ordered_microbatch` về chất lượng khi không thấp hơn trên mọi trang và cao hơn trên ít nhất một trang. Nếu không đạt điều này, giữ `ordered_microbatch` làm candidate chất lượng tốt nhất.
-6. `preview_then_full` bị loại nếu bị `full_page` Pareto-dominate: không cải thiện `first_overlay_ms` nhưng không tốt hơn về final latency, lỗi/rate-limit hoặc số call.
+1. Expected `reading_order` do người đọc xác nhận phải đúng trên cả ba manifest trước khi chạy quality gate. Vendor order là input hữu ích nhưng không đủ: nó sai một region Nhật và sai chiều toàn trang Portuguese.
+2. Trên trang Portuguese, mọi candidate phải đi đúng RTL expected order, trả exact ID và không có `critical_error`. Trang này không tham gia phép so sánh điểm batching.
+3. Loại `ordered_microbatch` hoặc `full_page` nếu có `critical_error`, `inconclusive`, hoặc median bằng `0` ở bất kỳ mục an toàn nào trong `Đúng nghĩa`, `Giọng/mức lịch sự`, `Độ súc tích` trên bất kỳ trang nguồn nào.
+4. Trên từng spread Nhật, tính median `context_score` của ba attempt hợp lệ. Candidate qua ngưỡng cải thiện so với `batch_control` khi không thấp hơn quá `1` điểm trên bất kỳ spread nào và cao hơn ít nhất `2` điểm trên ít nhất một spread. Dung sai một điểm hấp thụ dao động nhỏ của rubric; yêu cầu tăng hai điểm ngăn một dao động đơn lẻ được gọi là thắng.
+5. Nếu không candidate nào qua ngưỡng, quality gate bị chặn và Spec B không được ship policy mới. Nếu chỉ một candidate qua, chọn candidate đó. Nếu cả hai qua, so sánh `full_page` với `ordered_microbatch` bằng cùng quy tắc; nếu không arm nào thắng rõ về `context_score`, coi chất lượng hòa và dùng số call Gemini rồi total latency làm tie-breaker.
+6. Chỉ khi `full_page` được chọn và first-overlay latency còn cần đánh đổi, mới chạy probe `preview_then_full` trên hai spread Nhật. Probe phải có ít nhất hai paired run trả exact ID; nếu không cải thiện first overlay hoặc làm xấu final latency/lỗi/rate-limit mà không có lợi ích đo được, giữ `full_page`.
 7. Nếu preview cải thiện first overlay nhưng phải trả thêm call/final latency, worklog trình bày đúng trade-off và mặc định chọn `full_page`. Chỉ chọn preview khi người dùng duyệt rõ sau khi xem số đo; Spec A không phát minh một ngưỡng phần trăm tùy ý.
 8. Quyết định và bằng chứng được ghi trong worklog; không sửa production policy ngay trong Spec A.
 
@@ -287,9 +318,9 @@ docs/superpowers/worklogs/2026-08-01-real-page-quality-baseline.json
 
 Worklog chứa ba phần:
 
-- `telemetry_validation`: một cold và một warm end-to-end run cho mỗi trang Nhật; với Portuguese chỉ chạy analysis/OCR và batch-scheduling trace bằng recognizer Latin hiện có, cộng policy probe transcript, cho tới khi Spec B thêm `pt` production;
-- `policy_probe`: ba attempt cho mỗi trang/arm như mục 6;
-- `manual_review`: rubric, điểm, critical errors và quyết định gate.
+- `telemetry_validation`: một cold và một warm end-to-end run cho mỗi trang Nhật; với Portuguese chỉ chạy analysis/OCR và batch-scheduling trace bằng recognizer Latin hiện có, cộng policy probe transcript, cho tới khi Spec B thêm `pt` production. Phần này lưu `measurement_device`, từng `page_metrics` và `baseline_batches` đã review;
+- `policy_probe`: ba attempt cho mỗi trang/quality arm như mục 6, cộng `preview_then_full` latency probe nếu điều kiện kích hoạt được thỏa;
+- `manual_review`: rubric, `context_score`, critical errors và quyết định gate.
 
 Các run Portuguese trong Spec A là policy probe từ transcript cố định, chưa phải production proof. Production benchmark sau khi Spec B thêm `pt` và policy thắng vẫn phải tuân thủ gate hiện có: tối thiểu 20 cold + 20 warm trên một máy, báo p50/p95, first overlay/translation/total và không regress block count.
 
@@ -308,11 +339,12 @@ Fixture port `8000` và production OCR API port `8910` tiếp tục tách biệt
 
 ### Tự động
 
-- Test `analysis_ready` có `analysis_ms` và `analysis_cache_hit` đúng cho miss/hit.
-- Test `ocr_done_ms` và trace Gemini đơn điệu, không âm, exact block IDs.
+- Test `analysis_ready` có `analysis_ms` và `analysis_cache_hit` đúng cho miss/hit, gồm ca miss trước lock → chờ → hit sau lock có `analysis_cache_hit: true` và `analysis_ms > 0`.
+- Test `ocr_done_ms` và trace Gemini đơn điệu, không âm, exact block IDs; `scope_done.page_metrics` có đúng một row mỗi job, kể cả warm page-cache hit, thay vì chỉ aggregate `max`.
 - Test failed translation batch xuất hiện trong trace và page tổng hợp thành `partial` hiện trạng.
-- Test manifest schema/hash/role và sáu ảnh mới không bị copy trùng ngoài nguồn canonical.
-- Test expected-order comparator bắt được area-order sai trên fixture đã capture.
+- Test manifest schema/hash/role/`kind` và sáu ảnh mới không bị copy trùng ngoài nguồn canonical.
+- Test expected-order comparator bắt được area-order, vendor LTR của `mangadex_pt` và region vendor sai trên `s-manga_ja_1`; expected order không được sinh từ output đang được kiểm.
+- Test `batch_control` replay exact membership đã commit, còn `ordered_microbatch` replay đúng dãy size trên expected order dù timer runtime khác.
 - Test evaluator bắt duplicate/missing ID, term inconsistency và fixture hash drift.
 - Test CI path không cần `GEMINI_API_KEY` và không tạo network request.
 
@@ -320,7 +352,7 @@ Fixture port `8000` và production OCR API port `8910` tiếp tục tách biệt
 
 - Xác nhận expected reading order trên ba trang nguồn, đặc biệt gutter của hai spread Nhật và manga Portuguese RTL.
 - Xác nhận frozen OCR transcript tương ứng đúng bbox.
-- Chạy policy probe ba attempt, chấm theo rubric, lưu worklog.
+- Chạy ba attempt cho mỗi quality arm; chấm hai spread bằng rubric/`context_score`, dùng trang Portuguese cho order/exact-ID/critical gate, và chỉ chạy preview latency probe khi điều kiện mục 6 thỏa.
 - Đối chiếu telemetry với thứ tự event thực tế; không chấp nhận field luôn `0` hoặc batch membership không truy được.
 
 ### Điều kiện hoàn tất Spec A
@@ -334,7 +366,7 @@ Fixture port `8000` và production OCR API port `8910` tiếp tục tách biệt
 
 ## 12. Quan hệ với các spec sau
 
-- **Spec B — reading order và page-context translation:** bảo toàn winner của area-greedy dedupe nhưng trả về theo vendor order; gắn `reading_order`; thêm `pt`; sửa prompt/version/cache; triển khai policy thắng gate và acceptance webtoon `mỗi <img> = một page unit`.
+- **Spec B — reading order và page-context translation:** area-greedy dedupe vẫn chọn box lớn nhưng phải trả winner về theo thứ tự input; một stage reading-order riêng sau đó tạo `reading_order` và phải qua expected-order comparator của cả ba fixture. Stage này không được dựa duy nhất vào classifier `ja` hay trả nguyên vendor order. Probe nhận `reading_direction` từ manifest; production nhận giá trị độc lập, do người dùng kiểm soát và truyền trong request, để Portuguese manga có thể chọn RTL mà không giả thành tiếng Nhật. Spec B cũng thêm `pt`, sửa prompt/version/cache, triển khai policy thắng gate và acceptance webtoon `mỗi <img> = một page unit`.
 - **Spec C — overlay an toàn:** xử lý `block_error`/`partial`, source-text erasure, mask/inpainting, vùng layout chữ dịch và clipping; dùng ba failure-reference làm visual acceptance.
 
 Spec B không bắt đầu thay đổi production policy trước khi Spec A có worklog gate. Spec C có thể thiết kế song song về hình học, nhưng production acceptance cuối phải dùng output policy đã chốt ở Spec B.
