@@ -36,8 +36,10 @@ function producerMetrics(producer) {
   };
 }
 function recordMetrics(requestId, sample) {
-  metricSamples.push(sample);
-  metricSamplesByRequest.set(requestId, sample);
+  const pageMetrics = sample.page_metrics?.map(({ translation_batches = [], ...row }) => ({ ...row, translation_batches: translation_batches.map((batch) => ({ ...batch, block_ids: [...batch.block_ids] })) }));
+  const recorded = pageMetrics ? { ...sample, page_metrics: pageMetrics } : sample;
+  metricSamples.push(recorded);
+  metricSamplesByRequest.set(requestId, recorded);
   if (metricSamples.length > 100) {
     const removed = metricSamples.shift();
     for (const [id, row] of metricSamplesByRequest) if (row === removed) metricSamplesByRequest.delete(id);
@@ -382,7 +384,7 @@ function consumerKey(requestId, jobId) {
 }
 
 function createRequest(port, message) {
-  const request = { requestId: message.request_id, scope: message.scope, srcLang: message.src_lang, dstLang: message.dst_lang, port, jobs: new Map(), jobsBySourceCrop: new Map(), expectedJobIds: new Set((message.jobs || []).map((row) => row.job_id)), pendingJobs: [], outstanding: 0, connected: true, done: new Set(), hits: 0, translated: 0, failed: 0, acceptedAt: now(), firstOverlayMs: null, metricRows: [], counters: { translation_calls: 0, rate_limited: 0, stale_work: 0 }, countedCounterProducers: new Set(), cancelLatencyMs: null };
+  const request = { requestId: message.request_id, scope: message.scope, srcLang: message.src_lang, dstLang: message.dst_lang, port, jobs: new Map(), jobsBySourceCrop: new Map(), expectedJobIds: new Set((message.jobs || []).map((row) => row.job_id)), pendingJobs: [], outstanding: 0, connected: true, done: new Set(), hits: 0, translated: 0, failed: 0, acceptedAt: now(), firstOverlayMs: null, firstOverlayByJob: new Map(), metricRows: [], counters: { translation_calls: 0, rate_limited: 0, stale_work: 0 }, countedCounterProducers: new Set(), cancelLatencyMs: null };
   for (const row of message.jobs || []) request.jobsBySourceCrop.set(sourceCropKey(row), row);
   return request;
 }
@@ -453,7 +455,7 @@ async function acceptScope(port, message) {
 function completeJob(request, jobId, translated, failed, hit, metrics = null, counters = null, counterProducer = null, meta = {}) {
   if (!request) return;
   if (request.done.has(jobId)) return; request.done.add(jobId); request.translated += translated; request.failed += failed; if (hit) request.hits++;
-  request.metricRows.push({ job_id: jobId, page_artifact_key: meta.pageKey ?? null, cache_hit: hit, error_code: meta.errorCode ?? null, ...emptyPageMetrics(), ...(metrics || {}) });
+  request.metricRows.push({ job_id: jobId, page_artifact_key: meta.pageKey ?? null, cache_hit: hit, error_code: meta.errorCode ?? null, ...emptyPageMetrics(), ...(metrics || {}), first_overlay_ms: request.firstOverlayByJob.get(jobId) ?? null });
   if (counters && !request.countedCounterProducers.has(counterProducer)) {
     request.countedCounterProducers.add(counterProducer);
     for (const key of Object.keys(request.counters)) request.counters[key] += counters[key] || 0;
@@ -470,12 +472,12 @@ function scopeMetrics(request) {
   return {
     queue_wait_ms: value("queue_wait_ms"), fetch_ms: value("fetch_ms", 0),
     analysis_ms: value("analysis_ms", 0), first_ocr_ms: value("first_ocr_ms"), ocr_done_ms: value("ocr_done_ms"),
-    first_translation_ms: value("first_translation_ms"), final_translation_ms: value("final_translation_ms"), total_ms: Math.round(now() - request.acceptedAt),
+    first_translation_ms: value("first_translation_ms"), final_translation_ms: value("final_translation_ms"), first_overlay_ms: request.firstOverlayMs, total_ms: Math.round(now() - request.acceptedAt),
   };
 }
 function scopeDone(request) {
   const metrics = scopeMetrics(request);
-  recordMetrics(request.requestId, { ...metrics, first_overlay_ms: request.firstOverlayMs, cancel_latency_ms: request.cancelLatencyMs, counter_records: new Set([...request.countedCounterProducers].map((producer) => producer.counters)) });
+  recordMetrics(request.requestId, { ...metrics, cancel_latency_ms: request.cancelLatencyMs, page_metrics: request.metricRows, counter_records: new Set([...request.countedCounterProducers].map((producer) => producer.counters)) });
   request.port?.postMessage({ type: "scope_done", request_id: request.requestId, images: request.done.size, translated: request.translated, failed: request.failed, cache_hit: request.done.size > 0 && request.hits === request.done.size, metrics, page_metrics: request.metricRows });
   requests.delete(request.requestId);
 }
@@ -815,7 +817,7 @@ function releaseRequest(requestId, replacement = null) {
     void pageCache?.removeJob(row.descriptor.job_id);
   }
   request.cancelLatencyMs = Math.round(now() - cancelStartedAt);
-  recordMetrics(request.requestId, { ...scopeMetrics(request), first_overlay_ms: request.firstOverlayMs, cancel_latency_ms: request.cancelLatencyMs, counter_records: new Set([...request.countedCounterProducers, ...releasedProducers].map((producer) => producer.counters)) });
+  recordMetrics(request.requestId, { ...scopeMetrics(request), cancel_latency_ms: request.cancelLatencyMs, page_metrics: request.metricRows, counter_records: new Set([...request.countedCounterProducers, ...releasedProducers].map((producer) => producer.counters)) });
   requests.delete(requestId);
 }
 function disconnectPort(port) { ports.delete(port); for (const request of requests.values()) if (request.port === port) releaseRequest(request.requestId); }
@@ -844,11 +846,22 @@ if (chrome.runtime.onConnect && chrome.runtime.onConnect.addListener) {
       if (message.type === "cancel_request") releaseRequest(message.request_id);
       if (message.type === "render_metric") {
         const request = requests.get(message.request_id);
-        if (!Number.isFinite(message.first_overlay_ms)) return;
-        if (request) request.firstOverlayMs ??= message.first_overlay_ms;
+        if (!Number.isFinite(message.first_overlay_ms) || !message.job_id) return;
+        if (request) {
+          if (!request.expectedJobIds.has(message.job_id)) return;
+          const previous = request.firstOverlayByJob.get(message.job_id);
+          const firstOverlayMs = previous == null ? message.first_overlay_ms : Math.min(previous, message.first_overlay_ms);
+          request.firstOverlayByJob.set(message.job_id, firstOverlayMs);
+          request.firstOverlayMs = request.firstOverlayMs == null ? firstOverlayMs : Math.min(request.firstOverlayMs, firstOverlayMs);
+          const row = request.metricRows.find((metric) => metric.job_id === message.job_id);
+          if (row) row.first_overlay_ms = firstOverlayMs;
+        }
         else {
           const sample = metricSamplesByRequest.get(message.request_id);
-          if (sample) sample.first_overlay_ms ??= message.first_overlay_ms;
+          const row = sample?.page_metrics?.find((metric) => metric.job_id === message.job_id);
+          if (!row) return;
+          row.first_overlay_ms = Number.isFinite(row.first_overlay_ms) ? Math.min(row.first_overlay_ms, message.first_overlay_ms) : message.first_overlay_ms;
+          sample.first_overlay_ms = Number.isFinite(sample.first_overlay_ms) ? Math.min(sample.first_overlay_ms, row.first_overlay_ms) : row.first_overlay_ms;
         }
       }
     });

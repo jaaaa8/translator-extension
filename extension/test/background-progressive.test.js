@@ -889,6 +889,35 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     assert.strictEqual(Object.keys(row).some((key) => ["source_url", "text", "trans_text", "api_key"].includes(key)), false);
   });
 
+  await scenario("render metrics stay attributed to their page before and after scope completion", async () => {
+    const server = createFakeServer();
+    server.holdSource("metric-a");
+    server.holdSource("metric-b");
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const port = app.connect();
+    const jobs = [app.job("metric-a-job", "https://x/metric-a.jpg"), app.job("metric-b-job", "https://x/metric-b.jpg")];
+    port.receive({ ...app.startScope("early-metrics", "visible"), jobs });
+    await waitUntil(() => server.counts.source === 2, "metric source fetches");
+    port.receive({ type: "render_metric", request_id: "early-metrics", job_id: "metric-a-job", first_overlay_ms: 40 });
+    port.receive({ type: "render_metric", request_id: "early-metrics", job_id: "unknown-job", first_overlay_ms: 0 });
+    port.receive({ type: "render_metric", request_id: "early-metrics", job_id: "metric-b-job", first_overlay_ms: 10 });
+    server.releaseSource("metric-a");
+    server.releaseSource("metric-b");
+    const earlyDone = await app.waitFor("scope_done", port);
+    assert.deepStrictEqual(earlyDone.page_metrics.map((row) => [row.job_id, row.first_overlay_ms]).sort(), [["metric-a-job", 40], ["metric-b-job", 10]]);
+    assert.strictEqual(earlyDone.metrics.first_overlay_ms, 10);
+
+    const lateJob = app.job("late-job", "https://x/late.jpg");
+    port.receive(app.startScope("late-metrics", "visible", lateJob));
+    await waitUntil(() => port.sent.some((event) => event.type === "scope_done" && event.request_id === "late-metrics"), "late metric scope completion");
+    port.receive({ type: "render_metric", request_id: "late-metrics", job_id: "late-job", first_overlay_ms: 7 });
+    port.receive({ type: "render_metric", request_id: "late-metrics", job_id: "stale-job", first_overlay_ms: 0 });
+    const lateSample = JSON.parse(vm.runInContext("JSON.stringify(metricSamplesByRequest.get('late-metrics'))", app.context));
+    assert.strictEqual(lateSample.first_overlay_ms, 7);
+    assert.deepStrictEqual(lateSample.page_metrics.map((row) => [row.job_id, row.first_overlay_ms]), [["late-job", 7]]);
+  });
+
   await scenario("one failed image does not discard a valid sibling image", async () => {
     const server = createFakeServer();
     server.failSource("broken");
