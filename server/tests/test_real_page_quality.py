@@ -101,14 +101,24 @@ def test_eval_decoder_rejects_missing_duplicate_and_invented_ids(response):
         decode_eval_items(response, ["b1"])
 
 
+def test_eval_decoder_treats_missing_response_text_as_invalid_response():
+    with pytest.raises(ValueError, match="invalid_response"):
+        decode_eval_items(None, ["b1"])
+
+
 def test_quality_probe_records_three_attempts_per_page_and_policy_arm_without_api_key():
     page = _policy_page()
     manifest = {"fixtures": [page]}
     baseline = {"page-1": [["b3"], ["b1", "b2"]]}
     calls = []
+    expected_calls = (
+        [["b3"], ["b1", "b2"]] * 3
+        + [["b1"], ["b2", "b3"]] * 3
+        + [["b1", "b2", "b3"]] * 3
+    )
 
     def generate(_, decode):
-        ids = decode.__defaults__[0]
+        ids = expected_calls[len(calls)]
         calls.append(ids)
         if len(calls) == 1:
             return decode('[]')
@@ -122,10 +132,34 @@ def test_quality_probe_records_three_attempts_per_page_and_policy_arm_without_ap
     capture = run_quality_probe(manifest, baseline, generate, clock=lambda: next(ticks))
 
     assert len(capture["attempts"]) == 9
-    assert len(calls) == 15
+    assert calls == expected_calls
     assert {call["error_code"] for row in capture["attempts"] for call in row["calls"]} >= {
         "invalid_response"
     }
+
+
+def test_quality_probe_records_call_start_relative_to_probe():
+    expected_calls = [["b3"], ["b1", "b2"], ["b1"], ["b2", "b3"], ["b1", "b2", "b3"]]
+    call_index = 0
+
+    def generate(_, decode):
+        nonlocal call_index
+        ids = expected_calls[call_index]
+        call_index += 1
+        return decode(json.dumps([{"id": item_id, "translation": item_id} for item_id in ids]))
+
+    ticks = iter(range(100, 200))
+    capture = run_quality_probe(
+        {"fixtures": [_policy_page()]},
+        {"page-1": [["b3"], ["b1", "b2"]]},
+        generate,
+        attempts=1,
+        clock=lambda: next(ticks),
+    )
+    calls = [call for row in capture["attempts"] for call in row["calls"]]
+
+    assert [call["started"] for call in calls] == [1, 3, 5, 7, 9]
+    assert [call["duration"] for call in calls] == [1, 1, 1, 1, 1]
 
 
 def test_quality_probe_classifies_decoder_errors_wrapped_by_generate_as_invalid_response():
@@ -185,11 +219,65 @@ def test_quality_probe_rejects_invalid_baseline_before_calling_generate(baseline
         run_quality_probe({"fixtures": [_policy_page()]}, {"page-1": baseline}, generate, attempts=1)
 
 
+def test_quality_probe_includes_supplied_metadata():
+    metadata = {
+        "commit": "commit-x",
+        "device": "device-x",
+        "model": "model-x",
+        "temperature": 0.37,
+    }
+
+    capture = run_quality_probe(
+        {"fixtures": []},
+        {},
+        lambda *_: pytest.fail("empty manifest must not call Gemini"),
+        metadata=metadata,
+    )
+
+    assert capture == {
+        "schema_version": 1,
+        "prompt_version": "comic-page-eval-v1",
+        "policy_version": "real-page-policy-v1",
+        "fixture_sha256": {},
+        "baseline": {},
+        "attempts": [],
+        "metadata": metadata,
+    }
+
+
 def test_preview_latency_is_rejected_until_a_future_gate_selects_full_page(capsys):
     with pytest.raises(SystemExit):
         run_probe_main(["--manifest", "x", "--baseline", "x", "--out", "x", "--preview-latency"])
 
     assert "unavailable until Task 6 selects full_page" in capsys.readouterr().err
+
+
+def test_probe_cli_creates_output_parent_before_running_probe(tmp_path, monkeypatch):
+    class FakeTranslator:
+        def _generate(self, *_):
+            pytest.fail("empty manifest must not call Gemini")
+
+    monkeypatch.setattr(
+        "server.run_real_page_probe.validate_manifest", lambda _: {"fixtures": []}
+    )
+    monkeypatch.setattr("server.run_real_page_probe.load_manifest", lambda _: {})
+    monkeypatch.setattr("server.translator.GeminiTranslator", FakeTranslator)
+    monkeypatch.setattr("server.translator.GENERATION_TEMPERATURE", 0.37)
+    monkeypatch.setattr("server.config.GEMINI_MODEL", "model-x")
+    monkeypatch.setattr("server.run_real_page_probe._commit", lambda: "commit-x")
+    monkeypatch.setattr("server.run_real_page_probe.platform.platform", lambda: "device-x")
+    out = tmp_path / "new" / "captures" / "probe.json"
+
+    run_probe_main(["--manifest", "manifest.json", "--baseline", "baseline.json", "--out", str(out)])
+
+    capture = json.loads(out.read_text(encoding="utf-8"))
+    assert capture["attempts"] == []
+    assert capture["metadata"] == {
+        "commit": "commit-x",
+        "device": "device-x",
+        "model": "model-x",
+        "temperature": 0.37,
+    }
 
 
 def test_reviewed_manifest_and_six_canonical_images_are_valid():

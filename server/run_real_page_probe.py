@@ -32,18 +32,26 @@ def main(argv=None):
 
     manifest = validate_manifest(args.manifest)
     baseline = load_manifest(args.baseline)
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     from . import config
-    from .translator import GeminiTranslator
+    from .translator import GENERATION_TEMPERATURE, GeminiTranslator
 
     translator = GeminiTranslator()
-    capture = run_quality_probe(manifest, baseline, translator._generate, attempts=args.attempts)
-    capture["metadata"] = {
+    metadata = {
         "commit": _commit(),
         "device": platform.platform(),
         "model": config.GEMINI_MODEL,
-        "temperature": 0.2,
+        "temperature": GENERATION_TEMPERATURE,
     }
-    Path(args.out).write_text(json.dumps(capture, ensure_ascii=False, indent=2), encoding="utf-8")
+    capture = run_quality_probe(
+        manifest,
+        baseline,
+        translator._generate,
+        attempts=args.attempts,
+        metadata=metadata,
+    )
+    out_path.write_text(json.dumps(capture, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":

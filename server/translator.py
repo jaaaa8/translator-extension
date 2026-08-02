@@ -11,6 +11,7 @@ class TranslateError(Exception):
 
 LANG_NAMES = {"ja": "Japanese", "es": "Spanish", "vi": "Vietnamese", "en": "English"}
 HTTP_TRANSLATE_ITEM_PROMPT_FIELDS = ("id", "text")
+GENERATION_TEMPERATURE = 0.2
 
 PROMPT = """You are translating comic/manga dialogue from {src} to {dst}.
 Translate each numbered line. Keep pronouns and politeness consistent across
@@ -103,7 +104,10 @@ class GeminiTranslator:
                 resp = self._clients[client_index].models.generate_content(
                     model=config.GEMINI_MODEL,
                     contents=prompt,
-                    config={"temperature": 0.2, "response_mime_type": "application/json"},
+                    config={
+                        "temperature": GENERATION_TEMPERATURE,
+                        "response_mime_type": "application/json",
+                    },
                 )
                 result = decode(resp.text)
                 if switched:

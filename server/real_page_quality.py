@@ -112,6 +112,8 @@ Return every input id exactly once; do not invent ids.
 
 
 def decode_eval_items(raw, expected_ids):
+    if not isinstance(raw, str):
+        raise ValueError("invalid_response: response text missing")
     try:
         out = json.loads(raw)
     except json.JSONDecodeError as error:
@@ -160,7 +162,7 @@ def capture_attempt(page, arm, attempt, calls, translations):
     }
 
 
-def build_capture(manifest, baseline, rows):
+def build_capture(manifest, baseline, rows, metadata):
     return {
         "schema_version": 1,
         "prompt_version": PROMPT_VERSION,
@@ -168,11 +170,15 @@ def build_capture(manifest, baseline, rows):
         "fixture_sha256": {page["id"]: page.get("sha256") for page in source_pages(manifest)},
         "baseline": baseline,
         "attempts": rows,
+        "metadata": dict(metadata),
     }
 
 
-def run_quality_probe(manifest, baseline, generate, attempts=3, clock=time.perf_counter):
+def run_quality_probe(
+    manifest, baseline, generate, attempts=3, clock=time.perf_counter, *, metadata=None
+):
     rows = []
+    probe_started = clock()
     for page in source_pages(manifest):
         for arm in QUALITY_ARMS:
             batches = policy_batches(page, arm, baseline.get(page["id"], []))
@@ -189,9 +195,19 @@ def run_quality_probe(manifest, baseline, generate, attempts=3, clock=time.perf_
                         translations.extend(decoded)
                     except Exception as error:
                         status, error_code = classify_probe_error(error)
-                    calls.append(capture_call(batch_id, batch, started, clock(), status, error_code))
+                    ended = clock()
+                    calls.append(
+                        capture_call(
+                            batch_id,
+                            batch,
+                            started - probe_started,
+                            ended - probe_started,
+                            status,
+                            error_code,
+                        )
+                    )
                 rows.append(capture_attempt(page, arm, attempt, calls, translations))
-    return build_capture(manifest, baseline, rows)
+    return build_capture(manifest, baseline, rows, metadata or {})
 
 
 def _require_fields(item, fields, label):
