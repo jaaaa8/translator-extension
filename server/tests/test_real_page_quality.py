@@ -32,12 +32,42 @@ def test_reviewed_manifest_and_six_canonical_images_are_valid():
     assert all(region["required"] is True for source in sources.values() for region in source["regions"])
     assert sources["mangadex_pt"]["src_lang"] == "pt"
     assert sources["mangadex_pt"]["reading_direction"] == "rtl"
-    assert any(region["kind"] == "sign" for region in sources["s-manga_ja_1"]["regions"])
+    ja1 = sources["s-manga_ja_1"]
+    assert ja1["regions"][1] == {
+        "fixture_block_id": "b02",
+        "bbox": [824, 173, 133, 19],
+        "reading_order": 1,
+        "kind": "sign",
+        "src_text": "新人ヒーロー募集中！くわしくはＨＰへ",
+        "required": True,
+    }
+    assert [region["bbox"] for region in ja1["regions"][:6]] == [
+        [1010, 50, 58, 154],
+        [824, 173, 133, 19],
+        [659, 45, 30, 60],
+        [596, 162, 54, 127],
+        [963, 362, 117, 145],
+        [770, 353, 76, 147],
+    ]
     assert len(references) == 3
     assert set(references[0]) >= {"id", "role", "image", "sha256", "source_page", "labels"}
-    assert {"partial_translation", "overlay_missing"} <= set(
-        next(item for item in references if item["source_page"] == "mangadex_pt")["labels"]
-    )
+    labels = {item["source_page"]: set(item["labels"]) for item in references}
+    assert labels == {
+        "mangadex_pt": {
+            "partial_translation",
+            "overlay_missing",
+            "white_bbox_exposes_source",
+            "text_clipped",
+        },
+        "s-manga_ja_1": {
+            "fragmented_blocks",
+            "text_clipped",
+            "oversized_text",
+            "source_text_exposed",
+        },
+        "s-manga_ja_2": {"fragmented_blocks", "text_clipped", "source_text_exposed"},
+    }
+    assert "detector_missing_bubble" not in labels["mangadex_pt"]
 
 
 def test_manifest_validator_rejects_broken_source_region_and_reference_schema(tmp_path):
@@ -77,6 +107,49 @@ def test_manifest_validator_rejects_fixture_hash_drift(tmp_path):
 
     with pytest.raises(ValueError, match="sha256"):
         validate_manifest(path, image_root=FIXTURE_DIR)
+
+
+def test_manifest_validator_rejects_png_dimension_drift(tmp_path):
+    data = load_manifest(MANIFEST)
+    data["fixtures"][0].update(width=9999, height=9999)
+    path = tmp_path / "dimension-drift.json"
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="width/height"):
+        validate_manifest(path, image_root=FIXTURE_DIR)
+
+
+def test_manifest_validator_rejects_duplicate_fixtures_images_and_ids(tmp_path):
+    original = load_manifest(MANIFEST)
+    source = next(item for item in original["fixtures"] if item["role"] == "source_page")
+    cases = [
+        ("fixture-count", lambda data: data["fixtures"].append(copy.deepcopy(data["fixtures"][0])), "sáu"),
+        (
+            "image",
+            lambda data: data["fixtures"][1].update(image=data["fixtures"][0]["image"]),
+            "image trùng",
+        ),
+        (
+            "fixture-id",
+            lambda data: data["fixtures"][1].update(id=data["fixtures"][0]["id"]),
+            "fixture id trùng",
+        ),
+        (
+            "region-id",
+            lambda data: next(item for item in data["fixtures"] if item["id"] == source["id"])[
+                "regions"
+            ][1].update(fixture_block_id=source["regions"][0]["fixture_block_id"]),
+            "fixture_block_id trùng",
+        ),
+    ]
+
+    for name, mutate, message in cases:
+        data = copy.deepcopy(original)
+        mutate(data)
+        path = tmp_path / f"duplicate-{name}.json"
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        with pytest.raises(ValueError, match=message):
+            validate_manifest(path, image_root=FIXTURE_DIR)
 
 
 def test_canonical_images_are_tracked_once_by_sha():
@@ -132,4 +205,32 @@ def test_match_required_regions_accepts_one_to_one_matches():
         "missing": [],
         "duplicate": [],
         "unexpected": [],
+    }
+
+
+def test_match_required_regions_reports_one_detection_overlapping_two_anchors():
+    expected = [
+        {"fixture_block_id": "b01", "bbox": [0, 0, 10, 10], "required": True},
+        {"fixture_block_id": "b02", "bbox": [5, 0, 10, 10], "required": True},
+    ]
+
+    result = match_required_regions(expected, [{"bbox": [2, 0, 11, 10]}])
+
+    assert result["missing"] == ["b02"]
+    assert result["unexpected"] == []
+    assert result["duplicate"] == [
+        {"detected_index": 0, "fixture_block_ids": ["b01", "b02"]}
+    ]
+
+
+def test_match_required_regions_rejects_iou_exactly_at_threshold():
+    expected = [{"fixture_block_id": "b01", "bbox": [0, 0, 10, 10], "required": True}]
+
+    result = match_required_regions(expected, [{"bbox": [0, 0, 5, 10]}], min_iou=0.5)
+
+    assert result == {
+        "matches": {},
+        "missing": ["b01"],
+        "duplicate": [],
+        "unexpected": [0],
     }

@@ -49,21 +49,37 @@ def validate_manifest(path, image_root=None):
     data = load_manifest(path)
     if data.get("schema_version") != 1 or not isinstance(data.get("fixtures"), list):
         raise ValueError("manifest schema_version/fixtures không hợp lệ")
-    if {item.get("image") for item in data["fixtures"]} != CANONICAL_IMAGES:
+    fixtures = data["fixtures"]
+    if len(fixtures) != 6:
+        raise ValueError("manifest phải có đúng sáu fixture")
+    images = [item.get("image") for item in fixtures]
+    if len(set(images)) != len(images):
+        raise ValueError("image trùng trong manifest")
+    if set(images) != CANONICAL_IMAGES:
         raise ValueError("manifest phải liệt kê đúng sáu image canonical")
+    fixture_ids = [item.get("id") for item in fixtures]
+    if not all(_valid_text(fixture_id) for fixture_id in fixture_ids):
+        raise ValueError("fixture id không hợp lệ")
+    if len(set(fixture_ids)) != len(fixture_ids):
+        raise ValueError("fixture id trùng trong manifest")
 
     root = Path(image_root) if image_root else Path(path).parent
     source_ids = set()
     references = []
-    for item in data["fixtures"]:
+    for item in fixtures:
         role = item.get("role")
         fields = SOURCE_FIELDS if role == "source_page" else REFERENCE_FIELDS
         _require_fields(item, fields, role or "fixture")
         image = root / item["image"]
         if not image.is_file():
             raise ValueError(f"image không tồn tại: {item['image']}")
-        if hashlib.sha256(image.read_bytes()).hexdigest() != item["sha256"]:
+        image_bytes = image.read_bytes()
+        if hashlib.sha256(image_bytes).hexdigest() != item["sha256"]:
             raise ValueError(f"sha256 không khớp: {item['image']}")
+        if role == "source_page" and (
+            int.from_bytes(image_bytes[16:20], "big"), int.from_bytes(image_bytes[20:24], "big")
+        ) != (item["width"], item["height"]):
+            raise ValueError(f"width/height không khớp PNG: {item['image']}")
 
         if role == "failure_reference":
             if not isinstance(item["labels"], list) or not item["labels"] or not all(
@@ -90,10 +106,14 @@ def validate_manifest(path, image_root=None):
             raise ValueError(f"regions không hợp lệ: {item['id']}")
 
         orders = []
+        region_ids = set()
         for region in item["regions"]:
             _require_fields(region, REGION_FIELDS, f"region {item['id']}")
             if not _valid_text(region["fixture_block_id"]):
                 raise ValueError("fixture_block_id không hợp lệ")
+            if region["fixture_block_id"] in region_ids:
+                raise ValueError(f"fixture_block_id trùng: {region['fixture_block_id']}")
+            region_ids.add(region["fixture_block_id"])
             bbox = region["bbox"]
             if (
                 not isinstance(bbox, list)
@@ -141,7 +161,7 @@ def match_required_regions(expected, detected, min_iou=0.5):
     for expected_index, region in enumerate(required):
         for detected_index, candidate in enumerate(detected):
             score = _iou(region["bbox"], candidate["bbox"])
-            if score >= min_iou:
+            if score > min_iou:
                 candidates.append((score, expected_index, detected_index))
 
     matched_expected = set()
