@@ -74,7 +74,7 @@ for page in source_pages(manifest):
     for arm in QUALITY_ARMS:
         for attempt in range(1, attempts + 1):
             for batch_id, batch in enumerate(batches, 1):
-                if logical_calls and call_delay_seconds:
+                if logical_calls and call_delay_seconds > 0:
                     sleep(call_delay_seconds)
                 logical_calls += 1
                 started = clock()
@@ -132,7 +132,10 @@ Cả hai inject sleeper ném assertion nếu được gọi và phải hoàn t�
 ### 5.3 CLI contract
 
 - `--call-delay-seconds 10` truyền `10.0` xuống fake `run_quality_probe`.
-- Test dùng manifest fixture thật và monkeypatch `GeminiTranslator`, tránh phụ thuộc API key/model.
+- Test mở rộng template `test_probe_cli_creates_output_parent_before_running_probe`: patch
+  `validate_manifest`/`load_manifest` như hiện có, patch đúng target
+  `server.translator.GeminiTranslator`, rồi dùng fake `run_quality_probe` để bắt giá trị
+  pass-through mà không phụ thuộc API key/model hoặc manifest thật.
 - `-1`, `nan`, `inf` đều thoát code `2` trước `validate_manifest`, Gemini và output I/O.
 - `--help` tiếp tục chạy khi không có `GEMINI_API_KEY`.
 
@@ -148,7 +151,14 @@ Baseline được trích lại từ `telemetry_validation.baseline` trong worklo
 --attempts 3 --call-delay-seconds 10
 ```
 
-Capture mới dùng file mới; không ghi đè capture 2026-08-01. Sau run, trước khi chấm rubric:
+Capture mới ghi đúng đường dẫn:
+
+```text
+server/tests/fixtures/real_pages/captures/2026-08-03-policy-probe-paced.json
+```
+
+Không ghi đè capture 2026-08-01. Thư mục `captures/` không được code/test quét động;
+thêm file mới cạnh artifact cũ không đổi tập test. Sau run, trước khi chấm rubric:
 
 - chạy `validate_capture` với manifest canonical;
 - xác nhận metadata có đúng năm field hiện hành và commit đúng code HEAD lúc chạy;
@@ -157,6 +167,29 @@ Capture mới dùng file mới; không ghi đè capture 2026-08-01. Sau run, tr�
 - kiểm tra không có file ngoài capture mới trong commit artifact.
 
 Capture được commit một mình rồi dừng để người dùng review provenance, metadata, call count và pacing. Chỉ sau review này mới chuẩn bị toàn bộ phiếu cho mọi valid attempt để `jaa` chấm.
+
+### Worklog quyết định mới
+
+Evaluation mới không được sửa hoặc sao chép
+`docs/superpowers/worklogs/2026-08-01-real-page-quality-baseline.json`. Artifact đó giữ
+nguyên bằng chứng Task 7 và ba section cùng epoch 2026-08-01.
+
+Kết quả mới ghi vào:
+
+```text
+docs/superpowers/worklogs/2026-08-03-real-page-quality-gate-rerun.json
+```
+
+Worklog mới chứa:
+
+- `telemetry_validation_reference` trỏ tới file 2026-08-01, section
+  `telemetry_validation`, source commit `277f9dfe62fda44c47239d86b82ac44c78786f7f`;
+- `policy_probe` trỏ tới capture paced 2026-08-03 và tóm tắt call/valid-response;
+- `manual_review` là nguyên artifact evaluator của capture mới.
+
+Trong cùng commit tạo worklog mới, `work-flow.md` phần nguồn quyết định hiện tại phải đổi
+sang worklog 2026-08-03 và nói rõ browser telemetry/baseline được tham chiếu từ worklog
+2026-08-01. Không rebind `manual_review` mới vào `policy_probe` cũ.
 
 ## 7. Checkpoint và điều kiện dừng
 
@@ -171,7 +204,8 @@ Chuỗi công việc bắt buộc:
 7. validate và commit riêng capture;
 8. người dùng review capture;
 9. `jaa` chấm mọi valid attempt;
-10. evaluate offline, cập nhật worklog và vault;
+10. evaluate offline, tạo worklog 2026-08-03, cập nhật nguồn quyết định trong
+    `work-flow.md` và append vault; giữ worklog 2026-08-01 bất biến;
 11. dừng để review kết quả gate.
 
 Nếu fresh capture hoặc evaluator vẫn cho `inconclusive`, giữ nguyên kết luận và không chạy thêm. Spec C tiếp tục hoãn; phạm vi Spec B chỉ được quyết định sau artifact evaluator cuối cùng.
@@ -183,4 +217,6 @@ Nếu fresh capture hoặc evaluator vẫn cho `inconclusive`, giữ nguyên k�
 - Sleep không nằm trong `duration` và không sửa retry production.
 - Capture schema/metadata cũ vẫn hợp lệ.
 - Commit code được review trước capture; capture được review trước human scoring.
+- Worklog 2026-08-01 bất biến; decision mới nằm trong worklog 2026-08-03 có tham chiếu
+  telemetry cũ rõ ràng.
 - Không có rerun bù, merge capture hoặc thay đổi Spec B/C trong chuỗi này.
