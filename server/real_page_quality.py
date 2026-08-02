@@ -130,7 +130,11 @@ def decode_eval_items(raw, expected_ids):
 
 
 def classify_probe_error(error):
-    return "invalid_response" if isinstance(error, ValueError) or str(error).startswith("invalid_response:") else "generation_error"
+    if isinstance(error, ValueError) or str(error).startswith("invalid_response:"):
+        return "invalid_response", "invalid_response"
+    if getattr(error, "code", None) == 429 or "429" in str(error) or "RESOURCE_EXHAUSTED" in str(error):
+        return "rate_limited", "rate_limited"
+    return "failed", "generation_error"
 
 
 def capture_call(batch_id, batch, started, ended, status, error_code):
@@ -182,7 +186,7 @@ def run_quality_probe(manifest, baseline, generate, attempts=3, clock=time.perf_
                         status, error_code = "success", None
                         translations.extend(decoded)
                     except Exception as error:
-                        status, error_code = "failed", classify_probe_error(error)
+                        status, error_code = classify_probe_error(error)
                     calls.append(capture_call(batch_id, batch, started, clock(), status, error_code))
                 rows.append(capture_attempt(page, arm, attempt, calls, translations))
     return build_capture(manifest, baseline, rows)

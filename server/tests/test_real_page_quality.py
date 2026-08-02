@@ -142,9 +142,32 @@ def test_quality_probe_classifies_decoder_errors_wrapped_by_generate_as_invalid_
         attempts=1,
     )
 
-    assert {call["error_code"] for row in capture["attempts"] for call in row["calls"]} == {
-        "invalid_response"
-    }
+    assert {
+        (call["status"], call["error_code"])
+        for row in capture["attempts"]
+        for call in row["calls"]
+    } == {("invalid_response", "invalid_response")}
+
+
+def test_quality_probe_classifies_gemini_429_as_rate_limited():
+    class RateLimitError(Exception):
+        code = 429
+
+    def generate(_, __):
+        raise RateLimitError("RESOURCE_EXHAUSTED")
+
+    capture = run_quality_probe(
+        {"fixtures": [_policy_page()]},
+        {"page-1": [["b3"], ["b1", "b2"]]},
+        generate,
+        attempts=1,
+    )
+
+    assert {
+        (call["status"], call["error_code"])
+        for row in capture["attempts"]
+        for call in row["calls"]
+    } == {("rate_limited", "rate_limited")}
 
 
 def test_preview_latency_is_rejected_until_a_future_gate_selects_full_page(capsys):
