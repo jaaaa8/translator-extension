@@ -1,0 +1,180 @@
+import hashlib
+import json
+from pathlib import Path
+
+
+SOURCE_FIELDS = {
+    "id",
+    "role",
+    "image",
+    "sha256",
+    "src_lang",
+    "source_name",
+    "reading_direction",
+    "page_kind",
+    "width",
+    "height",
+    "regions",
+    "term_groups",
+    "known_order_failures",
+}
+REGION_FIELDS = {"fixture_block_id", "bbox", "reading_order", "kind", "src_text", "required"}
+REFERENCE_FIELDS = {"id", "role", "image", "sha256", "source_page", "labels"}
+KINDS = {"dialogue", "sfx", "sign"}
+CANONICAL_IMAGES = {
+    "mangadex_pt.png",
+    "s-manga_ja_1.png",
+    "s-manga_ja_2.png",
+    "references/mangadex_pt_overlay_partial_and_crop.png",
+    "references/s-manga_ja_overlay_1.png",
+    "references/s-manga_ja_overlay_2.png",
+}
+
+
+def load_manifest(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _require_fields(item, fields, label):
+    missing = fields - set(item)
+    if missing:
+        raise ValueError(f"{label} thiếu {sorted(missing)}")
+
+
+def _valid_text(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def validate_manifest(path, image_root=None):
+    data = load_manifest(path)
+    if data.get("schema_version") != 1 or not isinstance(data.get("fixtures"), list):
+        raise ValueError("manifest schema_version/fixtures không hợp lệ")
+    if {item.get("image") for item in data["fixtures"]} != CANONICAL_IMAGES:
+        raise ValueError("manifest phải liệt kê đúng sáu image canonical")
+
+    root = Path(image_root) if image_root else Path(path).parent
+    source_ids = set()
+    references = []
+    for item in data["fixtures"]:
+        role = item.get("role")
+        fields = SOURCE_FIELDS if role == "source_page" else REFERENCE_FIELDS
+        _require_fields(item, fields, role or "fixture")
+        image = root / item["image"]
+        if not image.is_file():
+            raise ValueError(f"image không tồn tại: {item['image']}")
+        if hashlib.sha256(image.read_bytes()).hexdigest() != item["sha256"]:
+            raise ValueError(f"sha256 không khớp: {item['image']}")
+
+        if role == "failure_reference":
+            if not isinstance(item["labels"], list) or not item["labels"] or not all(
+                _valid_text(label) for label in item["labels"]
+            ):
+                raise ValueError(f"labels không hợp lệ: {item['id']}")
+            references.append(item)
+            continue
+        if role != "source_page":
+            raise ValueError(f"role không hợp lệ: {role}")
+
+        source_ids.add(item["id"])
+        if not all(_valid_text(item[name]) for name in ("id", "src_lang", "source_name")):
+            raise ValueError(f"source text metadata không hợp lệ: {item.get('id')}")
+        if item["reading_direction"] not in {"ltr", "rtl"}:
+            raise ValueError(f"reading_direction không hợp lệ: {item['id']}")
+        if item["page_kind"] not in {"single", "spread"}:
+            raise ValueError(f"page_kind không hợp lệ: {item['id']}")
+        if not all(isinstance(item[name], int) and item[name] > 0 for name in ("width", "height")):
+            raise ValueError(f"width/height không hợp lệ: {item['id']}")
+        if not isinstance(item["term_groups"], list) or not isinstance(item["known_order_failures"], list):
+            raise ValueError(f"term_groups/known_order_failures không hợp lệ: {item['id']}")
+        if not isinstance(item["regions"], list) or not item["regions"]:
+            raise ValueError(f"regions không hợp lệ: {item['id']}")
+
+        orders = []
+        for region in item["regions"]:
+            _require_fields(region, REGION_FIELDS, f"region {item['id']}")
+            if not _valid_text(region["fixture_block_id"]):
+                raise ValueError("fixture_block_id không hợp lệ")
+            bbox = region["bbox"]
+            if (
+                not isinstance(bbox, list)
+                or len(bbox) != 4
+                or not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in bbox)
+                or bbox[0] <= 0
+                or bbox[1] <= 0
+                or bbox[2] <= 0
+                or bbox[3] <= 0
+                or bbox[0] + bbox[2] > item["width"]
+                or bbox[1] + bbox[3] > item["height"]
+            ):
+                raise ValueError(f"bbox không hợp lệ: {region.get('fixture_block_id')}")
+            if region["kind"] not in KINDS:
+                raise ValueError(f"kind không hợp lệ: {region.get('fixture_block_id')}")
+            if not _valid_text(region["src_text"]):
+                raise ValueError(f"src_text không hợp lệ: {region.get('fixture_block_id')}")
+            if type(region["required"]) is not bool:
+                raise ValueError(f"required không hợp lệ: {region.get('fixture_block_id')}")
+            if not isinstance(region["reading_order"], int):
+                raise ValueError(f"reading_order không hợp lệ: {region.get('fixture_block_id')}")
+            orders.append(region["reading_order"])
+        if sorted(orders) != list(range(len(orders))):
+            raise ValueError(f"reading_order không liên tục: {item['id']}")
+
+    for reference in references:
+        if reference["source_page"] not in source_ids:
+            raise ValueError(f"source_page không tồn tại: {reference['source_page']}")
+    return data
+
+
+def _iou(left, right):
+    lx, ly, lw, lh = left
+    rx, ry, rw, rh = right
+    overlap_w = max(0, min(lx + lw, rx + rw) - max(lx, rx))
+    overlap_h = max(0, min(ly + lh, ry + rh) - max(ly, ry))
+    intersection = overlap_w * overlap_h
+    union = lw * lh + rw * rh - intersection
+    return intersection / union if union else 0
+
+
+def match_required_regions(expected, detected, min_iou=0.5):
+    required = [region for region in expected if region.get("required", True)]
+    candidates = []
+    for expected_index, region in enumerate(required):
+        for detected_index, candidate in enumerate(detected):
+            score = _iou(region["bbox"], candidate["bbox"])
+            if score >= min_iou:
+                candidates.append((score, expected_index, detected_index))
+
+    matched_expected = set()
+    matched_detected = set()
+    matches = {}
+    for _, expected_index, detected_index in sorted(candidates, key=lambda pair: (-pair[0], pair[1], pair[2])):
+        if expected_index in matched_expected or detected_index in matched_detected:
+            continue
+        matched_expected.add(expected_index)
+        matched_detected.add(detected_index)
+        matches[required[expected_index]["fixture_block_id"]] = detected_index
+
+    duplicate = []
+    for expected_index, region in enumerate(required):
+        indices = [detected_index for _, index, detected_index in candidates if index == expected_index]
+        if len(indices) > 1:
+            duplicate.append({"fixture_block_id": region["fixture_block_id"], "detected_indices": indices})
+    for detected_index in range(len(detected)):
+        ids = [
+            required[expected_index]["fixture_block_id"]
+            for _, expected_index, index in candidates
+            if index == detected_index
+        ]
+        if len(ids) > 1:
+            duplicate.append({"detected_index": detected_index, "fixture_block_ids": ids})
+
+    return {
+        "matches": matches,
+        "missing": [
+            region["fixture_block_id"]
+            for index, region in enumerate(required)
+            if index not in matched_expected
+        ],
+        "duplicate": duplicate,
+        "unexpected": [index for index in range(len(detected)) if index not in matched_detected],
+    }

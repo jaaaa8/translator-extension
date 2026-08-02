@@ -1,6 +1,8 @@
+import json
+
 import numpy as np
 
-from server.diagnose import diagnose_image
+from server.diagnose import _configure_device, _parse_args, _write_manifest_candidate, diagnose_image
 
 
 class _FakeRegion:
@@ -50,3 +52,42 @@ def test_diagnose_prepares_crop_before_ocr():
     diagnose_image(np.full((100, 100, 3), 255, np.uint8), detector, engine)
 
     assert engine.crops[0].shape == (64, 112, 3)
+
+
+def test_diagnose_cli_keeps_cuda_default_and_accepts_cpu_candidate_path():
+    default = _parse_args(["page.png"])
+    explicit = _parse_args(
+        ["page.png", "--device", "cpu", "--manifest-candidate", "candidate.json"]
+    )
+
+    assert default.device == "cuda"
+    assert default.manifest_candidate is None
+    assert explicit.device == "cpu"
+    assert explicit.manifest_candidate == "candidate.json"
+
+
+def test_manifest_candidate_contains_only_raw_diagnostic_fields(tmp_path):
+    path = tmp_path / "candidate.json"
+
+    _write_manifest_candidate(
+        path,
+        [{"idx": 3, "bbox": [1, 2, 30, 40], "text": "texto"}],
+    )
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {
+        "candidates": [
+            {
+                "raw_vendor_index": 3,
+                "bbox": [1, 2, 30, 40],
+                "transcript": "texto",
+            }
+        ]
+    }
+
+
+def test_cpu_diagnostic_hides_cuda_before_model_import(monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "3")
+
+    _configure_device("cpu")
+
+    assert __import__("os").environ["CUDA_VISIBLE_DEVICES"] == "-1"
