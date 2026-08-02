@@ -6,7 +6,17 @@ from pathlib import Path
 
 import pytest
 
-from server.real_page_quality import load_manifest, match_required_regions, validate_manifest
+from server.real_page_quality import (
+    build_eval_prompt,
+    decode_eval_items,
+    load_manifest,
+    match_required_regions,
+    policy_batches,
+    prompt_items,
+    run_quality_probe,
+    validate_manifest,
+)
+from server.run_real_page_probe import main as run_probe_main
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "real_pages"
@@ -20,6 +30,128 @@ EXPECTED_IMAGES = {
     "references/s-manga_ja_overlay_1.png": "e10082842e79b116bc2e4fc3a5c354dce2f05567672c9023a15ac61fd0dd8f40",
     "references/s-manga_ja_overlay_2.png": "9e5c9c6952786e2e5c8263e46677bf14568df5a7c060b660b9501330c103c3a4",
 }
+
+
+def _policy_page():
+    return {
+        "id": "page-1",
+        "role": "source_page",
+        "src_lang": "es",
+        "source_name": "Portuguese",
+        "width": 300,
+        "height": 400,
+        "reading_direction": "rtl",
+        "regions": [
+            {
+                "fixture_block_id": "b3",
+                "src_text": "third",
+                "reading_order": 2,
+                "bbox": [30, 30, 10, 10],
+                "kind": "dialogue",
+            },
+            {
+                "fixture_block_id": "b1",
+                "src_text": "first",
+                "reading_order": 0,
+                "bbox": [10, 10, 10, 10],
+                "kind": "sign",
+            },
+            {
+                "fixture_block_id": "b2",
+                "src_text": "second",
+                "reading_order": 1,
+                "bbox": [20, 20, 10, 10],
+                "kind": "sfx",
+            },
+        ],
+    }
+
+
+def _ids(batches):
+    return [[item["id"] for item in batch] for batch in batches]
+
+
+def test_policy_prompt_allowlist_and_membership_use_expected_reading_order():
+    page = _policy_page()
+
+    assert set(prompt_items(page)[0]) == {"id", "text", "reading_order", "bbox"}
+    assert "kind" not in prompt_items(page)[0]
+    assert _ids(policy_batches(page, "batch_control", [["b3"], ["b1", "b2"]])) == [
+        ["b3"],
+        ["b1", "b2"],
+    ]
+    assert _ids(policy_batches(page, "ordered_microbatch", [["b3"], ["b1", "b2"]])) == [
+        ["b1"],
+        ["b2", "b3"],
+    ]
+    assert len(policy_batches(page, "full_page", [])) == 1
+    assert "Portuguese" in build_eval_prompt(page, prompt_items(page))
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        '[]',
+        '[{"id":"b1","translation":"one"},{"id":"b1","translation":"again"}]',
+        '[{"id":"invented","translation":"no"}]',
+    ],
+)
+def test_eval_decoder_rejects_missing_duplicate_and_invented_ids(response):
+    with pytest.raises(ValueError):
+        decode_eval_items(response, ["b1"])
+
+
+def test_quality_probe_records_three_attempts_per_page_and_policy_arm_without_api_key():
+    page = _policy_page()
+    manifest = {"fixtures": [page]}
+    baseline = {"page-1": [["b3"], ["b1", "b2"]]}
+    calls = []
+
+    def generate(_, decode):
+        ids = decode.__defaults__[0]
+        calls.append(ids)
+        if len(calls) == 1:
+            return decode('[]')
+        if len(calls) == 2:
+            return decode('[{"id":"b1","translation":"one"},{"id":"b1","translation":"again"}]')
+        if len(calls) == 3:
+            return decode('[{"id":"invented","translation":"no"}]')
+        return decode(json.dumps([{"id": item_id, "translation": item_id} for item_id in ids]))
+
+    ticks = iter(range(100))
+    capture = run_quality_probe(manifest, baseline, generate, clock=lambda: next(ticks))
+
+    assert len(capture["attempts"]) == 9
+    assert len(calls) == 15
+    assert {call["error_code"] for row in capture["attempts"] for call in row["calls"]} >= {
+        "invalid_response"
+    }
+
+
+def test_quality_probe_classifies_decoder_errors_wrapped_by_generate_as_invalid_response():
+    def generate(_, decode):
+        try:
+            decode("[]")
+        except ValueError as error:
+            raise RuntimeError(str(error)) from error
+
+    capture = run_quality_probe(
+        {"fixtures": [_policy_page()]},
+        {"page-1": [["b3"], ["b1", "b2"]]},
+        generate,
+        attempts=1,
+    )
+
+    assert {call["error_code"] for row in capture["attempts"] for call in row["calls"]} == {
+        "invalid_response"
+    }
+
+
+def test_preview_latency_is_rejected_until_a_future_gate_selects_full_page(capsys):
+    with pytest.raises(SystemExit):
+        run_probe_main(["--manifest", "x", "--baseline", "x", "--out", "x", "--preview-latency"])
+
+    assert "unavailable until Task 6 selects full_page" in capsys.readouterr().err
 
 
 def test_reviewed_manifest_and_six_canonical_images_are_valid():

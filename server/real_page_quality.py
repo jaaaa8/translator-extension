@@ -1,5 +1,6 @@
 import hashlib
 import json
+import time
 from pathlib import Path
 
 
@@ -30,10 +31,161 @@ CANONICAL_IMAGES = {
     "references/s-manga_ja_overlay_1.png",
     "references/s-manga_ja_overlay_2.png",
 }
+QUALITY_ARMS = ("batch_control", "ordered_microbatch", "full_page")
+PROMPT_VERSION = "comic-page-eval-v1"
+POLICY_VERSION = "real-page-policy-v1"
 
 
 def load_manifest(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def source_pages(manifest):
+    return [item for item in manifest["fixtures"] if item["role"] == "source_page"]
+
+
+def prompt_items(page):
+    return [
+        {
+            "id": region["fixture_block_id"],
+            "text": region["src_text"],
+            "reading_order": region["reading_order"],
+            "bbox": region["bbox"],
+        }
+        for region in page["regions"]
+    ]
+
+
+def _validate_baseline(items, baseline_batches):
+    if not isinstance(baseline_batches, list) or not all(isinstance(batch, list) and batch for batch in baseline_batches):
+        raise ValueError("baseline batches khÃ´ng há»£p lá»‡")
+    baseline_ids = [item_id for batch in baseline_batches for item_id in batch]
+    item_ids = [item["id"] for item in items]
+    if len(baseline_ids) != len(set(baseline_ids)) or set(baseline_ids) != set(item_ids):
+        raise ValueError("baseline ids khÃ´ng khá»›p manifest")
+
+
+def policy_batches(page, arm, baseline_batches):
+    items = prompt_items(page)
+    items_by_id = {item["id"]: item for item in items}
+    if len(items_by_id) != len(items):
+        raise ValueError("fixture block id trÃ¹ng")
+    if arm == "full_page":
+        return [sorted(items, key=lambda item: item["reading_order"])]
+    if arm not in {"batch_control", "ordered_microbatch"}:
+        raise ValueError(f"quality arm khÃ´ng há»£p lá»‡: {arm}")
+    _validate_baseline(items, baseline_batches)
+    if arm == "batch_control":
+        return [[items_by_id[item_id] for item_id in batch] for batch in baseline_batches]
+    ordered = sorted(items, key=lambda item: item["reading_order"])
+    sizes = [len(batch) for batch in baseline_batches]
+    batches = []
+    offset = 0
+    for size in sizes:
+        batches.append(ordered[offset : offset + size])
+        offset += size
+    return batches
+
+
+def build_eval_prompt(page, items):
+    return """You are evaluating translations for blocks from one manga/comic page.
+Prompt version: {prompt_version}
+Source language: {source_language}
+Destination language: Vietnamese
+Page width/height: {width}/{height}
+Reading direction: {reading_direction}
+Use reading order to keep translations consistent across this page. Translate naturally and concisely.
+Return ONLY a JSON array of objects with exactly these keys:
+{{\"id\":\"the input id\",\"translation\":\"translated text\"}}.
+Return every input id exactly once; do not invent ids.
+
+{items}""".format(
+        prompt_version=PROMPT_VERSION,
+        source_language=page["source_name"],
+        width=page["width"],
+        height=page["height"],
+        reading_direction=page["reading_direction"],
+        items=json.dumps(items, ensure_ascii=False),
+    )
+
+
+def decode_eval_items(raw, expected_ids):
+    try:
+        out = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError("invalid_response: invalid JSON") from error
+    if not isinstance(out, list):
+        raise ValueError("invalid_response: expected an array")
+    rows = {}
+    for item in out:
+        if not isinstance(item, dict) or set(item) != {"id", "translation"}:
+            raise ValueError("invalid_response: invalid translation item")
+        item_id = str(item["id"])
+        if item_id in rows:
+            raise ValueError(f"invalid_response: duplicate id: {item_id}")
+        rows[item_id] = str(item["translation"])
+    if set(rows) != set(expected_ids):
+        raise ValueError("invalid_response: translation id set mismatch")
+    return [{"id": item_id, "translation": rows[item_id]} for item_id in expected_ids]
+
+
+def classify_probe_error(error):
+    return "invalid_response" if isinstance(error, ValueError) or str(error).startswith("invalid_response:") else "generation_error"
+
+
+def capture_call(batch_id, batch, started, ended, status, error_code):
+    return {
+        "batch_id": batch_id,
+        "fixture_block_ids": [item["id"] for item in batch],
+        "started": started,
+        "duration": ended - started,
+        "status": status,
+        "error_code": error_code,
+    }
+
+
+def capture_attempt(page, arm, attempt, calls, translations):
+    return {
+        "page_id": page["id"],
+        "arm": arm,
+        "attempt": attempt,
+        "calls": calls,
+        "responses": {item["id"]: item["translation"] for item in translations},
+    }
+
+
+def build_capture(manifest, baseline, rows):
+    return {
+        "schema_version": 1,
+        "prompt_version": PROMPT_VERSION,
+        "policy_version": POLICY_VERSION,
+        "fixture_sha256": {page["id"]: page.get("sha256") for page in source_pages(manifest)},
+        "baseline": baseline,
+        "attempts": rows,
+    }
+
+
+def run_quality_probe(manifest, baseline, generate, attempts=3, clock=time.perf_counter):
+    rows = []
+    for page in source_pages(manifest):
+        for arm in QUALITY_ARMS:
+            batches = policy_batches(page, arm, baseline.get(page["id"], []))
+            for attempt in range(1, attempts + 1):
+                calls, translations = [], []
+                for batch_id, batch in enumerate(batches, 1):
+                    started = clock()
+                    try:
+                        decoded = generate(
+                            build_eval_prompt(page, batch),
+                            lambda raw, ids=[item["id"] for item in batch]: decode_eval_items(raw, ids),
+                        )
+                        status, error_code = "success", None
+                        translations.extend(decoded)
+                    except Exception as error:
+                        status, error_code = "failed", classify_probe_error(error)
+                    calls.append(capture_call(batch_id, batch, started, clock(), status, error_code))
+                rows.append(capture_attempt(page, arm, attempt, calls, translations))
+    return build_capture(manifest, baseline, rows)
 
 
 def _require_fields(item, fields, label):
