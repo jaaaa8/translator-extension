@@ -49,6 +49,7 @@ def test_reviewed_manifest_and_six_canonical_images_are_valid():
         [963, 362, 117, 145],
         [770, 353, 76, 147],
     ]
+    assert [region["reading_order"] for region in ja1["regions"][:6]] == list(range(6))
     assert len(references) == 3
     assert set(references[0]) >= {"id", "role", "image", "sha256", "source_page", "labels"}
     labels = {item["source_page"]: set(item["labels"]) for item in references}
