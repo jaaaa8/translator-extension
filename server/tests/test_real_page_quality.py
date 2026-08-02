@@ -11,6 +11,7 @@ from server.real_page_quality import load_manifest, match_required_regions, vali
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "real_pages"
 MANIFEST = FIXTURE_DIR / "manifest.json"
+REPO_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_IMAGES = {
     "mangadex_pt.png": "8c25aea5e76a9264d83698ee4953b4e037593a49c05b2517de4ebd14a1d84c60",
     "s-manga_ja_1.png": "267ac9ea29bdf0bfbb3686e2806a77b0c52d1178f2810c426ba357b277976023",
@@ -50,6 +51,23 @@ def test_reviewed_manifest_and_six_canonical_images_are_valid():
         [770, 353, 76, 147],
     ]
     assert [region["reading_order"] for region in ja1["regions"][:6]] == list(range(6))
+    order = {region["src_text"]: region["reading_order"] for region in ja1["regions"]}
+    assert order["ＣＭによるイメージ向上と"] < order["ここで暮らす富豪達からの信頼も回復できた"]
+    assert order["ＣＭによるイメージ向上と"] < order[
+        "周辺被害を「タツマキによる鬼怪人集団の撃退」によるものと報道することで"
+    ]
+    assert ja1["term_groups"] == [
+        {
+            "canonical": "マッコイ",
+            "accepted_source_forms": ["マッコイ", "マッコイ氏"],
+            "fixture_block_ids": ["b07", "b20"],
+        },
+        {
+            "canonical": "タツマキ",
+            "accepted_source_forms": ["タツマキ"],
+            "fixture_block_ids": ["b05", "b19"],
+        },
+    ]
     assert len(references) == 3
     assert set(references[0]) >= {"id", "role", "image", "sha256", "source_page", "labels"}
     labels = {item["source_page"]: set(item["labels"]) for item in references}
@@ -87,6 +105,7 @@ def test_manifest_validator_rejects_broken_source_region_and_reference_schema(tm
         (lambda data: data["fixtures"][source_index]["regions"][0].update(kind="caption"), "kind"),
         (lambda data: data["fixtures"][source_index]["regions"][0].update(src_text=""), "src_text"),
         (lambda data: data["fixtures"][source_index]["regions"][0].update(required=1), "required"),
+        (lambda data: data["fixtures"][source_index].update(role="source_pag"), "role không hợp lệ"),
         (lambda data: data["fixtures"][reference_index].update(source_page="missing"), "source_page"),
         (lambda data: data["fixtures"][reference_index].update(labels=[]), "labels"),
     ]
@@ -98,6 +117,70 @@ def test_manifest_validator_rejects_broken_source_region_and_reference_schema(tm
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         with pytest.raises(ValueError, match=message):
             validate_manifest(path, image_root=FIXTURE_DIR)
+
+
+@pytest.mark.parametrize(
+    ("name", "mutate", "message"),
+    [
+        (
+            "term-group-type",
+            lambda source: source.update(term_groups=[123]),
+            "term_group sai field",
+        ),
+        (
+            "term-group-fields",
+            lambda source: source["term_groups"][0].update(extra="x"),
+            "term_group sai field",
+        ),
+        (
+            "term-group-canonical",
+            lambda source: source["term_groups"][0].update(canonical=""),
+            "canonical",
+        ),
+        (
+            "term-group-source-forms",
+            lambda source: source["term_groups"][0].update(accepted_source_forms=[]),
+            "accepted_source_forms",
+        ),
+        (
+            "term-group-single-block",
+            lambda source: source["term_groups"][0].update(fixture_block_ids=["b07"]),
+            "ít nhất hai block",
+        ),
+        (
+            "term-group-duplicate-block",
+            lambda source: source["term_groups"][0].update(fixture_block_ids=["b07", "b07"]),
+            "ít nhất hai block",
+        ),
+        (
+            "term-group-missing-block",
+            lambda source: source["term_groups"][0].update(fixture_block_ids=["b07", "missing"]),
+            "fixture_block_id không tồn tại",
+        ),
+        (
+            "term-group-duplicate-canonical",
+            lambda source: source["term_groups"].append(copy.deepcopy(source["term_groups"][0])),
+            "canonical trùng",
+        ),
+        (
+            "known-order-failure",
+            lambda source: source.update(known_order_failures=[""]),
+            "known_order_failures",
+        ),
+    ],
+)
+def test_manifest_validator_rejects_invalid_term_groups_and_known_order_failures(
+    tmp_path, name, mutate, message
+):
+    original = load_manifest(MANIFEST)
+    source_index = next(i for i, item in enumerate(original["fixtures"]) if item["id"] == "s-manga_ja_1")
+    data = copy.deepcopy(original)
+    source = data["fixtures"][source_index]
+    mutate(source)
+    path = tmp_path / f"invalid-{name}.json"
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        validate_manifest(path, image_root=FIXTURE_DIR)
 
 
 def test_manifest_validator_rejects_fixture_hash_drift(tmp_path):
@@ -155,13 +238,17 @@ def test_manifest_validator_rejects_duplicate_fixtures_images_and_ids(tmp_path):
 
 def test_canonical_images_are_tracked_once_by_sha():
     tracked = subprocess.run(
-        ["git", "ls-files", "--", "*.png"], check=True, capture_output=True, text=True
+        ["git", "ls-files", "--full-name", "--", "*.png"],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
     ).stdout.splitlines()
     sha_paths = {}
     for name in tracked:
-        path = Path(name)
+        path = REPO_ROOT / name
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        sha_paths.setdefault(digest, []).append(path.as_posix())
+        sha_paths.setdefault(digest, []).append(name)
 
     for relative, digest in EXPECTED_IMAGES.items():
         canonical = f"server/tests/fixtures/real_pages/{relative}"

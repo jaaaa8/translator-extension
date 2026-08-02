@@ -257,7 +257,29 @@
           "required": true
         }
       ],
-      "term_groups": [],
+      "term_groups": [
+        {
+          "canonical": "マッコイ",
+          "accepted_source_forms": [
+            "マッコイ",
+            "マッコイ氏"
+          ],
+          "fixture_block_ids": [
+            "b07",
+            "b20"
+          ]
+        },
+        {
+          "canonical": "タツマキ",
+          "accepted_source_forms": [
+            "タツマキ"
+          ],
+          "fixture_block_ids": [
+            "b05",
+            "b19"
+          ]
+        }
+      ],
       "known_order_failures": [
         "vendor index 5 thuộc panel trên và phải đứng trước vendor indices 3 và 4"
       ]

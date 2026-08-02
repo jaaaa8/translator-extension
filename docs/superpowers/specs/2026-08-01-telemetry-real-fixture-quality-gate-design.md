@@ -136,13 +136,23 @@ Mỗi phần tử `regions` dùng ID fixture độc lập với runtime `block_i
 }
 ```
 
-`kind` chỉ nhận `dialogue`, `sfx` hoặc `sign`. Đây là annotation dành riêng cho reviewer/evaluator, không được gửi cho Gemini và không thuộc production request contract. Mọi kind vẫn được dịch và phải trả exact ID; chỉ `dialogue` tham gia điểm ngữ cảnh hội thoại. Cụ thể, poster ngang trên `s-manga_ja_1` phải được annotate là `sign`, không được giả làm lời thoại.
+`kind` chỉ nhận `dialogue`, `sfx` hoặc `sign`. Đây là annotation dành riêng cho reviewer/evaluator, không được gửi cho Gemini và không thuộc production request contract. Boundary HTTP hiện tại lọc prompt item còn đúng `id`/`text`; policy probe Task 5 dùng allowlist riêng `id`/`text`/`reading_order`/`bbox` và không đi qua `translate_items()`, nên hai contract cố ý khác nhau. Mọi kind vẫn được dịch và phải trả exact ID; chỉ `dialogue` tham gia điểm ngữ cảnh hội thoại. Cụ thể, poster ngang trên `s-manga_ja_1` phải được annotate là `sign`, không được giả làm lời thoại.
 
 Expected order được người đọc xác nhận độc lập theo panel và chiều đọc manga. Với spread Nhật, toàn bộ nửa phải đi trước nửa trái. Với trang Portuguese, chiều đọc vẫn là RTL dù ngôn ngữ là Latin. Tuyệt đối không sinh `reading_order` bằng cách dump `sort_textblk_list()`: vendor đã sai một region trên `s-manga_ja_1` và sai chiều toàn trang trên `mangadex_pt`. Hai sai lệch này phải nằm trong `known_order_failures` để reviewer có mốc kiểm tra, không xác nhận vòng tròn chính output vendor.
 
 Region detector được ghép với anchor manifest bằng IoU lớn hơn `0.5`. Mỗi required anchor phải ghép đúng một region, một region không được ghép hai anchor. Region mới hoặc mất region phải được báo trong kết quả diagnostic, không tự sửa manifest.
 
-`term_groups` chỉ chứa thuật ngữ/tên riêng thực sự lặp trong trang và các surface form được chấp nhận. Spec A không thêm NER tự động.
+`term_groups` chỉ chứa thuật ngữ/tên riêng thực sự lặp trong trang và các surface form nguồn được chấp nhận. Mỗi group dùng schema:
+
+```json
+{
+  "canonical": "マッコイ",
+  "accepted_source_forms": ["マッコイ", "マッコイ氏"],
+  "fixture_block_ids": ["b07", "b20"]
+}
+```
+
+`canonical` là lemma ổn định và duy nhất trong một trang; nó không bắt buộc xuất hiện nguyên dạng trong transcript. `accepted_source_forms` chỉ mô tả các dạng nguồn cùng một thuật ngữ. `fixture_block_ids` phải tham chiếu ít nhất hai region khác nhau trong trang. Group phục vụ kiểm tra self-consistency giữa các block; Spec A không đóng đinh surface form tiếng Việt, không thêm NER tự động và không dùng group để tự chấm chất lượng ngữ nghĩa.
 
 ### 4.2 Ảnh tham chiếu lỗi
 

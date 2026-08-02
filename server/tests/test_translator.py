@@ -222,6 +222,32 @@ def test_translate_items_accepts_reordered_exact_ids(monkeypatch):
     ]
 
 
+def test_translate_items_strips_fields_outside_http_prompt_contract(monkeypatch):
+    reply = json.dumps([{"id": "b1", "translation": "một"}])
+    translator, clients = make_with_clients(monkeypatch, [reply])
+
+    assert translator.translate_items(
+        [
+            {
+                "id": "b1",
+                "text": "one",
+                "reading_order": 0,
+                "bbox": [1, 2, 3, 4],
+                "kind": "dialogue",
+            }
+        ],
+        "en",
+        "vi",
+    ) == [{"id": "b1", "translation": "một"}]
+
+    prompt = clients[0].models.calls[0]["contents"]
+    assert '"id": "b1"' in prompt
+    assert '"text": "one"' in prompt
+    assert '"reading_order"' not in prompt
+    assert '"bbox"' not in prompt
+    assert '"kind"' not in prompt
+
+
 @pytest.mark.parametrize(
     "reply",
     [

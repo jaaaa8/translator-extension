@@ -20,6 +20,7 @@ SOURCE_FIELDS = {
 }
 REGION_FIELDS = {"fixture_block_id", "bbox", "reading_order", "kind", "src_text", "required"}
 REFERENCE_FIELDS = {"id", "role", "image", "sha256", "source_page", "labels"}
+TERM_GROUP_FIELDS = {"canonical", "accepted_source_forms", "fixture_block_ids"}
 KINDS = {"dialogue", "sfx", "sign"}
 CANONICAL_IMAGES = {
     "mangadex_pt.png",
@@ -68,6 +69,8 @@ def validate_manifest(path, image_root=None):
     references = []
     for item in fixtures:
         role = item.get("role")
+        if role not in {"source_page", "failure_reference"}:
+            raise ValueError(f"role không hợp lệ: {role}")
         fields = SOURCE_FIELDS if role == "source_page" else REFERENCE_FIELDS
         _require_fields(item, fields, role or "fixture")
         image = root / item["image"]
@@ -88,9 +91,6 @@ def validate_manifest(path, image_root=None):
                 raise ValueError(f"labels không hợp lệ: {item['id']}")
             references.append(item)
             continue
-        if role != "source_page":
-            raise ValueError(f"role không hợp lệ: {role}")
-
         source_ids.add(item["id"])
         if not all(_valid_text(item[name]) for name in ("id", "src_lang", "source_name")):
             raise ValueError(f"source text metadata không hợp lệ: {item.get('id')}")
@@ -102,6 +102,8 @@ def validate_manifest(path, image_root=None):
             raise ValueError(f"width/height không hợp lệ: {item['id']}")
         if not isinstance(item["term_groups"], list) or not isinstance(item["known_order_failures"], list):
             raise ValueError(f"term_groups/known_order_failures không hợp lệ: {item['id']}")
+        if not all(_valid_text(failure) for failure in item["known_order_failures"]):
+            raise ValueError(f"known_order_failures không hợp lệ: {item['id']}")
         if not isinstance(item["regions"], list) or not item["regions"]:
             raise ValueError(f"regions không hợp lệ: {item['id']}")
 
@@ -138,6 +140,33 @@ def validate_manifest(path, image_root=None):
             orders.append(region["reading_order"])
         if sorted(orders) != list(range(len(orders))):
             raise ValueError(f"reading_order không liên tục: {item['id']}")
+
+        canonicals = set()
+        for group in item["term_groups"]:
+            if not isinstance(group, dict) or set(group) != TERM_GROUP_FIELDS:
+                raise ValueError(f"term_group sai field: {item['id']}")
+            canonical = group["canonical"]
+            if not _valid_text(canonical):
+                raise ValueError("term_group canonical không hợp lệ")
+            if canonical in canonicals:
+                raise ValueError(f"term_group canonical trùng: {canonical}")
+            canonicals.add(canonical)
+            source_forms = group["accepted_source_forms"]
+            if (
+                not isinstance(source_forms, list)
+                or not source_forms
+                or not all(_valid_text(form) for form in source_forms)
+            ):
+                raise ValueError("accepted_source_forms không hợp lệ")
+            block_ids = group["fixture_block_ids"]
+            if (
+                not isinstance(block_ids, list)
+                or not all(_valid_text(block_id) for block_id in block_ids)
+                or len(set(block_ids)) < 2
+            ):
+                raise ValueError("term_group phải lặp ở ít nhất hai block khác nhau")
+            if not set(block_ids) <= region_ids:
+                raise ValueError("term_group tham chiếu fixture_block_id không tồn tại")
 
     for reference in references:
         if reference["source_page"] not in source_ids:

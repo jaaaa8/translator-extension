@@ -10,6 +10,7 @@ class TranslateError(Exception):
 
 
 LANG_NAMES = {"ja": "Japanese", "es": "Spanish", "vi": "Vietnamese", "en": "English"}
+HTTP_TRANSLATE_ITEM_PROMPT_FIELDS = ("id", "text")
 
 PROMPT = """You are translating comic/manga dialogue from {src} to {dst}.
 Translate each numbered line. Keep pronouns and politeness consistent across
@@ -82,10 +83,14 @@ class GeminiTranslator:
         ids = [str(item["id"]) for item in items]
         if len(ids) != len(set(ids)):
             raise TranslateError("duplicate input id")
+        prompt_items = [
+            {field: item[field] for field in HTTP_TRANSLATE_ITEM_PROMPT_FIELDS}
+            for item in items
+        ]
         prompt = ITEM_PROMPT.format(
             src=LANG_NAMES.get(src, src),
             dst=LANG_NAMES.get(dst, dst),
-            items=json.dumps(items, ensure_ascii=False),
+            items=json.dumps(prompt_items, ensure_ascii=False),
         )
         return self._generate(prompt, lambda raw: _decode_items(raw, ids))
 
