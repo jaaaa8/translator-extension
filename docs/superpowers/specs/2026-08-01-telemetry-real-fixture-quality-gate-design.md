@@ -346,7 +346,7 @@ Worklog chứa ba phần:
 
 - `telemetry_validation`: một cold và một warm end-to-end run cho mỗi trang Nhật; với Portuguese chỉ chạy analysis/OCR và batch-scheduling trace bằng recognizer Latin hiện có, cộng policy probe transcript, cho tới khi Spec B thêm `pt` production. Phần này lưu `measurement_device`, từng `page_metrics` và `baseline_batches` đã review;
 - `policy_probe`: ba attempt cho mỗi trang/quality arm như mục 6, cộng `preview_then_full` latency probe nếu điều kiện kích hoạt được thỏa;
-- `manual_review`: rubric, `context_score`/`not_applicable`, critical errors và quyết định `selected`, `blocked` hoặc `no_context_headroom`.
+- `manual_review`: nguyên artifact `evaluate` (`captured_at`, `decision` là một trong `selected`/`blocked`/`inconclusive`/`no_context_headroom`, `reason`, `pages`, `arms`); rubric từng attempt nằm trong `captures/2026-08-01-manual-scores.json` đã commit.
 
 CLI `evaluate` chỉ sinh artifact quyết định deterministic dùng làm nguyên section `manual_review`. Task 7 ráp worklog ba phần từ browser telemetry đã review, raw policy capture và artifact evaluator; CLI không phát minh envelope hay schema telemetry mà nó không nhận làm input.
 
