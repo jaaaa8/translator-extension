@@ -205,6 +205,15 @@ def _valid_capture_attempt(page, row):
     ) == set(_expected_ids(page))
 
 
+def _nonnegative_number(value):
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0
+    )
+
+
 def validate_capture(manifest, capture):
     """Validate deterministic capture provenance and return valid attempt keys."""
     if not isinstance(capture, dict):
@@ -261,11 +270,13 @@ def validate_capture(manifest, capture):
         if len(row["calls"]) != len(expected_batches):
             _capture_error("call membership")
         seen_ids = []
-        for call, batch in zip(row["calls"], expected_batches):
-            if not isinstance(call, dict) or not {
+        for batch_id, (call, batch) in enumerate(zip(row["calls"], expected_batches), 1):
+            if not isinstance(call, dict) or set(call) != {
                 "batch_id", "fixture_block_ids", "started", "duration", "status", "error_code"
-            } <= set(call):
+            }:
                 _capture_error("call schema")
+            if type(call["batch_id"]) is not int or call["batch_id"] != batch_id:
+                _capture_error("batch_id")
             ids = call["fixture_block_ids"]
             if not isinstance(ids, list) or len(ids) != len(set(ids)):
                 _capture_error("duplicate fixture block id")
@@ -273,18 +284,31 @@ def validate_capture(manifest, capture):
                 _capture_error("call membership")
             if call["status"] not in {"success", "failed", "rate_limited", "invalid_response"}:
                 _capture_error("call status")
-            if not isinstance(call["duration"], (int, float)) or call["duration"] < 0:
+            if not _nonnegative_number(call["started"]):
+                _capture_error("call started")
+            if not _nonnegative_number(call["duration"]):
                 _capture_error("call duration")
+            expected_error = {
+                "success": None,
+                "failed": "generation_error",
+                "rate_limited": "rate_limited",
+                "invalid_response": "invalid_response",
+            }[call["status"]]
+            if call["error_code"] != expected_error:
+                _capture_error("call error_code")
             seen_ids.extend(ids)
         if len(seen_ids) != len(set(seen_ids)):
             _capture_error("duplicate fixture block id")
-        expected_ids = set(_expected_ids(page))
-        if not set(row["responses"]) <= expected_ids:
-            _capture_error("translation ids")
+        successful_ids = {
+            item_id
+            for call in row["calls"]
+            if call["status"] == "success"
+            for item_id in call["fixture_block_ids"]
+        }
+        if set(row["responses"]) != successful_ids:
+            _capture_error("successful call membership")
         if not all(_valid_text(value) for value in row["responses"].values()):
             _capture_error("empty translation")
-        if all(call["status"] == "success" for call in row["calls"]) and set(row["responses"]) != expected_ids:
-            _capture_error("translation ids")
         if _valid_capture_attempt(page, row):
             valid.add((page_id, arm, attempt))
     if actual_rows != expected_rows:
@@ -311,7 +335,9 @@ def _validate_scores(manifest, valid_attempts, manual_scores):
         "term_forms",
     }
     rows = {}
-    surface_forms = {}
+    for page in pages.values():
+        if page["src_lang"] == "pt" and page["reading_direction"] != "rtl":
+            raise ValueError("PT reading_direction phải là rtl")
     for score in manual_scores:
         if not isinstance(score, dict) or set(score) != fields:
             raise ValueError("manual score schema không hợp lệ")
@@ -328,8 +354,6 @@ def _validate_scores(manifest, valid_attempts, manual_scores):
         ):
             raise ValueError("manual score reviewer/note không hợp lệ")
         is_pt = page["src_lang"] == "pt"
-        if is_pt and page["reading_direction"] != "rtl":
-            raise ValueError("PT reading_direction phải là rtl")
         for field in RUBRIC_FIELDS:
             value = score[field]
             if is_pt and field in {"terms", "pronouns", "coherence"}:
@@ -340,15 +364,17 @@ def _validate_scores(manifest, valid_attempts, manual_scores):
         groups = page.get("term_groups", [])
         forms = score["term_forms"]
         expected_forms = {group["canonical"] for group in groups}
-        if not isinstance(forms, dict) or set(forms) != expected_forms or not all(
-            _valid_text(value) for value in forms.values()
-        ):
+        if not isinstance(forms, dict) or set(forms) != expected_forms:
             raise ValueError("term forms không hợp lệ")
-        for canonical, value in forms.items():
-            form_key = (score["page_id"], score["arm"], canonical)
-            if form_key in surface_forms and surface_forms[form_key] != value:
+        for group in groups:
+            block_forms = forms[group["canonical"]]
+            expected_blocks = set(group["fixture_block_ids"])
+            if not isinstance(block_forms, dict) or set(block_forms) != expected_blocks or not all(
+                _valid_text(value) for value in block_forms.values()
+            ):
+                raise ValueError("term forms không hợp lệ")
+            if len({value.strip().casefold() for value in block_forms.values()}) > 1:
                 raise ValueError("term surface form xung đột")
-            surface_forms[form_key] = value
         rows[key] = score
     if set(rows) != valid_attempts:
         raise ValueError("manual score thiếu valid response")
@@ -404,7 +430,11 @@ def evaluate_gate(manifest, capture, manual_scores):
         if arm_result[arm]["status"] == "inconclusive":
             continue
         for page_id in pages:
-            keys = [(page_id, arm, attempt) for attempt in range(1, 4)]
+            keys = [
+                (page_id, arm, attempt)
+                for attempt in range(1, 4)
+                if (page_id, arm, attempt) in valid_attempts
+            ]
             arm_scores = [scores[key] for key in keys]
             if any(score["critical_error"] for score in arm_scores):
                 arm_result[arm].update(status="blocked", reasons=[f"{page_id}: critical_error"])
@@ -441,7 +471,7 @@ def evaluate_gate(manifest, capture, manual_scores):
     else:
         costs = {}
         for arm in passed:
-            rows = [attempts[key] for key in valid_attempts if key[1] == arm]
+            rows = [row for row in capture["attempts"] if row["arm"] == arm]
             costs[arm] = (sum(len(row["calls"]) for row in rows), sum(call["duration"] for row in rows for call in row["calls"]))
         if costs[left] == costs[right]:
             return {"decision": "inconclusive", "reason": "candidate hòa cả context, call và latency", "pages": page_result, "arms": arm_result}

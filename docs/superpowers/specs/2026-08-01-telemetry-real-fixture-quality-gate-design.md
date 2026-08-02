@@ -301,6 +301,8 @@ Trang Portuguese chỉ chấm ba mục an toàn `Đúng nghĩa`, `Giọng/mức 
 
 Worklog lưu điểm từng attempt, `context_score` hoặc `not_applicable`, ghi chú ngắn và reviewer. Không bắt buộc một bản dịch gold duy nhất vì nhiều cách dịch tự nhiên có thể cùng đúng.
 
+Mỗi manual score Nhật có annotation explicit `term_forms: {canonical: {fixture_block_id: target_surface_form}}`. Mỗi canonical phải có đúng các `fixture_block_ids` của term group; evaluator chuẩn hóa `strip().casefold()` và reject hơn một surface form trong chính response/attempt đó. Nó không so sánh surface form giữa các attempt, không suy đoán từ translation text và không dùng NER hay LLM judge.
+
 ### 7.2 Guardrail tự động trong CI
 
 CI chỉ đọc manifest và capture đã commit:

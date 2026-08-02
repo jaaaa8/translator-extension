@@ -59,14 +59,14 @@ def _evaluator_case(name):
                         "attempt": attempt,
                         "calls": [
                             {
-                                "batch_id": 1,
+                                "batch_id": batch_id,
                                 "fixture_block_ids": batch,
                                 "started": 0,
-                                "duration": case.get("latency", {}).get(arm, 1),
+                                "duration": case.get("failed_latency", {}).get(arm, case.get("latency", {}).get(arm, 1)) if not valid else case.get("latency", {}).get(arm, 1),
                                 "status": "success" if valid else "failed",
                                 "error_code": None if valid else "generation_error",
                             }
-                            for batch in batches
+                            for batch_id, batch in enumerate(batches, 1)
                         ],
                         "responses": {"b1": "một", "b2": "hai"} if valid else {},
                     }
@@ -88,7 +88,15 @@ def _evaluator_case(name):
                         "critical_error": [arm, page["id"], attempt] in case.get("critical_errors", []),
                         "reviewer": "reviewer-a",
                         "note": "fixture score",
-                        "term_forms": values.get("term_forms", {"Hero": "Anh hùng"} if page["src_lang"] == "ja" else {}),
+                        "term_forms": values.get(
+                            "term_forms",
+                            {
+                                group["canonical"]: {
+                                    block_id: "Anh hùng" for block_id in group["fixture_block_ids"]
+                                }
+                                for group in page["term_groups"]
+                            },
+                        ),
                     }
                 )
     capture = {
@@ -361,10 +369,13 @@ def test_context_score_and_offline_gate_cases():
     [
         ("pt", "selected", "ordered_microbatch"),
         ("candidate_critical_error", "blocked", None),
+        ("candidate_safety_zero", "blocked", None),
+        ("two_valid_responses", "selected", "ordered_microbatch"),
         ("inconclusive", "inconclusive", None),
         ("blocked_regression", "blocked", None),
         ("tie_break_calls_then_latency", "selected", "full_page"),
         ("tie_break_latency", "selected", "full_page"),
+        ("tie_break_failed_attempt_cost", "selected", "full_page"),
     ],
 )
 def test_offline_gate_decisions_are_deterministic(name, decision, selected):
@@ -380,16 +391,80 @@ def test_offline_gate_marks_portuguese_context_not_applicable_and_checks_term_su
     result = evaluate_gate(manifest, capture, scores)
 
     assert result["pages"]["mangadex_pt"]["context_score"] == "not_applicable"
-    broken = copy.deepcopy(scores)
-    ja_scores = [score for score in broken if score["page_id"] == "s-manga_ja_1"]
-    ja_scores[0]["term_forms"] = {"Hero": "Anh hùng"}
-    ja_scores[1]["term_forms"] = {"Hero": "Hiệp sĩ"}
+    conflict_manifest, conflict_capture, conflict_scores = _evaluator_case("term_surface_conflict")
     with pytest.raises(ValueError, match="term"):
-        evaluate_gate(manifest, capture, broken)
+        evaluate_gate(conflict_manifest, conflict_capture, conflict_scores)
     broken_manifest = copy.deepcopy(manifest)
     broken_manifest["fixtures"][0]["reading_direction"] = "ltr"
     with pytest.raises(ValueError, match="PT reading_direction"):
         evaluate_gate(broken_manifest, capture, scores)
+
+
+def test_portuguese_rtl_is_checked_even_without_valid_response_or_score():
+    manifest, capture, scores = _evaluator_case("pt_without_scores")
+    manifest["fixtures"][0]["reading_direction"] = "ltr"
+
+    with pytest.raises(ValueError, match="PT reading_direction"):
+        evaluate_gate(manifest, capture, scores)
+
+
+@pytest.mark.parametrize(
+    ("name", "mutate", "message"),
+    [
+        ("extra-field", lambda call: call.update(extra=True), "call schema"),
+        ("missing-field", lambda call: call.pop("started"), "call schema"),
+        ("batch-id", lambda call: call.update(batch_id=0), "batch_id"),
+        ("batch-id-bool", lambda call: call.update(batch_id=True), "batch_id"),
+        ("started-bool", lambda call: call.update(started=True), "call started"),
+        ("started-infinite", lambda call: call.update(started=float("inf")), "call started"),
+        ("started-negative", lambda call: call.update(started=-1), "call started"),
+        ("duration-bool", lambda call: call.update(duration=True), "call duration"),
+        ("duration-infinite", lambda call: call.update(duration=float("inf")), "call duration"),
+        ("duration-negative", lambda call: call.update(duration=-1), "call duration"),
+        ("success-error", lambda call: call.update(error_code="generation_error"), "call error_code"),
+        ("failed-error", lambda call: call.update(status="failed", error_code=None), "call error_code"),
+        ("rate-error", lambda call: call.update(status="rate_limited", error_code="generation_error"), "call error_code"),
+        ("invalid-error", lambda call: call.update(status="invalid_response", error_code="generation_error"), "call error_code"),
+    ],
+)
+def test_capture_validator_rejects_malformed_call_schema(name, mutate, message):
+    manifest, capture, _ = _evaluator_case("pt")
+    mutate(capture["attempts"][0]["calls"][0])
+
+    with pytest.raises(ValueError, match=message):
+        validate_capture(manifest, capture)
+
+
+@pytest.mark.parametrize("responses", [{}, {"b2": "hai"}])
+def test_capture_validator_requires_responses_for_exact_successful_call_membership(responses):
+    manifest, capture, _ = _evaluator_case("tie_break_calls_then_latency")
+    row = capture["attempts"][0]
+    row["calls"][1].update(status="failed", error_code="generation_error")
+    row["responses"] = responses
+
+    with pytest.raises(ValueError, match="successful call membership"):
+        validate_capture(manifest, capture)
+
+
+def test_capture_validator_allows_only_the_successful_batch_response_in_partial_attempt():
+    manifest, capture, _ = _evaluator_case("tie_break_calls_then_latency")
+    row = capture["attempts"][0]
+    row["calls"][1].update(status="failed", error_code="generation_error")
+    row["responses"] = {"b1": "một"}
+
+    assert ("mangadex_pt", "batch_control", 1) not in validate_capture(manifest, capture)["valid_attempts"]
+
+
+def test_term_surface_forms_may_differ_between_attempts_but_not_within_one_response():
+    manifest, capture, scores = _evaluator_case("pt")
+    score = next(
+        row
+        for row in scores
+        if row["page_id"] == "s-manga_ja_1" and row["arm"] == "batch_control" and row["attempt"] == 2
+    )
+    score["term_forms"] = {"Hero": {"b1": "Hiệp sĩ", "b2": "Hiệp sĩ"}}
+
+    assert evaluate_gate(manifest, capture, scores)["decision"] == "selected"
 
 
 def test_preview_latency_is_rejected_until_a_future_gate_selects_full_page(capsys):
@@ -429,7 +504,7 @@ def test_probe_cli_creates_output_parent_before_running_probe(tmp_path, monkeypa
 
     monkeypatch.setattr("server.run_real_page_probe.run_quality_probe", fake_probe)
 
-    run_probe_main(["--manifest", "manifest.json", "--baseline", "baseline.json", "--out", str(out)])
+    run_probe_main(["run", "--manifest", "manifest.json", "--baseline", "baseline.json", "--out", str(out)])
 
     capture = json.loads(out.read_text(encoding="utf-8"))
     assert capture["attempts"] == []

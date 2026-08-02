@@ -77,6 +77,8 @@ def main(argv=None):
     argv = list(argv) if argv is not None else sys.argv[1:]
     if argv and argv[0] == "evaluate":
         return _evaluate(argv[1:])
+    if argv and argv[0] == "run":
+        return _run(argv[1:])
     return _run(argv)
 
 
