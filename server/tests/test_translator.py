@@ -163,6 +163,28 @@ def test_decode_error_mentioning_429_does_not_use_secondary(monkeypatch):
     assert [len(client.models.calls) for client in clients] == [2, 0]
 
 
+def test_two_decoder_errors_with_429_message_preserve_invalid_response_kind(monkeypatch):
+    malformed = '{"a": ' + " " * 422 + "X"
+    t, clients = make_with_clients(monkeypatch, [malformed, malformed])
+
+    with pytest.raises(tr.TranslateError) as raised:
+        t.translate(["x"], "ja", "vi")
+
+    assert raised.value.error_kind == "invalid_response"
+    assert raised.value.code is None
+    assert [len(client.models.calls) for client in clients] == [2]
+
+
+def test_sdk_429_preserves_rate_limited_kind(monkeypatch):
+    t = make(monkeypatch, [QuotaError("quota")])
+
+    with pytest.raises(tr.TranslateError) as raised:
+        t.translate(["x"], "ja", "vi")
+
+    assert raised.value.error_kind == "rate_limited"
+    assert raised.value.code == 429
+
+
 def test_promoted_secondary_429_fails_back_and_promotes_primary(monkeypatch):
     t, clients = make_with_clients(
         monkeypatch,

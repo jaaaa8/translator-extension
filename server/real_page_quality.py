@@ -142,9 +142,9 @@ def decode_eval_items(raw, expected_ids):
 
 
 def classify_probe_error(error):
-    if isinstance(error, ValueError) or str(error).startswith("invalid_response:"):
+    if getattr(error, "error_kind", None) == "invalid_response" or isinstance(error, ValueError):
         return "invalid_response", "invalid_response"
-    if getattr(error, "code", None) == 429 or "429" in str(error) or "RESOURCE_EXHAUSTED" in str(error):
+    if getattr(error, "error_kind", None) == "rate_limited" or getattr(error, "code", None) == 429:
         return "rate_limited", "rate_limited"
     return "failed", "generation_error"
 

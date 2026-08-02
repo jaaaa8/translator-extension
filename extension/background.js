@@ -320,6 +320,7 @@ async function postJson(url, body, timeout = 60000) {
     if (!response.ok) {
       const error = new Error(data.error || `HTTP ${response.status}`);
       error.status = response.status;
+      error.errorCode = data.error_code || null;
       throw error;
     }
     return data;
@@ -663,7 +664,7 @@ function applyTranslation(producer, item) {
   block.state = "complete";
   emit(producer, "translation", { ...block, image_w: producer.page.image_w, image_h: producer.page.image_h });
 }
-function isRateLimited(error) { return error.status === 429 || String(error).includes("429"); }
+function isRateLimited(error) { return error.status === 429 || error.errorCode === "rate_limited"; }
 async function flushTranslationBatch(producer) {
   clearTimeout(producer.translationTimer);
   producer.translationTimer = null;
@@ -696,10 +697,10 @@ async function flushTranslationBatch(producer) {
       }, 300000);
       const expected = new Set(blocks.map((block) => block.block_id));
       const actual = new Set(data.items.map((item) => item.id));
-      if (actual.size !== data.items.length || actual.size !== expected.size || [...actual].some((id) => !expected.has(id))) throw new Error("translation id set mismatch");
+      if (actual.size !== data.items.length || actual.size !== expected.size || [...actual].some((id) => !expected.has(id))) { const error = new Error("translation id set mismatch"); error.errorCode = "invalid_response"; throw error; }
       trace.status = "success";
     } catch (error) {
-      trace.status = isRateLimited(error) ? "rate_limited" : String(error).includes("translation id set mismatch") ? "invalid_response" : "failed";
+      trace.status = isRateLimited(error) ? "rate_limited" : error.errorCode === "invalid_response" ? "invalid_response" : "failed";
       trace.error_code = trace.status === "rate_limited" ? "rate_limited" : trace.status === "invalid_response" ? "invalid_response" : "translation_failed";
       throw error;
     } finally {

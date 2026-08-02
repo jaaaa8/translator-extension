@@ -1039,7 +1039,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
 
   await scenario("rate-limited translation keeps its own trace and page rows remain per job", async () => {
     const server = createFakeServer();
-    server.queueTranslationResult({ response: { ok: false, status: 502, json: async () => ({ error: "gemini: 429 RESOURCE_EXHAUSTED" }) } });
+    server.queueTranslationResult({ response: { ok: false, status: 429, json: async () => ({ error: "gemini: quota", error_code: "rate_limited" }) } });
     const app = createBackgroundApp({ server });
     await app.ready();
     const port = app.connect();
@@ -1058,9 +1058,24 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     assert.strictEqual(counterRecords.filter((record) => record.rate_limited > 0).length, 1);
   });
 
+  await scenario("structured invalid response keeps an invalid trace", async () => {
+    const server = createFakeServer();
+    server.queueTranslationResult({ response: { ok: false, status: 502, json: async () => ({ error: "gemini: duplicate id", error_code: "invalid_response" }) } });
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const port = app.connect();
+    port.receive(app.startScope("invalid-server", "visible", app.job("invalid-server-job", "https://x/invalid-server.jpg")));
+    const done = await app.waitFor("scope_done", port);
+    assert.deepStrictEqual(
+      done.page_metrics[0].translation_batches.map((batch) => ({ status: batch.status, error_code: batch.error_code })),
+      [{ status: "invalid_response", error_code: "invalid_response" }]
+    );
+    assert.strictEqual((await app.message({ type: "benchmarkSummary" })).counters.rate_limited, 0);
+  });
+
   await scenario("non-rate-limited 502 keeps a failed trace without incrementing the rate-limit counter", async () => {
     const server = createFakeServer();
-    server.queueTranslationResult({ response: { ok: false, status: 502, json: async () => ({ error: "gemini: upstream unavailable" }) } });
+    server.queueTranslationResult({ response: { ok: false, status: 502, json: async () => ({ error: "gemini: upstream 429 text" }) } });
     const app = createBackgroundApp({ server });
     await app.ready();
     const port = app.connect();

@@ -170,6 +170,38 @@ def test_translate_items_rejects_invalid_translator_id_set(monkeypatch, item_rep
     assert r.status_code == 502
 
 
+def test_translate_items_returns_machine_readable_rate_limit(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "_pipeline",
+        FakePipeline(error=TranslateError("quota", code=429, error_kind="rate_limited")),
+    )
+
+    r = TestClient(main.app).post(
+        "/translate-items",
+        json={"items": [{"id": "b1", "text": "one"}], "src_lang": "es"},
+    )
+
+    assert r.status_code == 429
+    assert r.json() == {"error": "gemini: quota", "error_code": "rate_limited"}
+
+
+def test_translate_items_returns_machine_readable_invalid_response(monkeypatch):
+    monkeypatch.setattr(
+        main,
+        "_pipeline",
+        FakePipeline(error=TranslateError("duplicate id: b1", error_kind="invalid_response")),
+    )
+
+    r = TestClient(main.app).post(
+        "/translate-items",
+        json={"items": [{"id": "b1", "text": "one"}], "src_lang": "es"},
+    )
+
+    assert r.status_code == 502
+    assert r.json() == {"error": "gemini: duplicate id: b1", "error_code": "invalid_response"}
+
+
 def test_translate_items_rejects_duplicate_input_id(monkeypatch):
     monkeypatch.setattr(main, "_pipeline", FakePipeline())
     r = TestClient(main.app).post(

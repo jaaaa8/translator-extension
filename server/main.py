@@ -176,8 +176,16 @@ def translate_items(body: TranslateItemsBody):
             rows, body.src_lang, body.dst_lang
         )
         return {"items": _normalize_items(translated, [row["id"] for row in rows])}
-    except (TranslateError, ValueError) as error:
-        return JSONResponse(status_code=502, content={"error": f"gemini: {error}"})
+    except TranslateError as error:
+        return JSONResponse(
+            status_code=429 if error.code == 429 else 502,
+            content={"error": f"gemini: {error}", "error_code": error.error_kind or "generation_error"},
+        )
+    except ValueError as error:
+        return JSONResponse(
+            status_code=502,
+            content={"error": f"gemini: {error}", "error_code": "invalid_response"},
+        )
 
 
 @app.post("/translate")

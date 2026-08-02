@@ -23,6 +23,7 @@ from server.real_page_quality import (
     validate_manifest,
 )
 from server.run_real_page_probe import main as run_probe_main
+from server.translator import TranslateError
 
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "real_pages"
@@ -271,12 +272,12 @@ def test_quality_probe_records_call_start_relative_to_probe():
     assert [call["duration"] for call in calls] == [1, 1, 1, 1, 1]
 
 
-def test_quality_probe_classifies_decoder_errors_wrapped_by_generate_as_invalid_response():
+def test_quality_probe_classifies_structured_decoder_errors_as_invalid_response():
     def generate(_, decode):
         try:
             decode("[]")
         except ValueError as error:
-            raise RuntimeError(str(error)) from error
+            raise TranslateError(str(error), error_kind="invalid_response") from error
 
     capture = run_quality_probe(
         {"fixtures": [_policy_page()]},
@@ -311,6 +312,27 @@ def test_quality_probe_classifies_gemini_429_as_rate_limited():
         for row in capture["attempts"]
         for call in row["calls"]
     } == {("rate_limited", "rate_limited")}
+
+
+def test_quality_probe_uses_structured_invalid_response_not_429_message():
+    class InvalidResponseError(Exception):
+        error_kind = "invalid_response"
+
+    def generate(_, __):
+        raise InvalidResponseError("invalid JSON at char 429")
+
+    capture = run_quality_probe(
+        {"fixtures": [_policy_page()]},
+        {"page-1": [["b3"], ["b1", "b2"]]},
+        generate,
+        attempts=1,
+    )
+
+    assert {
+        (call["status"], call["error_code"])
+        for row in capture["attempts"]
+        for call in row["calls"]
+    } == {("invalid_response", "invalid_response")}
 
 
 @pytest.mark.parametrize(

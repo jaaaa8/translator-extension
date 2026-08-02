@@ -6,7 +6,10 @@ from . import config
 
 
 class TranslateError(Exception):
-    pass
+    def __init__(self, message, *, code=None, error_kind=None):
+        super().__init__(message)
+        self.code = code
+        self.error_kind = error_kind
 
 
 LANG_NAMES = {"ja": "Japanese", "es": "Spanish", "vi": "Vietnamese", "en": "English"}
@@ -96,7 +99,8 @@ class GeminiTranslator:
         return self._generate(prompt, lambda raw: _decode_items(raw, ids))
 
     def _generate(self, prompt, decode):
-        last_err = "unknown"
+        last_error = None
+        last_kind = "generation_error"
         client_index = self._active_client
         switched = False
         for attempt in range(2):  # 1 lần + 1 retry theo spec
@@ -113,12 +117,18 @@ class GeminiTranslator:
                 if switched:
                     self._active_client = client_index
                 return result
-            except Exception as e:
-                last_err = str(e)
-                if getattr(e, "code", None) == 429:  # google.genai APIError.code
+            except Exception as error:
+                last_error = error
+                if getattr(error, "code", None) == 429:  # google.genai APIError.code
+                    last_kind = "rate_limited"
                     if attempt == 0 and len(self._clients) > 1:
                         client_index = 1 - client_index
                         switched = True
                         continue
                     break
-        raise TranslateError(last_err)
+                last_kind = "invalid_response" if isinstance(error, ValueError) else "generation_error"
+        raise TranslateError(
+            str(last_error),
+            code=getattr(last_error, "code", None),
+            error_kind=last_kind,
+        ) from last_error
