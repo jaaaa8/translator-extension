@@ -158,7 +158,7 @@ Các ảnh tham chiếu lỗi không được đưa vào điểm chất lượng
 
 ## 5. Contract telemetry
 
-`analysis_ms` là duration; `*_done_ms` và `first_*_ms` là elapsed từ producer accepted, trừ `first_overlay_ms`; field này đo từ content scope start để giữ tương thích aggregate/benchmark. Mỗi row có `accepted_offset_ms`; producer-relative overlay xấp xỉ `first_overlay_ms - accepted_offset_ms`; sai số còn lại là IPC + MV3 worker wake. Stage không chạy dùng `null`. Mọi duration dùng millisecond nguyên, không âm.
+`analysis_ms` là duration; `*_done_ms` và `first_*_ms` là elapsed từ producer accepted, trừ `first_overlay_ms`; field này đo từ content scope start để giữ tương thích aggregate/benchmark. Mỗi row có `accepted_offset_ms`; producer-relative overlay xấp xỉ `first_overlay_ms - accepted_offset_ms`; sai số còn lại là IPC + MV3 worker wake. Stage không chạy dùng `null`. Mọi duration dùng millisecond nguyên, không âm; riêng `accepted_offset_ms` là offset chứ không phải duration và được phép âm khi một request đến sau bám vào producer đã được accept từ trước (shared producer).
 
 ### 5.1 Analysis và OCR
 
@@ -189,7 +189,7 @@ Metric trang gồm ít nhất:
 - `accepted_offset_ms`;
 - `total_ms`.
 
-`analysis_ms` là duration stage. `*_done_ms` và `first_*_ms` là elapsed từ producer accepted, trừ `first_overlay_ms`, được content đo từ scope start; `accepted_offset_ms` cho phép xấp xỉ producer-relative overlay bằng `first_overlay_ms - accepted_offset_ms`, với sai số IPC + MV3 worker wake. Stage không chạy là `null`.
+`analysis_ms` là duration stage. `*_done_ms` và `first_*_ms` là elapsed từ producer accepted, trừ `first_overlay_ms`, được content đo từ scope start; `accepted_offset_ms` cho phép xấp xỉ producer-relative overlay bằng `first_overlay_ms - accepted_offset_ms`, với sai số IPC + MV3 worker wake. Đây là offset giữa hai mốc accepted, không phải duration, nên có thể âm khi request đến sau dùng chung một producer đã được accept trước đó. Stage không chạy là `null`.
 
 `completeJob()` phải nhận hoặc tạo đúng một metric row cho mỗi job hoàn tất. Có ba nguồn row:
 
