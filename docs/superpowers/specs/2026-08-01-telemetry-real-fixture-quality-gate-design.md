@@ -272,7 +272,7 @@ Mỗi capture lưu:
 - lỗi/rate-limit;
 - không lưu API key.
 
-Capture phải có đúng bốn metadata bắt buộc: `commit`, `device`, `model` và `temperature`. `commit`/`device`/`model` là chuỗi không rỗng, `temperature` là số hữu hạn; thiếu, thừa hoặc sai kiểu làm `validate_capture` fail. Đây là trust boundary cho artifact đã commit; `run_quality_probe(metadata=None)` vẫn chỉ là helper test và không tạo artifact đủ điều kiện gate.
+Capture phải có đúng năm metadata bắt buộc: `captured_at`, `commit`, `device`, `model` và `temperature`. `captured_at` là ISO-8601 UTC có timezone, `commit`/`device`/`model` là chuỗi không rỗng, `temperature` là số hữu hạn; thiếu, thừa hoặc sai kiểu làm `validate_capture` fail. `evaluate_gate` echo nguyên `captured_at` từ capture và không sinh timestamp mới. Đây là trust boundary cho artifact đã commit; `run_quality_probe(metadata=None)` vẫn chỉ là helper test và không tạo artifact đủ điều kiện gate.
 
 Đối với fixture Portuguese, runner dùng `source_name` từ manifest để prompt nói `Portuguese`. Đây là probe benchmark, không tuyên bố production đã hỗ trợ `src_lang=pt`.
 
@@ -311,6 +311,7 @@ CI chỉ đọc manifest và capture đã commit:
 - SHA-256 fixture đúng;
 - exact ID set, không trùng, không thiếu, translation không rỗng;
 - `reading_order` là dãy liên tục và khớp expected manifest;
+- source page Portuguese bắt buộc có `reading_direction: rtl`;
 - term group đã annotate không xuất hiện với nhiều surface form xung đột trong cùng trang;
 - tính và báo `translated_chars`, `source_chars`, tỷ lệ độ dài và `chars_per_kpx` theo bbox.
 
@@ -326,7 +327,7 @@ CI kiểm evaluator bằng capture tĩnh; CI tuyệt đối không gọi Gemini.
 4. Trên từng spread Nhật, tính median `context_score` của ba attempt hợp lệ cho `batch_control` và mỗi candidate.
 5. Nếu `batch_control` đạt median `context_score >= 5` trên cả hai spread, ghi kết quả `no_context_headroom`: với trần `6`, không candidate nào có thể đạt mức tăng `2` trên một spread. Đây là kết quả xác định “không còn headroom đủ lớn cho ordering/batching theo ngưỡng đã chọn”, không phải gate hỏng. Reading order vẫn phải được sửa như correctness bug, nhưng không ship batching mới với claim tăng chất lượng; phần tối ưu chất lượng của Spec B phải re-target sang bottleneck tiếp theo đã đo như OCR, model hoặc prompt và được duyệt lại trước implementation plan.
 6. Ngoài nhánh `no_context_headroom`, candidate qua ngưỡng cải thiện so với `batch_control` khi không thấp hơn quá `1` điểm trên bất kỳ spread nào và cao hơn ít nhất `2` điểm trên ít nhất một spread. Dung sai một điểm hấp thụ dao động nhỏ của rubric; yêu cầu tăng hai điểm ngăn một dao động đơn lẻ được gọi là thắng.
-7. Nếu không candidate nào qua ngưỡng ở nhánh còn headroom, quality gate bị chặn và Spec B không được ship policy mới. Nếu chỉ một candidate qua, chọn candidate đó. Nếu cả hai qua, so sánh `full_page` với `ordered_microbatch` bằng cùng quy tắc; nếu không arm nào thắng rõ về `context_score`, coi chất lượng hòa và dùng số call Gemini rồi total latency làm tie-breaker.
+7. Nếu không candidate nào qua ngưỡng ở nhánh còn headroom, quality gate bị chặn và Spec B không được ship policy mới. Nếu chỉ một candidate qua, chọn candidate đó. Nếu cả hai qua, so sánh `full_page` với `ordered_microbatch` bằng cùng quy tắc; nếu không arm nào thắng rõ về `context_score`, coi chất lượng hòa và dùng số call Gemini rồi total latency làm tie-breaker. Chi phí tie-break cộng toàn bộ attempt đã capture của candidate trên cả ba source page, kể cả call `failed`, `rate_limited` hoặc `invalid_response`, để lỗi thoáng qua không bị xóa khỏi chi phí policy.
 8. Chỉ khi `full_page` được chọn và first-overlay latency còn cần đánh đổi, mới chạy probe `preview_then_full` trên hai spread Nhật. Probe phải có ít nhất hai paired run trả exact ID; nếu không cải thiện first overlay hoặc làm xấu final latency/lỗi/rate-limit mà không có lợi ích đo được, giữ `full_page`.
 9. Nếu preview cải thiện first overlay nhưng phải trả thêm call/final latency, worklog trình bày đúng trade-off và mặc định chọn `full_page`. Chỉ chọn preview khi người dùng duyệt rõ sau khi xem số đo; Spec A không phát minh một ngưỡng phần trăm tùy ý.
 10. Quyết định và bằng chứng được ghi trong worklog; không sửa production policy ngay trong Spec A.
@@ -346,6 +347,8 @@ Worklog chứa ba phần:
 - `telemetry_validation`: một cold và một warm end-to-end run cho mỗi trang Nhật; với Portuguese chỉ chạy analysis/OCR và batch-scheduling trace bằng recognizer Latin hiện có, cộng policy probe transcript, cho tới khi Spec B thêm `pt` production. Phần này lưu `measurement_device`, từng `page_metrics` và `baseline_batches` đã review;
 - `policy_probe`: ba attempt cho mỗi trang/quality arm như mục 6, cộng `preview_then_full` latency probe nếu điều kiện kích hoạt được thỏa;
 - `manual_review`: rubric, `context_score`/`not_applicable`, critical errors và quyết định `selected`, `blocked` hoặc `no_context_headroom`.
+
+CLI `evaluate` chỉ sinh artifact quyết định deterministic dùng làm nguyên section `manual_review`. Task 7 ráp worklog ba phần từ browser telemetry đã review, raw policy capture và artifact evaluator; CLI không phát minh envelope hay schema telemetry mà nó không nhận làm input.
 
 Các run Portuguese trong Spec A là policy probe từ transcript cố định, chưa phải production proof. Production benchmark sau khi Spec B thêm `pt` và policy thắng vẫn phải tuân thủ gate hiện có: tối thiểu 20 cold + 20 warm trên một máy, báo p50/p95, first overlay/translation/total và không regress block count.
 

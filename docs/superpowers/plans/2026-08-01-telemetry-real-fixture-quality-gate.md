@@ -614,7 +614,7 @@ def run_quality_probe(manifest, baseline, generate, attempts=3, clock=time.perf_
     return build_capture(manifest, baseline, rows)
 ```
 
-CLI live khởi tạo `GeminiTranslator()` một lần và truyền `translator._generate`; decoder kiểm exact ID. Capture ghi commit, fixture SHA, OS/device, model, prompt/policy version, temperature, batch membership, started/duration, status/error code và response keyed by fixture ID. Không ghi key.
+CLI live khởi tạo `GeminiTranslator()` một lần và truyền `translator._generate`; decoder kiểm exact ID. Capture ghi `captured_at` ISO-8601 UTC, commit, fixture SHA, OS/device, model, prompt/policy version, temperature, batch membership, started/duration, status/error code và response keyed by fixture ID. Không ghi key.
 
 Chỉ có ba quality arms: `batch_control`, `ordered_microbatch`, `full_page`. `preview_then_full` là flag riêng `--preview-latency` và CLI từ chối chạy nếu input gate chưa chọn `full_page`.
 
@@ -787,21 +787,21 @@ Mỗi score có reviewer và note ngắn. Không để `null`, chuỗi rỗng ha
 - [ ] **Step 5: Chạy evaluator và ghi worklog hoàn chỉnh**
 
 ```powershell
-& 'D:\MangaTranslator\venv\Scripts\python.exe' -m server.run_real_page_probe evaluate --manifest server/tests/fixtures/real_pages/manifest.json --capture server/tests/fixtures/real_pages/captures/2026-08-01-policy-probe.json --scores server/tests/fixtures/real_pages/captures/2026-08-01-manual-scores.json --out docs/superpowers/worklogs/2026-08-01-real-page-quality-baseline.json
+& 'D:\MangaTranslator\venv\Scripts\python.exe' -m server.run_real_page_probe evaluate --manifest server/tests/fixtures/real_pages/manifest.json --capture server/tests/fixtures/real_pages/captures/2026-08-01-policy-probe.json --scores server/tests/fixtures/real_pages/captures/2026-08-01-manual-scores.json --out .tmp-real-pages/manual-review.json
 ```
 
-Worklog phải có ba phần `telemetry_validation`, `policy_probe`, `manual_review`, và decision đúng một trong `selected`, `blocked`, `no_context_headroom`, `inconclusive` kèm reason. Nếu `no_context_headroom`, ghi rõ batching không được claim cải thiện chất lượng; reading order vẫn là correctness task của Spec B.
+Ráp worklog hoàn chỉnh với đúng ba phần: `telemetry_validation` từ browser evidence đã review, `policy_probe` từ raw capture, và `manual_review` bằng đúng nội dung `.tmp-real-pages/manual-review.json`. Decision phải đúng một trong `selected`, `blocked`, `no_context_headroom`, `inconclusive` kèm reason. Nếu `no_context_headroom`, ghi rõ batching không được claim cải thiện chất lượng; reading order vẫn là correctness task của Spec B.
 
 - [ ] **Step 6: Validate artifact và commit bằng chứng**
 
 Run:
 
 ```powershell
-& 'D:\MangaTranslator\venv\Scripts\python.exe' -m server.run_real_page_probe evaluate --manifest server/tests/fixtures/real_pages/manifest.json --capture server/tests/fixtures/real_pages/captures/2026-08-01-policy-probe.json --scores server/tests/fixtures/real_pages/captures/2026-08-01-manual-scores.json --out .tmp-real-pages/reproduced-worklog.json
-git diff --no-index docs/superpowers/worklogs/2026-08-01-real-page-quality-baseline.json .tmp-real-pages/reproduced-worklog.json
+& 'D:\MangaTranslator\venv\Scripts\python.exe' -m server.run_real_page_probe evaluate --manifest server/tests/fixtures/real_pages/manifest.json --capture server/tests/fixtures/real_pages/captures/2026-08-01-policy-probe.json --scores server/tests/fixtures/real_pages/captures/2026-08-01-manual-scores.json --out .tmp-real-pages/reproduced-manual-review.json
+& 'D:\MangaTranslator\venv\Scripts\python.exe' -c "import json; from pathlib import Path; worklog=json.loads(Path('docs/superpowers/worklogs/2026-08-01-real-page-quality-baseline.json').read_text(encoding='utf-8')); reproduced=json.loads(Path('.tmp-real-pages/reproduced-manual-review.json').read_text(encoding='utf-8')); assert worklog['manual_review'] == reproduced"
 ```
 
-Expected: evaluator output giống nhau ngoài field timestamp được đọc từ capture, không sinh timestamp mới. Xóa `.tmp-real-pages`; commit:
+Expected: `manual_review` tái lập giống hệt; `captured_at` được đọc từ capture, không sinh timestamp mới. Xóa `.tmp-real-pages`; commit:
 
 ```powershell
 git add docs/superpowers/worklogs/2026-08-01-real-page-quality-baseline.json server/tests/fixtures/real_pages/captures/2026-08-01-policy-probe.json server/tests/fixtures/real_pages/captures/2026-08-01-manual-scores.json
