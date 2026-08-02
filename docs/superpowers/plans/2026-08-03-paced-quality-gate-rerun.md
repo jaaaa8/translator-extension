@@ -282,6 +282,7 @@ Run:
 & 'D:\MangaTranslator\venv\Scripts\python.exe' -m pytest server/tests/test_real_page_quality.py -q
 $env:GEMINI_API_KEY=''
 & 'D:\MangaTranslator\venv\Scripts\python.exe' -m server.run_real_page_probe run --help
+Remove-Item Env:\GEMINI_API_KEY -ErrorAction SilentlyContinue
 ```
 
 Expected: toàn bộ `test_real_page_quality.py` PASS; help có `--call-delay-seconds` và không khởi tạo Gemini.
@@ -309,7 +310,7 @@ Expected: Python full suite PASS với số mới `188 + N` được đọc từ
 
 - [ ] **Step 11: Cập nhật regression handoff bằng số đo thật**
 
-Dùng `apply_patch` sửa `work-flow.md:63`, thay `188 passed` bằng đúng số từ Step 10. Giữ nguyên warning count theo output thực; không dự đoán trước con số.
+Dùng `apply_patch` sửa `work-flow.md:63`, thay `188 passed` bằng đúng số từ Step 10. Giữ nguyên warning count theo output thực; không dự đoán trước con số. Đồng thời thay hai dòng PowerShell trích `telemetry_validation.baseline` tại `work-flow.md:86-87` bằng cùng lệnh Python ghi UTF-8 không BOM ở Task 2 Step 2; giữ nguyên đường dẫn scratch và lệnh replay hiện có.
 
 - [ ] **Step 12: Audit diff trước commit**
 
@@ -356,18 +357,18 @@ Chỉ chạy sau khi người dùng PASS Task 1:
 $capturePath = 'server/tests/fixtures/real_pages/captures/2026-08-03-policy-probe-paced.json'
 if (Test-Path $capturePath) { throw "Capture path already exists; do not overwrite or rerun" }
 if (git status --porcelain) { throw "Worktree must be clean before capture" }
+& 'D:\MangaTranslator\venv\Scripts\python.exe' -c "from server import config; assert config.GEMINI_API_KEY"
 git log -1 --oneline
 ```
 
-Expected: path chưa tồn tại, worktree sạch, HEAD là commit code đã review.
+Expected: path chưa tồn tại, worktree sạch, key được nạp từ môi trường hoặc `.env`, HEAD là commit code đã review.
 
 - [ ] **Step 2: Trích baseline cũ mà không chạy browser**
 
 ```powershell
 $baselinePath = '.tmp-real-pages/2026-08-01-browser-baseline.json'
 New-Item -ItemType Directory -Force (Split-Path $baselinePath) | Out-Null
-$baseline = (Get-Content -Raw -Encoding utf8 docs/superpowers/worklogs/2026-08-01-real-page-quality-baseline.json | ConvertFrom-Json).telemetry_validation.baseline
-$baseline | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8 $baselinePath
+& 'D:\MangaTranslator\venv\Scripts\python.exe' -c "import json,pathlib; w=json.loads(pathlib.Path('docs/superpowers/worklogs/2026-08-01-real-page-quality-baseline.json').read_text(encoding='utf-8')); pathlib.Path('.tmp-real-pages/2026-08-01-browser-baseline.json').write_text(json.dumps(w['telemetry_validation']['baseline'], ensure_ascii=False), encoding='utf-8')"
 ```
 
 Run offline validation trước khi gọi Gemini:
@@ -386,7 +387,7 @@ $capturePath = 'server/tests/fixtures/real_pages/captures/2026-08-03-policy-prob
 & 'D:\MangaTranslator\venv\Scripts\python.exe' -m server.run_real_page_probe run --manifest server/tests/fixtures/real_pages/manifest.json --baseline $baselinePath --out $capturePath --attempts 3 --call-delay-seconds 10
 ```
 
-Expected: command hoàn tất sau khoảng 13–14 phút và ghi đúng một file. Nếu call lỗi, runner vẫn hoàn tất đủ attempt; không chạy lại command.
+Expected: command hoàn tất sau khoảng 13–14 phút và ghi đúng một file. Nếu call lỗi, runner vẫn hoàn tất đủ attempt; không chạy lại command. Stopping rule này chỉ có hiệu lực sau khi run đã thực sự phát Gemini call; lỗi preflight trước network phải được sửa trước khi bắt đầu run duy nhất.
 Giữ process hiện hành và báo tiến độ tối đa mỗi 60 giây; không restart chỉ vì chưa có output trung gian.
 
 - [ ] **Step 4: Validate schema, provenance, call count và pacing**
