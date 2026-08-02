@@ -57,23 +57,25 @@ def prompt_items(page):
 
 
 def _validate_baseline(items, baseline_batches):
-    if not isinstance(baseline_batches, list) or not all(isinstance(batch, list) and batch for batch in baseline_batches):
-        raise ValueError("baseline batches khÃ´ng há»£p lá»‡")
+    if not isinstance(baseline_batches, list) or not baseline_batches or not all(
+        isinstance(batch, list) and batch for batch in baseline_batches
+    ):
+        raise ValueError("baseline batches không hợp lệ")
     baseline_ids = [item_id for batch in baseline_batches for item_id in batch]
     item_ids = [item["id"] for item in items]
     if len(baseline_ids) != len(set(baseline_ids)) or set(baseline_ids) != set(item_ids):
-        raise ValueError("baseline ids khÃ´ng khá»›p manifest")
+        raise ValueError("baseline ids không khớp manifest")
 
 
 def policy_batches(page, arm, baseline_batches):
     items = prompt_items(page)
     items_by_id = {item["id"]: item for item in items}
     if len(items_by_id) != len(items):
-        raise ValueError("fixture block id trÃ¹ng")
+        raise ValueError("fixture block id trùng")
     if arm == "full_page":
         return [sorted(items, key=lambda item: item["reading_order"])]
     if arm not in {"batch_control", "ordered_microbatch"}:
-        raise ValueError(f"quality arm khÃ´ng há»£p lá»‡: {arm}")
+        raise ValueError(f"quality arm không hợp lệ: {arm}")
     _validate_baseline(items, baseline_batches)
     if arm == "batch_control":
         return [[items_by_id[item_id] for item_id in batch] for batch in baseline_batches]

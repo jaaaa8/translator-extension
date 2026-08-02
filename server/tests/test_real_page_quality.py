@@ -170,6 +170,21 @@ def test_quality_probe_classifies_gemini_429_as_rate_limited():
     } == {("rate_limited", "rate_limited")}
 
 
+@pytest.mark.parametrize(
+    ("baseline", "message"),
+    [
+        ([], "baseline batches không hợp lệ"),
+        ([["b3"], ["b1", "b1"]], "baseline ids không khớp manifest"),
+    ],
+)
+def test_quality_probe_rejects_invalid_baseline_before_calling_generate(baseline, message):
+    def generate(_, __):
+        pytest.fail("generate must not be called for an invalid baseline")
+
+    with pytest.raises(ValueError, match=message):
+        run_quality_probe({"fixtures": [_policy_page()]}, {"page-1": baseline}, generate, attempts=1)
+
+
 def test_preview_latency_is_rejected_until_a_future_gate_selects_full_page(capsys):
     with pytest.raises(SystemExit):
         run_probe_main(["--manifest", "x", "--baseline", "x", "--out", "x", "--preview-latency"])
