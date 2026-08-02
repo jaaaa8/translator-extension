@@ -462,8 +462,6 @@ def evaluate_gate(manifest, capture, manual_scores):
             page_result[page_id]["arms"][arm] = arm_page
 
     for arm in QUALITY_ARMS[1:]:
-        if arm_result[arm]["status"] == "inconclusive":
-            continue
         for page_id in pages:
             keys = [
                 (page_id, arm, attempt)
@@ -472,10 +470,14 @@ def evaluate_gate(manifest, capture, manual_scores):
             ]
             arm_scores = [scores[key] for key in keys]
             if any(score["critical_error"] for score in arm_scores):
-                arm_result[arm]["status"] = "blocked"
+                if arm_result[arm]["status"] != "inconclusive":
+                    arm_result[arm]["status"] = "blocked"
                 arm_result[arm]["reasons"].append(f"{page_id}: critical_error")
-            if any(statistics.median(score[field] for score in arm_scores) == 0 for field in SAFETY_FIELDS):
-                arm_result[arm]["status"] = "blocked"
+            if arm_scores and any(
+                statistics.median(score[field] for score in arm_scores) == 0 for field in SAFETY_FIELDS
+            ):
+                if arm_result[arm]["status"] != "inconclusive":
+                    arm_result[arm]["status"] = "blocked"
                 arm_result[arm]["reasons"].append(f"{page_id}: safety median 0")
 
     if arm_result["batch_control"]["status"] == "inconclusive":

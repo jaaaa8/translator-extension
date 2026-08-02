@@ -498,6 +498,40 @@ def test_blocked_arm_reports_safety_failures_from_every_page():
     ]
 
 
+def test_inconclusive_arm_still_reports_observed_critical_errors():
+    manifest, capture, scores = _evaluator_case("inconclusive")
+    score = next(
+        row
+        for row in scores
+        if row["page_id"] == "s-manga_ja_2"
+        and row["arm"] == "ordered_microbatch"
+        and row["attempt"] == 1
+    )
+    score["critical_error"] = True
+
+    arm = evaluate_gate(manifest, capture, scores)["arms"]["ordered_microbatch"]
+
+    assert arm == {
+        "status": "inconclusive",
+        "reasons": [
+            "s-manga_ja_1: dưới hai response hợp lệ",
+            "s-manga_ja_2: critical_error",
+        ],
+    }
+
+
+def test_inconclusive_arm_allows_pages_with_no_valid_responses():
+    manifest, capture, scores = _evaluator_case("pt_without_scores")
+
+    result = evaluate_gate(manifest, capture, scores)
+
+    assert result["decision"] == "inconclusive"
+    assert result["arms"]["ordered_microbatch"] == {
+        "status": "inconclusive",
+        "reasons": ["mangadex_pt: dưới hai response hợp lệ"],
+    }
+
+
 @pytest.mark.parametrize(
     ("name", "mutate", "message"),
     [
