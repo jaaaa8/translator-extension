@@ -50,24 +50,44 @@ Prewarm uses the lowest scheduler tier, performs OCR only, and does not render.
 
 ## 2026-08-01 — Telemetry và real-page quality gate
 
-`scope_done.page_metrics` có một row cho mỗi job. Các mốc stage (`queue_wait_ms`,
-`first_ocr_ms`, `ocr_done_ms`, `first_translation_ms`, `final_translation_ms`,
-`first_overlay_ms`, `total_ms`) là elapsed từ lúc producer nhận job; `accepted_offset_ms`
-là offset producer-accepted so với lúc scope nhận request. `translation_batches[].duration_ms`
-là duration của từng request extension → `/translate-items`. Stage không chạy phải giữ
-`null`, không thay bằng `0`; aggregate scope chỉ dùng fallback `0` cho `fetch_ms`/
-`analysis_ms` khi không có page row đo được.
+`scope_done.page_metrics` có một row cho mỗi job. `fetch_ms`, `analysis_ms` và
+`translation_batches[].duration_ms` là duration đo tại stage/call. Các mark còn lại
+(`queue_wait_ms`, `first_ocr_ms`, `ocr_done_ms`, `first_translation_ms`,
+`final_translation_ms`, `total_ms`) là elapsed từ lúc producer nhận job. Riêng
+`first_overlay_ms` được đo ở content từ lúc scope bắt đầu. `accepted_offset_ms` là
+producer-accepted trừ scope-accepted, nên có thể âm khi scope đến sau dùng chung producer;
+producer-relative overlay xấp xỉ `first_overlay_ms - accepted_offset_ms`, với sai số IPC và
+MV3 wake. Stage không chạy phải giữ `null`, không thay bằng `0`; aggregate scope chỉ dùng
+fallback `0` cho `fetch_ms`/`analysis_ms` khi không có page row đo được.
 
 Regression handoff hiện tại: Python suite `server/tests` có 183 passed (3 warning dependency)
 và 9 JS test file có exit 0; đây là automated coverage, không thay thế evidence browser/Gemini bên dưới.
 
-Fixture canonical được serve cục bộ tại `127.0.0.1:8000`; mở trang fixture bằng Chrome
-với extension đã cài, thực hiện đúng một popup action cho cold/warm và lấy `page_metrics`
-từ service-worker runtime sample. Baseline `translation_batches[].block_ids` của cold run
-được ghép một-một với bbox fixture. Capture Gemini dùng runner
-`server.run_real_page_probe run` với manifest và baseline đã chọn; evaluate offline dùng
-`server.run_real_page_probe evaluate --manifest ... --capture ... --scores ... --out ...`.
-Không dùng evaluator để gọi Gemini.
+Serve fixture canonical tại `127.0.0.1:8000`:
+
+```powershell
+& 'D:\MangaTranslator\venv\Scripts\python.exe' -m http.server 8000 --directory server/tests/fixtures/real_pages
+```
+
+Mở trang fixture bằng Chrome với extension đã cài, thực hiện đúng một popup action cho
+cold/warm và lấy `page_metrics` từ service-worker runtime sample. Baseline
+`translation_batches[].block_ids` của cold run được ghép một-một với bbox fixture. Để
+replay capture, trích baseline đã lưu trong worklog vào scratch ignored rồi chạy runner
+(lệnh này gọi Gemini):
+
+```powershell
+$baselinePath = '.tmp-real-pages/2026-08-01-browser-baseline.json'
+New-Item -ItemType Directory -Force (Split-Path $baselinePath) | Out-Null
+$baseline = (Get-Content -Raw docs/superpowers/worklogs/2026-08-01-real-page-quality-baseline.json | ConvertFrom-Json).telemetry_validation.baseline
+$baseline | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8 $baselinePath
+& 'D:\MangaTranslator\venv\Scripts\python.exe' -m server.run_real_page_probe run --manifest server/tests/fixtures/real_pages/manifest.json --baseline $baselinePath --out .tmp-real-pages/2026-08-01-policy-probe.json --attempts 3
+```
+
+Evaluate capture offline, không gọi Gemini:
+
+```powershell
+& 'D:\MangaTranslator\venv\Scripts\python.exe' -m server.run_real_page_probe evaluate --manifest server/tests/fixtures/real_pages/manifest.json --capture server/tests/fixtures/real_pages/captures/2026-08-01-policy-probe.json --scores server/tests/fixtures/real_pages/captures/2026-08-01-manual-scores.json --out .tmp-real-pages/2026-08-01-policy-evaluation.json
+```
 
 Worklog `docs/superpowers/worklogs/2026-08-01-real-page-quality-baseline.json` là nguồn
 quyết định hiện tại: real-browser telemetry cold/warm đã chạy; detector/OCR transcript và
@@ -79,8 +99,9 @@ hay sửa overlay Spec C trong gate này.
 
 ### Cổng chuyển giao Spec B/C
 
-Chỉ khi có policy thắng, Spec B mới được đổi production `/translate-items`: prompt item
-phải mang đúng allowlist `id`, `text`, `reading_order`, `bbox` và page dimensions như
-`comic-page-eval-v1`; prompt version, policy version và cache key phải đổi cùng contract.
+Chỉ khi có policy thắng, Spec B mới được đổi production `/translate-items`: mỗi prompt item
+phải có đúng allowlist `id`, `text`, `reading_order`, `bbox`; width/height là page context
+như `comic-page-eval-v1`, không nằm trong item. Prompt version, policy version và cache key
+phải đổi cùng contract.
 Đây là việc Spec B, không được đưa vào commit telemetry này. Spec C vẫn sở hữu overlap,
 crop che chữ, clipping, erasure/inpainting và semantics `partial`/popup.
