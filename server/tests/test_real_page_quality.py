@@ -349,6 +349,39 @@ def test_capture_validator_requires_exact_metadata_fields():
     assert CAPTURE_METADATA_FIELDS == ("commit", "device", "model", "temperature")
 
 
+def test_capture_validator_rejects_boolean_schema_version():
+    manifest, capture, _ = _evaluator_case("pt")
+    capture["schema_version"] = True
+
+    with pytest.raises(ValueError, match="schema"):
+        validate_capture(manifest, capture)
+
+
+def test_capture_validator_rejects_boolean_attempt():
+    manifest, capture, _ = _evaluator_case("pt")
+    capture["attempts"][0]["attempt"] = True
+
+    with pytest.raises(ValueError, match="attempt key"):
+        validate_capture(manifest, capture)
+
+
+@pytest.mark.parametrize("fixture_block_ids", [[{}], [[]]])
+def test_capture_validator_rejects_non_string_fixture_block_ids(fixture_block_ids):
+    manifest, capture, _ = _evaluator_case("pt")
+    capture["attempts"][0]["calls"][0]["fixture_block_ids"] = fixture_block_ids
+
+    with pytest.raises(ValueError, match="fixture_block_ids"):
+        validate_capture(manifest, capture)
+
+
+def test_manual_score_validator_rejects_boolean_attempt_before_membership_lookup():
+    manifest, capture, scores = _evaluator_case("pt")
+    scores[0]["attempt"] = True
+
+    with pytest.raises(ValueError, match="manual score key"):
+        evaluate_gate(manifest, capture, scores)
+
+
 @pytest.mark.parametrize("name", ["missing", "duplicate", "invented", "empty_translation"])
 def test_capture_validator_rejects_invalid_response_membership(name):
     manifest, capture, error = _invalid_capture(name)

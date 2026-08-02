@@ -227,7 +227,7 @@ def validate_capture(manifest, capture):
         "attempts",
         "metadata",
     }
-    if set(capture) != required or capture["schema_version"] != 1:
+    if set(capture) != required or type(capture["schema_version"]) is not int or capture["schema_version"] != 1:
         _capture_error("schema")
     if capture["prompt_version"] != PROMPT_VERSION or capture["policy_version"] != POLICY_VERSION:
         _capture_error("prompt/policy version")
@@ -260,8 +260,10 @@ def validate_capture(manifest, capture):
         if not isinstance(row, dict) or set(row) != {"page_id", "arm", "attempt", "calls", "responses"}:
             _capture_error("attempt schema")
         page_id, arm, attempt = row["page_id"], row["arm"], row["attempt"]
+        if type(attempt) is not int:
+            _capture_error("attempt key")
         actual_rows.append((page_id, arm, attempt))
-        if page_id not in pages or arm not in QUALITY_ARMS or not isinstance(attempt, int):
+        if page_id not in pages or arm not in QUALITY_ARMS:
             _capture_error("attempt key")
         if not isinstance(row["calls"], list) or not row["calls"] or not isinstance(row["responses"], dict):
             _capture_error("attempt payload")
@@ -278,7 +280,9 @@ def validate_capture(manifest, capture):
             if type(call["batch_id"]) is not int or call["batch_id"] != batch_id:
                 _capture_error("batch_id")
             ids = call["fixture_block_ids"]
-            if not isinstance(ids, list) or len(ids) != len(set(ids)):
+            if not isinstance(ids, list) or not all(_valid_text(item_id) for item_id in ids):
+                _capture_error("fixture_block_ids")
+            if len(ids) != len(set(ids)):
                 _capture_error("duplicate fixture block id")
             if ids != [item["id"] for item in batch]:
                 _capture_error("call membership")
@@ -341,13 +345,15 @@ def _validate_scores(manifest, valid_attempts, manual_scores):
     for score in manual_scores:
         if not isinstance(score, dict) or set(score) != fields:
             raise ValueError("manual score schema không hợp lệ")
+        if type(score["attempt"]) is not int:
+            raise ValueError("manual score key không hợp lệ")
         key = _score_key(score)
         if key in rows:
             raise ValueError("manual score duplicate row key")
         if key not in valid_attempts:
             raise ValueError("manual score không có valid response")
         page = pages.get(score["page_id"])
-        if page is None or score["arm"] not in QUALITY_ARMS or not isinstance(score["attempt"], int):
+        if page is None or score["arm"] not in QUALITY_ARMS:
             raise ValueError("manual score key không hợp lệ")
         if not isinstance(score["critical_error"], bool) or not all(
             _valid_text(score[field]) for field in ("reviewer", "note")
