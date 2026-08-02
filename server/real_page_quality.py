@@ -1,5 +1,7 @@
 import hashlib
 import json
+import math
+import statistics
 import time
 from pathlib import Path
 
@@ -34,6 +36,9 @@ CANONICAL_IMAGES = {
 QUALITY_ARMS = ("batch_control", "ordered_microbatch", "full_page")
 PROMPT_VERSION = "comic-page-eval-v1"
 POLICY_VERSION = "real-page-policy-v1"
+CAPTURE_METADATA_FIELDS = ("commit", "device", "model", "temperature")
+RUBRIC_FIELDS = ("correctness", "terms", "pronouns", "tone", "coherence", "conciseness")
+SAFETY_FIELDS = ("correctness", "tone", "conciseness")
 
 
 def load_manifest(path):
@@ -172,6 +177,276 @@ def build_capture(manifest, baseline, rows, metadata):
         "attempts": rows,
         "metadata": dict(metadata),
     }
+
+
+def context_score(score):
+    return sum(score[field] for field in ("terms", "pronouns", "coherence"))
+
+
+def _capture_error(message):
+    raise ValueError(f"capture không hợp lệ: {message}")
+
+
+def _capture_pages(manifest):
+    pages = source_pages(manifest)
+    if not pages:
+        _capture_error("manifest không có source page")
+    return {page["id"]: page for page in pages}
+
+
+def _expected_ids(page):
+    regions = sorted(page["regions"], key=lambda region: region["reading_order"])
+    return [region["fixture_block_id"] for region in regions]
+
+
+def _valid_capture_attempt(page, row):
+    return all(call["status"] == "success" for call in row["calls"]) and set(
+        row["responses"]
+    ) == set(_expected_ids(page))
+
+
+def validate_capture(manifest, capture):
+    """Validate deterministic capture provenance and return valid attempt keys."""
+    if not isinstance(capture, dict):
+        _capture_error("schema")
+    required = {
+        "schema_version",
+        "prompt_version",
+        "policy_version",
+        "fixture_sha256",
+        "baseline",
+        "attempts",
+        "metadata",
+    }
+    if set(capture) != required or capture["schema_version"] != 1:
+        _capture_error("schema")
+    if capture["prompt_version"] != PROMPT_VERSION or capture["policy_version"] != POLICY_VERSION:
+        _capture_error("prompt/policy version")
+    pages = _capture_pages(manifest)
+    expected_hashes = {page_id: page.get("sha256") for page_id, page in pages.items()}
+    if capture["fixture_sha256"] != expected_hashes:
+        _capture_error("fixture sha256")
+    metadata = capture["metadata"]
+    if not isinstance(metadata, dict) or set(metadata) != set(CAPTURE_METADATA_FIELDS):
+        _capture_error("metadata")
+    if not all(isinstance(metadata[field], str) and metadata[field].strip() for field in CAPTURE_METADATA_FIELDS[:3]):
+        _capture_error("metadata")
+    temperature = metadata["temperature"]
+    if not isinstance(temperature, (int, float)) or isinstance(temperature, bool) or not math.isfinite(temperature):
+        _capture_error("metadata")
+    if not isinstance(capture["baseline"], dict) or set(capture["baseline"]) != set(pages):
+        _capture_error("baseline")
+    if not isinstance(capture["attempts"], list):
+        _capture_error("attempts")
+
+    expected_rows = [
+        (page_id, arm, attempt)
+        for page_id in pages
+        for arm in QUALITY_ARMS
+        for attempt in range(1, 4)
+    ]
+    actual_rows = []
+    valid = set()
+    for row in capture["attempts"]:
+        if not isinstance(row, dict) or set(row) != {"page_id", "arm", "attempt", "calls", "responses"}:
+            _capture_error("attempt schema")
+        page_id, arm, attempt = row["page_id"], row["arm"], row["attempt"]
+        actual_rows.append((page_id, arm, attempt))
+        if page_id not in pages or arm not in QUALITY_ARMS or not isinstance(attempt, int):
+            _capture_error("attempt key")
+        if not isinstance(row["calls"], list) or not row["calls"] or not isinstance(row["responses"], dict):
+            _capture_error("attempt payload")
+        page = pages[page_id]
+        expected_batches = policy_batches(page, arm, capture["baseline"][page_id])
+        if len(row["calls"]) != len(expected_batches):
+            _capture_error("call membership")
+        seen_ids = []
+        for call, batch in zip(row["calls"], expected_batches):
+            if not isinstance(call, dict) or not {
+                "batch_id", "fixture_block_ids", "started", "duration", "status", "error_code"
+            } <= set(call):
+                _capture_error("call schema")
+            ids = call["fixture_block_ids"]
+            if not isinstance(ids, list) or len(ids) != len(set(ids)):
+                _capture_error("duplicate fixture block id")
+            if ids != [item["id"] for item in batch]:
+                _capture_error("call membership")
+            if call["status"] not in {"success", "failed", "rate_limited", "invalid_response"}:
+                _capture_error("call status")
+            if not isinstance(call["duration"], (int, float)) or call["duration"] < 0:
+                _capture_error("call duration")
+            seen_ids.extend(ids)
+        if len(seen_ids) != len(set(seen_ids)):
+            _capture_error("duplicate fixture block id")
+        expected_ids = set(_expected_ids(page))
+        if not set(row["responses"]) <= expected_ids:
+            _capture_error("translation ids")
+        if not all(_valid_text(value) for value in row["responses"].values()):
+            _capture_error("empty translation")
+        if all(call["status"] == "success" for call in row["calls"]) and set(row["responses"]) != expected_ids:
+            _capture_error("translation ids")
+        if _valid_capture_attempt(page, row):
+            valid.add((page_id, arm, attempt))
+    if actual_rows != expected_rows:
+        _capture_error("attempt order")
+    return {"valid_attempts": valid}
+
+
+def _score_key(row):
+    return row["page_id"], row["arm"], row["attempt"]
+
+
+def _validate_scores(manifest, valid_attempts, manual_scores):
+    if not isinstance(manual_scores, list):
+        raise ValueError("manual scores không hợp lệ")
+    pages = _capture_pages(manifest)
+    fields = {
+        "page_id",
+        "arm",
+        "attempt",
+        *RUBRIC_FIELDS,
+        "critical_error",
+        "reviewer",
+        "note",
+        "term_forms",
+    }
+    rows = {}
+    surface_forms = {}
+    for score in manual_scores:
+        if not isinstance(score, dict) or set(score) != fields:
+            raise ValueError("manual score schema không hợp lệ")
+        key = _score_key(score)
+        if key in rows:
+            raise ValueError("manual score duplicate row key")
+        if key not in valid_attempts:
+            raise ValueError("manual score không có valid response")
+        page = pages.get(score["page_id"])
+        if page is None or score["arm"] not in QUALITY_ARMS or not isinstance(score["attempt"], int):
+            raise ValueError("manual score key không hợp lệ")
+        if not isinstance(score["critical_error"], bool) or not all(
+            _valid_text(score[field]) for field in ("reviewer", "note")
+        ):
+            raise ValueError("manual score reviewer/note không hợp lệ")
+        is_pt = page["src_lang"] == "pt"
+        if is_pt and page["reading_direction"] != "rtl":
+            raise ValueError("PT reading_direction phải là rtl")
+        for field in RUBRIC_FIELDS:
+            value = score[field]
+            if is_pt and field in {"terms", "pronouns", "coherence"}:
+                if value != "not_applicable":
+                    raise ValueError("PT context score phải not_applicable")
+            elif not isinstance(value, int) or isinstance(value, bool) or value not in {0, 1, 2}:
+                raise ValueError("rubric score phải từ 0 đến 2")
+        groups = page.get("term_groups", [])
+        forms = score["term_forms"]
+        expected_forms = {group["canonical"] for group in groups}
+        if not isinstance(forms, dict) or set(forms) != expected_forms or not all(
+            _valid_text(value) for value in forms.values()
+        ):
+            raise ValueError("term forms không hợp lệ")
+        for canonical, value in forms.items():
+            form_key = (score["page_id"], score["arm"], canonical)
+            if form_key in surface_forms and surface_forms[form_key] != value:
+                raise ValueError("term surface form xung đột")
+            surface_forms[form_key] = value
+        rows[key] = score
+    if set(rows) != valid_attempts:
+        raise ValueError("manual score thiếu valid response")
+    return rows
+
+
+def _length_metrics(page, rows):
+    translated = sum(len(text) for row in rows for text in row["responses"].values())
+    source = sum(len(region["src_text"]) for region in page["regions"]) * len(rows)
+    area = sum(region["bbox"][2] * region["bbox"][3] for region in page["regions"])
+    return {
+        "translated_chars": translated,
+        "source_chars": source,
+        "length_ratio": translated / source if source else None,
+        "chars_per_kpx": translated / (area * len(rows) / 1000) if area and rows else None,
+        "warning_only": True,
+    }
+
+
+def _candidate_beats(left, right, page_ids):
+    deltas = [left[page_id] - right[page_id] for page_id in page_ids]
+    return min(deltas) >= -1 and max(deltas) >= 2
+
+
+def evaluate_gate(manifest, capture, manual_scores):
+    validation = validate_capture(manifest, capture)
+    pages = _capture_pages(manifest)
+    valid_attempts = validation["valid_attempts"]
+    scores = _validate_scores(manifest, valid_attempts, manual_scores)
+    attempts = {_score_key(row): row for row in capture["attempts"]}
+    japanese_pages = [page_id for page_id, page in pages.items() if page["src_lang"] != "pt"]
+    page_result = {}
+    medians = {arm: {} for arm in QUALITY_ARMS}
+    arm_result = {arm: {"status": "ready", "reasons": []} for arm in QUALITY_ARMS}
+
+    for page_id, page in pages.items():
+        page_result[page_id] = {"arms": {}, "context_score": "not_applicable" if page["src_lang"] == "pt" else None}
+        for arm in QUALITY_ARMS:
+            keys = [(page_id, arm, attempt) for attempt in range(1, 4) if (page_id, arm, attempt) in valid_attempts]
+            rows = [attempts[key] for key in keys]
+            arm_page = {"valid_responses": len(keys), "length_metrics": _length_metrics(page, rows)}
+            if len(keys) < 2:
+                arm_result[arm]["status"] = "inconclusive"
+                arm_result[arm]["reasons"].append(f"{page_id}: dưới hai response hợp lệ")
+            if page["src_lang"] != "pt" and keys:
+                medians[arm][page_id] = statistics.median(context_score(scores[key]) for key in keys)
+                arm_page["context_score"] = medians[arm][page_id]
+            if arm == "batch_control" and page["src_lang"] != "pt":
+                page_result[page_id]["context_score"] = medians[arm].get(page_id)
+            page_result[page_id]["arms"][arm] = arm_page
+
+    for arm in QUALITY_ARMS[1:]:
+        if arm_result[arm]["status"] == "inconclusive":
+            continue
+        for page_id in pages:
+            keys = [(page_id, arm, attempt) for attempt in range(1, 4)]
+            arm_scores = [scores[key] for key in keys]
+            if any(score["critical_error"] for score in arm_scores):
+                arm_result[arm].update(status="blocked", reasons=[f"{page_id}: critical_error"])
+                break
+            if any(statistics.median(score[field] for score in arm_scores) == 0 for field in SAFETY_FIELDS):
+                arm_result[arm].update(status="blocked", reasons=[f"{page_id}: safety median 0"])
+                break
+
+    if arm_result["batch_control"]["status"] == "inconclusive":
+        return {"decision": "inconclusive", "reason": "batch_control không đủ response hợp lệ", "pages": page_result, "arms": arm_result}
+    if all(medians["batch_control"].get(page_id, -1) >= 5 for page_id in japanese_pages):
+        return {"decision": "no_context_headroom", "reason": "batch_control context median >= 5 trên mọi spread", "pages": page_result, "arms": arm_result}
+
+    passed = []
+    for arm in QUALITY_ARMS[1:]:
+        if arm_result[arm]["status"] != "ready":
+            continue
+        if _candidate_beats(medians[arm], medians["batch_control"], japanese_pages):
+            arm_result[arm].update(status="passed")
+            passed.append(arm)
+        else:
+            arm_result[arm].update(status="blocked", reasons=["không đạt ngưỡng context"])
+    if not passed:
+        decision = "inconclusive" if any(arm_result[arm]["status"] == "inconclusive" for arm in QUALITY_ARMS[1:]) else "blocked"
+        return {"decision": decision, "reason": "không có candidate đạt gate", "pages": page_result, "arms": arm_result}
+    if len(passed) == 1:
+        return {"decision": "selected", "selected": passed[0], "reason": "candidate duy nhất đạt gate", "pages": page_result, "arms": arm_result}
+
+    left, right = passed
+    if _candidate_beats(medians[left], medians[right], japanese_pages):
+        selected, reason = left, "candidate thắng context rõ"
+    elif _candidate_beats(medians[right], medians[left], japanese_pages):
+        selected, reason = right, "candidate thắng context rõ"
+    else:
+        costs = {}
+        for arm in passed:
+            rows = [attempts[key] for key in valid_attempts if key[1] == arm]
+            costs[arm] = (sum(len(row["calls"]) for row in rows), sum(call["duration"] for row in rows for call in row["calls"]))
+        if costs[left] == costs[right]:
+            return {"decision": "inconclusive", "reason": "candidate hòa cả context, call và latency", "pages": page_result, "arms": arm_result}
+        selected, reason = min(costs, key=costs.get), "tie-break call rồi latency"
+    return {"decision": "selected", "selected": selected, "reason": reason, "pages": page_result, "arms": arm_result}
 
 
 def run_quality_probe(

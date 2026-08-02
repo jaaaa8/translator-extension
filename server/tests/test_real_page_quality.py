@@ -2,18 +2,23 @@ import copy
 import hashlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from server.real_page_quality import (
+    CAPTURE_METADATA_FIELDS,
     build_eval_prompt,
+    context_score,
     decode_eval_items,
+    evaluate_gate,
     load_manifest,
     match_required_regions,
     policy_batches,
     prompt_items,
     run_quality_probe,
+    validate_capture,
     validate_manifest,
 )
 from server.run_real_page_probe import main as run_probe_main
@@ -30,6 +35,87 @@ EXPECTED_IMAGES = {
     "references/s-manga_ja_overlay_1.png": "e10082842e79b116bc2e4fc3a5c354dce2f05567672c9023a15ac61fd0dd8f40",
     "references/s-manga_ja_overlay_2.png": "9e5c9c6952786e2e5c8263e46677bf14568df5a7c060b660b9501330c103c3a4",
 }
+EVALUATOR_CASES = FIXTURE_DIR / "captures" / "evaluator_cases.json"
+
+
+def _evaluator_cases():
+    return json.loads(EVALUATOR_CASES.read_text(encoding="utf-8"))
+
+
+def _evaluator_case(name):
+    data = _evaluator_cases()
+    case = data["cases"][name]
+    attempts, scores = [], []
+    for page in data["manifest"]["fixtures"]:
+        for arm in ("batch_control", "ordered_microbatch", "full_page"):
+            valid_attempts = case.get("valid_attempts", {}).get(arm, {}).get(page["id"], 3)
+            batches = [["b1"], ["b2"]] if case.get("split_batches") and arm != "full_page" else [["b1", "b2"]]
+            for attempt in range(1, 4):
+                valid = attempt <= valid_attempts
+                attempts.append(
+                    {
+                        "page_id": page["id"],
+                        "arm": arm,
+                        "attempt": attempt,
+                        "calls": [
+                            {
+                                "batch_id": 1,
+                                "fixture_block_ids": batch,
+                                "started": 0,
+                                "duration": case.get("latency", {}).get(arm, 1),
+                                "status": "success" if valid else "failed",
+                                "error_code": None if valid else "generation_error",
+                            }
+                            for batch in batches
+                        ],
+                        "responses": {"b1": "một", "b2": "hai"} if valid else {},
+                    }
+                )
+                if not valid:
+                    continue
+                values = case["scores"].get(arm, {}).get(page["id"], {})
+                scores.append(
+                    {
+                        "page_id": page["id"],
+                        "arm": arm,
+                        "attempt": attempt,
+                        "correctness": values.get("correctness", 2),
+                        "terms": values.get("terms", "not_applicable" if page["src_lang"] == "pt" else 2),
+                        "pronouns": values.get("pronouns", "not_applicable" if page["src_lang"] == "pt" else 2),
+                        "tone": values.get("tone", 2),
+                        "coherence": values.get("coherence", "not_applicable" if page["src_lang"] == "pt" else 2),
+                        "conciseness": values.get("conciseness", 2),
+                        "critical_error": [arm, page["id"], attempt] in case.get("critical_errors", []),
+                        "reviewer": "reviewer-a",
+                        "note": "fixture score",
+                        "term_forms": values.get("term_forms", {"Hero": "Anh hùng"} if page["src_lang"] == "ja" else {}),
+                    }
+                )
+    capture = {
+        "schema_version": 1,
+        "prompt_version": "comic-page-eval-v1",
+        "policy_version": "real-page-policy-v1",
+        "fixture_sha256": {page["id"]: page["sha256"] for page in data["manifest"]["fixtures"]},
+        "baseline": {page["id"]: [["b1"], ["b2"]] if case.get("split_batches") else [["b1", "b2"]] for page in data["manifest"]["fixtures"]},
+        "attempts": attempts,
+        "metadata": {"commit": "commit-x", "device": "device-x", "model": "model-x", "temperature": 0.37},
+    }
+    return data["manifest"], capture, scores
+
+
+def _invalid_capture(name):
+    manifest, capture, _ = _evaluator_case("pt")
+    case = _evaluator_cases()["invalid_captures"][name]
+    row = capture["attempts"][0]
+    if name == "missing":
+        row["responses"].pop("b2")
+    elif name == "duplicate":
+        row["calls"][0]["fixture_block_ids"] = ["b1", "b1"]
+    elif name == "invented":
+        row["responses"] = {"b1": "một", "invented": "hai"}
+    else:
+        row["responses"]["b2"] = ""
+    return manifest, capture, case["error"]
 
 
 def _policy_page():
@@ -245,6 +331,67 @@ def test_quality_probe_includes_supplied_metadata():
     }
 
 
+def test_capture_validator_requires_exact_metadata_fields():
+    manifest, capture, _ = _evaluator_case("pt")
+    capture["metadata"].pop("device")
+
+    with pytest.raises(ValueError, match="metadata"):
+        validate_capture(manifest, capture)
+
+    assert CAPTURE_METADATA_FIELDS == ("commit", "device", "model", "temperature")
+
+
+@pytest.mark.parametrize("name", ["missing", "duplicate", "invented", "empty_translation"])
+def test_capture_validator_rejects_invalid_response_membership(name):
+    manifest, capture, error = _invalid_capture(name)
+
+    with pytest.raises(ValueError, match=error):
+        validate_capture(manifest, capture)
+
+
+def test_context_score_and_offline_gate_cases():
+    manifest, capture, scores = _evaluator_case("no_headroom")
+
+    assert context_score({"terms": 2, "pronouns": 1, "coherence": 2}) == 5
+    assert evaluate_gate(manifest, capture, scores)["decision"] == "no_context_headroom"
+
+
+@pytest.mark.parametrize(
+    ("name", "decision", "selected"),
+    [
+        ("pt", "selected", "ordered_microbatch"),
+        ("candidate_critical_error", "blocked", None),
+        ("inconclusive", "inconclusive", None),
+        ("blocked_regression", "blocked", None),
+        ("tie_break_calls_then_latency", "selected", "full_page"),
+        ("tie_break_latency", "selected", "full_page"),
+    ],
+)
+def test_offline_gate_decisions_are_deterministic(name, decision, selected):
+    manifest, capture, scores = _evaluator_case(name)
+    result = evaluate_gate(manifest, capture, scores)
+
+    assert result["decision"] == decision
+    assert result.get("selected") == selected
+
+
+def test_offline_gate_marks_portuguese_context_not_applicable_and_checks_term_surfaces():
+    manifest, capture, scores = _evaluator_case("pt")
+    result = evaluate_gate(manifest, capture, scores)
+
+    assert result["pages"]["mangadex_pt"]["context_score"] == "not_applicable"
+    broken = copy.deepcopy(scores)
+    ja_scores = [score for score in broken if score["page_id"] == "s-manga_ja_1"]
+    ja_scores[0]["term_forms"] = {"Hero": "Anh hùng"}
+    ja_scores[1]["term_forms"] = {"Hero": "Hiệp sĩ"}
+    with pytest.raises(ValueError, match="term"):
+        evaluate_gate(manifest, capture, broken)
+    broken_manifest = copy.deepcopy(manifest)
+    broken_manifest["fixtures"][0]["reading_direction"] = "ltr"
+    with pytest.raises(ValueError, match="PT reading_direction"):
+        evaluate_gate(broken_manifest, capture, scores)
+
+
 def test_preview_latency_is_rejected_until_a_future_gate_selects_full_page(capsys):
     with pytest.raises(SystemExit):
         run_probe_main(["--manifest", "x", "--baseline", "x", "--out", "x", "--preview-latency"])
@@ -268,6 +415,20 @@ def test_probe_cli_creates_output_parent_before_running_probe(tmp_path, monkeypa
     monkeypatch.setattr("server.run_real_page_probe.platform.platform", lambda: "device-x")
     out = tmp_path / "new" / "captures" / "probe.json"
 
+    def fake_probe(*_, **__):
+        assert out.parent.is_dir()
+        return {
+            "schema_version": 1,
+            "prompt_version": "comic-page-eval-v1",
+            "policy_version": "real-page-policy-v1",
+            "fixture_sha256": {},
+            "baseline": {},
+            "attempts": [],
+            "metadata": {"commit": "commit-x", "device": "device-x", "model": "model-x", "temperature": 0.37},
+        }
+
+    monkeypatch.setattr("server.run_real_page_probe.run_quality_probe", fake_probe)
+
     run_probe_main(["--manifest", "manifest.json", "--baseline", "baseline.json", "--out", str(out)])
 
     capture = json.loads(out.read_text(encoding="utf-8"))
@@ -278,6 +439,46 @@ def test_probe_cli_creates_output_parent_before_running_probe(tmp_path, monkeypa
         "model": "model-x",
         "temperature": 0.37,
     }
+
+
+def test_evaluate_cli_runs_offline_without_importing_translator(tmp_path, monkeypatch):
+    manifest, capture, scores = _evaluator_case("pt")
+    manifest_path = tmp_path / "manifest.json"
+    capture_path = tmp_path / "capture.json"
+    scores_path = tmp_path / "scores.json"
+    out = tmp_path / "out" / "decision.json"
+    for path, value in ((manifest_path, manifest), (capture_path, capture), (scores_path, scores)):
+        path.write_text(json.dumps(value), encoding="utf-8")
+    monkeypatch.setitem(sys.modules, "server.translator", None)
+    monkeypatch.setattr("server.run_real_page_probe.validate_manifest", lambda _: manifest)
+
+    run_probe_main(
+        [
+            "evaluate",
+            "--manifest",
+            str(manifest_path),
+            "--capture",
+            str(capture_path),
+            "--scores",
+            str(scores_path),
+            "--out",
+            str(out),
+        ]
+    )
+
+    assert json.loads(out.read_text(encoding="utf-8"))["decision"] == "selected"
+
+
+def test_evaluate_cli_help_uses_offline_subcommand():
+    result = subprocess.run(
+        [sys.executable, "-m", "server.run_real_page_probe", "evaluate", "--help"],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+    )
+
+    assert result.returncode == 0
+    assert "--capture" in result.stdout and "--scores" in result.stdout
 
 
 def test_reviewed_manifest_and_six_canonical_images_are_valid():

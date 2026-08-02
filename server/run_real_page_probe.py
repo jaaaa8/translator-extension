@@ -2,9 +2,10 @@ import argparse
 import json
 import platform
 import subprocess
+import sys
 from pathlib import Path
 
-from .real_page_quality import load_manifest, run_quality_probe, validate_manifest
+from .real_page_quality import evaluate_gate, load_manifest, run_quality_probe, validate_manifest
 
 
 def _commit():
@@ -17,7 +18,7 @@ def _commit():
     return result.stdout.strip() if result.returncode == 0 else "unknown"
 
 
-def main(argv=None):
+def _run(argv):
     parser = argparse.ArgumentParser(description="Replay real-page translation quality policies.")
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--baseline", required=True)
@@ -52,6 +53,31 @@ def main(argv=None):
         metadata=metadata,
     )
     out_path.write_text(json.dumps(capture, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _evaluate(argv):
+    parser = argparse.ArgumentParser(description="Evaluate a captured real-page policy probe offline.")
+    parser.add_argument("--manifest", required=True)
+    parser.add_argument("--capture", required=True)
+    parser.add_argument("--scores", required=True)
+    parser.add_argument("--out", required=True)
+    args = parser.parse_args(argv)
+
+    result = evaluate_gate(
+        validate_manifest(args.manifest),
+        load_manifest(args.capture),
+        load_manifest(args.scores),
+    )
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def main(argv=None):
+    argv = list(argv) if argv is not None else sys.argv[1:]
+    if argv and argv[0] == "evaluate":
+        return _evaluate(argv[1:])
+    return _run(argv)
 
 
 if __name__ == "__main__":

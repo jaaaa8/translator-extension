@@ -272,6 +272,8 @@ Mỗi capture lưu:
 - lỗi/rate-limit;
 - không lưu API key.
 
+Capture phải có đúng bốn metadata bắt buộc: `commit`, `device`, `model` và `temperature`. `commit`/`device`/`model` là chuỗi không rỗng, `temperature` là số hữu hạn; thiếu, thừa hoặc sai kiểu làm `validate_capture` fail. Đây là trust boundary cho artifact đã commit; `run_quality_probe(metadata=None)` vẫn chỉ là helper test và không tạo artifact đủ điều kiện gate.
+
 Đối với fixture Portuguese, runner dùng `source_name` từ manifest để prompt nói `Portuguese`. Đây là probe benchmark, không tuyên bố production đã hỗ trợ `src_lang=pt`.
 
 ## 7. Chấm chất lượng
@@ -349,7 +351,7 @@ Fixture port `8000` và production OCR API port `8910` tiếp tục tách biệt
 
 ## 10. Xử lý lỗi
 
-- Gemini trả thiếu/trùng/sai ID: attempt `invalid_response`, không chấm điểm.
+- Gemini trả thiếu/trùng/sai ID, translation rỗng, hoặc response không phải chuỗi (kể cả `None`): attempt `invalid_response`, không chấm điểm.
 - Gemini 429 hoặc 502: lưu status/error code và latency; không thay bằng response của attempt khác.
 - Detector không ghép đủ required anchor: order diagnostic fail và không chạy quality probe bằng OCR live; runner vẫn có thể dùng frozen transcript để tách riêng lỗi translation.
 - OCR live khác frozen transcript: ghi diff, không tự cập nhật manifest. Việc cập nhật transcript cần review thủ công và commit riêng.
