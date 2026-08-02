@@ -299,7 +299,7 @@ Trang Portuguese chỉ chấm ba mục an toàn `Đúng nghĩa`, `Giọng/mức 
 
 `preview_then_full` không xuất hiện trong bảng chấm chất lượng; nó chỉ có record latency có điều kiện như mục 6.
 
-Worklog lưu điểm từng attempt, `context_score` hoặc `not_applicable`, ghi chú ngắn và reviewer. Không bắt buộc một bản dịch gold duy nhất vì nhiều cách dịch tự nhiên có thể cùng đúng.
+Điểm từng attempt, `context_score` hoặc `not_applicable`, ghi chú ngắn và reviewer nằm trong `captures/2026-08-01-manual-scores.json` đã commit; section `manual_review` của worklog giữ nguyên artifact evaluator. Không bắt buộc một bản dịch gold duy nhất vì nhiều cách dịch tự nhiên có thể cùng đúng.
 
 Mỗi manual score Nhật có annotation explicit `term_forms: {canonical: {fixture_block_id: target_surface_form}}`. Mỗi canonical phải có đúng các `fixture_block_ids` của term group; evaluator chuẩn hóa `strip().casefold()` và reject hơn một surface form trong chính response/attempt đó. Nó không so sánh surface form giữa các attempt, không suy đoán từ translation text và không dùng NER hay LLM judge.
 

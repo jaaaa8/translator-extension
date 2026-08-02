@@ -10,7 +10,7 @@
     "coherence": "not_applicable",
     "conciseness": 2,
     "critical_error": false,
-    "reviewer": "Codex manual reviewer - PT",
+    "reviewer": "jaa",
     "note": "b01 có lỗi gõ ‘ĐOÁT’; các câu còn lại giữ đúng nghĩa.",
     "term_forms": {}
   },
@@ -25,7 +25,7 @@
     "coherence": "not_applicable",
     "conciseness": 2,
     "critical_error": false,
-    "reviewer": "Codex manual reviewer - PT",
+    "reviewer": "jaa",
     "note": "b01 dùng ‘cô gói’ sai từ; phần còn lại đủ ID và sát nghĩa.",
     "term_forms": {}
   },
@@ -40,7 +40,7 @@
     "coherence": "not_applicable",
     "conciseness": 2,
     "critical_error": false,
-    "reviewer": "Codex manual reviewer - PT",
+    "reviewer": "jaa",
     "note": "b01 có lỗi gõ ‘ĐOÁ’; các câu còn lại giữ đúng nghĩa.",
     "term_forms": {}
   },
@@ -55,7 +55,7 @@
     "coherence": "not_applicable",
     "conciseness": 2,
     "critical_error": true,
-    "reviewer": "Codex manual reviewer - PT",
+    "reviewer": "jaa",
     "note": "b01 gọi cô gái là ‘đứa cái đó’, sai nghĩa và giọng nghiêm trọng.",
     "term_forms": {}
   },
@@ -70,7 +70,7 @@
     "coherence": "not_applicable",
     "conciseness": 2,
     "critical_error": true,
-    "reviewer": "Codex manual reviewer - PT",
+    "reviewer": "jaa",
     "note": "b01 gọi cô gái là ‘đứa cái đó’, sai nghĩa và giọng nghiêm trọng.",
     "term_forms": {}
   },
@@ -85,7 +85,7 @@
     "coherence": "not_applicable",
     "conciseness": 2,
     "critical_error": false,
-    "reviewer": "Codex manual reviewer - PT",
+    "reviewer": "jaa",
     "note": "b01 có lỗi gõ ‘ĐÚA’, khiến câu chưa tự nhiên.",
     "term_forms": {}
   },
@@ -100,7 +100,7 @@
     "coherence": "not_applicable",
     "conciseness": 2,
     "critical_error": false,
-    "reviewer": "Codex manual reviewer - PT",
+    "reviewer": "jaa",
     "note": "Đủ ID và tự nhiên; b06 ‘làm quá giới hạn’ hơi gượng.",
     "term_forms": {}
   },
@@ -115,7 +115,7 @@
     "coherence": "not_applicable",
     "conciseness": 2,
     "critical_error": false,
-    "reviewer": "Codex manual reviewer - PT",
+    "reviewer": "jaa",
     "note": "Đủ ID và tự nhiên; b06 làm nhẹ sắc thái ‘vượt quá giới hạn’.",
     "term_forms": {}
   },
@@ -130,7 +130,7 @@
     "coherence": 1,
     "conciseness": 2,
     "critical_error": true,
-    "reviewer": "Codex manual reviewer - JA1",
+    "reviewer": "jaa",
     "note": "b05 dịch sai ‘撃退’ thành ‘tiêu chuẩn hóa’; b16 làm nhẹ quy mô chi phí.",
     "term_forms": {
       "マッコイ": {
@@ -154,7 +154,7 @@
     "coherence": 1,
     "conciseness": 2,
     "critical_error": false,
-    "reviewer": "Codex manual reviewer - JA2",
+    "reviewer": "jaa",
     "note": "b17 dùng ‘hội đồng lại’, sai nghĩa ‘hợp sức lại’; mạch đoạn kết giảm.",
     "term_forms": {}
   },
@@ -169,7 +169,7 @@
     "coherence": 2,
     "conciseness": 2,
     "critical_error": false,
-    "reviewer": "Codex manual reviewer - JA2",
+    "reviewer": "jaa",
     "note": "b08 có ‘đóng lòng’ sai từ; các thoại còn lại đúng và liền mạch.",
     "term_forms": {}
   },
@@ -184,7 +184,7 @@
     "coherence": 2,
     "conciseness": 2,
     "critical_error": false,
-    "reviewer": "Codex manual reviewer - JA2",
+    "reviewer": "jaa",
     "note": "Bản dịch đúng nghĩa, giọng thoại tự nhiên và đoạn kết b16–b17 nối đúng.",
     "term_forms": {}
   },
@@ -199,7 +199,7 @@
     "coherence": 2,
     "conciseness": 2,
     "critical_error": false,
-    "reviewer": "Codex manual reviewer - JA2",
+    "reviewer": "jaa",
     "note": "Đúng nghĩa, nhất quán và hội thoại nối mạch tự nhiên.",
     "term_forms": {}
   },
@@ -214,7 +214,7 @@
     "coherence": 2,
     "conciseness": 2,
     "critical_error": false,
-    "reviewer": "Codex manual reviewer - JA2",
+    "reviewer": "jaa",
     "note": "Đúng nghĩa; cách diễn đạt ngắn gọn, phù hợp thoại truyện.",
     "term_forms": {}
   },
@@ -229,7 +229,7 @@
     "coherence": 1,
     "conciseness": 2,
     "critical_error": false,
-    "reviewer": "Codex manual reviewer - JA2",
+    "reviewer": "jaa",
     "note": "b16 diễn đạt lỗi và b17 ‘hội đồng lại’ sai nghĩa ‘hợp sức lại’, làm đoạn kết kém mạch.",
     "term_forms": {}
   },
@@ -244,7 +244,7 @@
     "coherence": 2,
     "conciseness": 2,
     "critical_error": false,
-    "reviewer": "Codex manual reviewer - JA2",
+    "reviewer": "jaa",
     "note": "Đúng nghĩa, giữ được quan hệ b16–b17 và giọng thoại tự nhiên.",
     "term_forms": {}
   }
