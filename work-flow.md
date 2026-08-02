@@ -60,8 +60,13 @@ producer-relative overlay xấp xỉ `first_overlay_ms - accepted_offset_ms`, v�
 MV3 wake. Stage không chạy phải giữ `null`, không thay bằng `0`; aggregate scope chỉ dùng
 fallback `0` cho `fetch_ms`/`analysis_ms` khi không có page row đo được.
 
-Regression handoff hiện tại: Python suite `server/tests` có 183 passed (3 warning dependency)
+Regression handoff hiện tại: Python suite `server/tests` có 188 passed (3 warning dependency)
 và 9 JS test file có exit 0; đây là automated coverage, không thay thế evidence browser/Gemini bên dưới.
+
+Lỗi Gemini/response từ `/translate-items` trả `error_code` máy đọc được:
+`rate_limited`, `invalid_response` hoặc `generation_error`. Riêng `rate_limited` dùng
+HTTP 429; hai loại còn lại dùng HTTP 502. Consumer phải phân loại từ HTTP status và
+`error_code`, không suy từ text trong `error`.
 
 Serve fixture canonical tại `127.0.0.1:8000`:
 
