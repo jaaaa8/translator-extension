@@ -3,6 +3,7 @@ import json
 import platform
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .real_page_quality import evaluate_gate, load_manifest, run_quality_probe, validate_manifest
@@ -23,14 +24,11 @@ def _run(argv):
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--baseline", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--attempts", type=int, default=3)
+    parser.add_argument("--attempts", type=int, choices=(3,), default=3)
     parser.add_argument("--preview-latency", action="store_true")
     args = parser.parse_args(argv)
     if args.preview_latency:
         parser.error("--preview-latency is unavailable until Task 6 selects full_page")
-    if args.attempts < 1:
-        parser.error("--attempts must be positive")
-
     manifest = validate_manifest(args.manifest)
     baseline = load_manifest(args.baseline)
     out_path = Path(args.out)
@@ -40,6 +38,7 @@ def _run(argv):
 
     translator = GeminiTranslator()
     metadata = {
+        "captured_at": datetime.now(timezone.utc).isoformat(),
         "commit": _commit(),
         "device": platform.platform(),
         "model": config.GEMINI_MODEL,

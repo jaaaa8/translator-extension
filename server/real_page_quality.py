@@ -3,6 +3,7 @@ import json
 import math
 import statistics
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -36,7 +37,7 @@ CANONICAL_IMAGES = {
 QUALITY_ARMS = ("batch_control", "ordered_microbatch", "full_page")
 PROMPT_VERSION = "comic-page-eval-v1"
 POLICY_VERSION = "real-page-policy-v1"
-CAPTURE_METADATA_FIELDS = ("commit", "device", "model", "temperature")
+CAPTURE_METADATA_FIELDS = ("captured_at", "commit", "device", "model", "temperature")
 RUBRIC_FIELDS = ("correctness", "terms", "pronouns", "tone", "coherence", "conciseness")
 SAFETY_FIELDS = ("correctness", "tone", "conciseness")
 
@@ -132,7 +133,9 @@ def decode_eval_items(raw, expected_ids):
         item_id = str(item["id"])
         if item_id in rows:
             raise ValueError(f"invalid_response: duplicate id: {item_id}")
-        rows[item_id] = str(item["translation"])
+        if not _valid_text(item["translation"]):
+            raise ValueError(f"invalid_response: empty translation: {item_id}")
+        rows[item_id] = item["translation"]
     if set(rows) != set(expected_ids):
         raise ValueError("invalid_response: translation id set mismatch")
     return [{"id": item_id, "translation": rows[item_id]} for item_id in expected_ids]
@@ -191,6 +194,8 @@ def _capture_pages(manifest):
     pages = source_pages(manifest)
     if not pages:
         _capture_error("manifest không có source page")
+    if any(page.get("src_lang") == "pt" and page.get("reading_direction") != "rtl" for page in pages):
+        _capture_error("PT reading_direction phải là rtl")
     return {page["id"]: page for page in pages}
 
 
@@ -212,6 +217,14 @@ def _nonnegative_number(value):
         and math.isfinite(value)
         and value >= 0
     )
+
+
+def _utc_timestamp(value):
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() == timedelta(0)
 
 
 def validate_capture(manifest, capture):
@@ -238,7 +251,9 @@ def validate_capture(manifest, capture):
     metadata = capture["metadata"]
     if not isinstance(metadata, dict) or set(metadata) != set(CAPTURE_METADATA_FIELDS):
         _capture_error("metadata")
-    if not all(isinstance(metadata[field], str) and metadata[field].strip() for field in CAPTURE_METADATA_FIELDS[:3]):
+    if not all(_valid_text(metadata[field]) for field in ("captured_at", "commit", "device", "model")):
+        _capture_error("metadata")
+    if not _utc_timestamp(metadata["captured_at"]):
         _capture_error("metadata")
     temperature = metadata["temperature"]
     if not isinstance(temperature, (int, float)) or isinstance(temperature, bool) or not math.isfinite(temperature):
@@ -268,7 +283,10 @@ def validate_capture(manifest, capture):
         if not isinstance(row["calls"], list) or not row["calls"] or not isinstance(row["responses"], dict):
             _capture_error("attempt payload")
         page = pages[page_id]
-        expected_batches = policy_batches(page, arm, capture["baseline"][page_id])
+        try:
+            expected_batches = policy_batches(page, arm, capture["baseline"][page_id])
+        except ValueError as error:
+            _capture_error(str(error))
         if len(row["calls"]) != len(expected_batches):
             _capture_error("call membership")
         seen_ids = []
@@ -339,9 +357,6 @@ def _validate_scores(manifest, valid_attempts, manual_scores):
         "term_forms",
     }
     rows = {}
-    for page in pages.values():
-        if page["src_lang"] == "pt" and page["reading_direction"] != "rtl":
-            raise ValueError("PT reading_direction phải là rtl")
     for score in manual_scores:
         if not isinstance(score, dict) or set(score) != fields:
             raise ValueError("manual score schema không hợp lệ")
@@ -416,12 +431,26 @@ def evaluate_gate(manifest, capture, manual_scores):
     medians = {arm: {} for arm in QUALITY_ARMS}
     arm_result = {arm: {"status": "ready", "reasons": []} for arm in QUALITY_ARMS}
 
+    def gate_result(decision, reason, **extra):
+        return {
+            "captured_at": capture["metadata"]["captured_at"],
+            "decision": decision,
+            **extra,
+            "reason": reason,
+            "pages": page_result,
+            "arms": arm_result,
+        }
+
     for page_id, page in pages.items():
         page_result[page_id] = {"arms": {}, "context_score": "not_applicable" if page["src_lang"] == "pt" else None}
         for arm in QUALITY_ARMS:
             keys = [(page_id, arm, attempt) for attempt in range(1, 4) if (page_id, arm, attempt) in valid_attempts]
             rows = [attempts[key] for key in keys]
-            arm_page = {"valid_responses": len(keys), "length_metrics": _length_metrics(page, rows)}
+            arm_page = {
+                "valid_responses": len(keys),
+                "context_score": "not_applicable" if page["src_lang"] == "pt" else None,
+                "length_metrics": _length_metrics(page, rows),
+            }
             if len(keys) < 2:
                 arm_result[arm]["status"] = "inconclusive"
                 arm_result[arm]["reasons"].append(f"{page_id}: dưới hai response hợp lệ")
@@ -443,16 +472,16 @@ def evaluate_gate(manifest, capture, manual_scores):
             ]
             arm_scores = [scores[key] for key in keys]
             if any(score["critical_error"] for score in arm_scores):
-                arm_result[arm].update(status="blocked", reasons=[f"{page_id}: critical_error"])
-                break
+                arm_result[arm]["status"] = "blocked"
+                arm_result[arm]["reasons"].append(f"{page_id}: critical_error")
             if any(statistics.median(score[field] for score in arm_scores) == 0 for field in SAFETY_FIELDS):
-                arm_result[arm].update(status="blocked", reasons=[f"{page_id}: safety median 0"])
-                break
+                arm_result[arm]["status"] = "blocked"
+                arm_result[arm]["reasons"].append(f"{page_id}: safety median 0")
 
     if arm_result["batch_control"]["status"] == "inconclusive":
-        return {"decision": "inconclusive", "reason": "batch_control không đủ response hợp lệ", "pages": page_result, "arms": arm_result}
+        return gate_result("inconclusive", "batch_control không đủ response hợp lệ")
     if all(medians["batch_control"].get(page_id, -1) >= 5 for page_id in japanese_pages):
-        return {"decision": "no_context_headroom", "reason": "batch_control context median >= 5 trên mọi spread", "pages": page_result, "arms": arm_result}
+        return gate_result("no_context_headroom", "batch_control context median >= 5 trên mọi spread")
 
     passed = []
     for arm in QUALITY_ARMS[1:]:
@@ -465,9 +494,9 @@ def evaluate_gate(manifest, capture, manual_scores):
             arm_result[arm].update(status="blocked", reasons=["không đạt ngưỡng context"])
     if not passed:
         decision = "inconclusive" if any(arm_result[arm]["status"] == "inconclusive" for arm in QUALITY_ARMS[1:]) else "blocked"
-        return {"decision": decision, "reason": "không có candidate đạt gate", "pages": page_result, "arms": arm_result}
+        return gate_result(decision, "không có candidate đạt gate")
     if len(passed) == 1:
-        return {"decision": "selected", "selected": passed[0], "reason": "candidate duy nhất đạt gate", "pages": page_result, "arms": arm_result}
+        return gate_result("selected", "candidate duy nhất đạt gate", selected=passed[0])
 
     left, right = passed
     if _candidate_beats(medians[left], medians[right], japanese_pages):
@@ -480,9 +509,9 @@ def evaluate_gate(manifest, capture, manual_scores):
             rows = [row for row in capture["attempts"] if row["arm"] == arm]
             costs[arm] = (sum(len(row["calls"]) for row in rows), sum(call["duration"] for row in rows for call in row["calls"]))
         if costs[left] == costs[right]:
-            return {"decision": "inconclusive", "reason": "candidate hòa cả context, call và latency", "pages": page_result, "arms": arm_result}
+            return gate_result("inconclusive", "candidate hòa cả context, call và latency")
         selected, reason = min(costs, key=costs.get), "tie-break call rồi latency"
-    return {"decision": "selected", "selected": selected, "reason": reason, "pages": page_result, "arms": arm_result}
+    return gate_result("selected", reason, selected=selected)
 
 
 def run_quality_probe(
@@ -581,6 +610,8 @@ def validate_manifest(path, image_root=None):
             raise ValueError(f"source text metadata không hợp lệ: {item.get('id')}")
         if item["reading_direction"] not in {"ltr", "rtl"}:
             raise ValueError(f"reading_direction không hợp lệ: {item['id']}")
+        if item["src_lang"] == "pt" and item["reading_direction"] != "rtl":
+            raise ValueError("PT reading_direction phải là rtl")
         if item["page_kind"] not in {"single", "spread"}:
             raise ValueError(f"page_kind không hợp lệ: {item['id']}")
         if not all(isinstance(item[name], int) and item[name] > 0 for name in ("width", "height")):

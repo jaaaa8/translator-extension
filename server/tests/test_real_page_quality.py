@@ -3,6 +3,7 @@ import hashlib
 import json
 import subprocess
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -106,7 +107,13 @@ def _evaluator_case(name):
         "fixture_sha256": {page["id"]: page["sha256"] for page in data["manifest"]["fixtures"]},
         "baseline": {page["id"]: [["b1"], ["b2"]] if case.get("split_batches") else [["b1", "b2"]] for page in data["manifest"]["fixtures"]},
         "attempts": attempts,
-        "metadata": {"commit": "commit-x", "device": "device-x", "model": "model-x", "temperature": 0.37},
+        "metadata": {
+            "captured_at": "2026-08-02T03:00:00+00:00",
+            "commit": "commit-x",
+            "device": "device-x",
+            "model": "model-x",
+            "temperature": 0.37,
+        },
     }
     return data["manifest"], capture, scores
 
@@ -198,6 +205,14 @@ def test_eval_decoder_rejects_missing_duplicate_and_invented_ids(response):
 def test_eval_decoder_treats_missing_response_text_as_invalid_response():
     with pytest.raises(ValueError, match="invalid_response"):
         decode_eval_items(None, ["b1"])
+
+
+@pytest.mark.parametrize("translation", [None, 42, "", "   "])
+def test_eval_decoder_rejects_non_text_or_empty_item_translation(translation):
+    response = json.dumps([{"id": "b1", "translation": translation}])
+
+    with pytest.raises(ValueError, match="invalid_response"):
+        decode_eval_items(response, ["b1"])
 
 
 def test_quality_probe_records_three_attempts_per_page_and_policy_arm_without_api_key():
@@ -315,6 +330,7 @@ def test_quality_probe_rejects_invalid_baseline_before_calling_generate(baseline
 
 def test_quality_probe_includes_supplied_metadata():
     metadata = {
+        "captured_at": "2026-08-02T03:00:00+00:00",
         "commit": "commit-x",
         "device": "device-x",
         "model": "model-x",
@@ -346,7 +362,26 @@ def test_capture_validator_requires_exact_metadata_fields():
     with pytest.raises(ValueError, match="metadata"):
         validate_capture(manifest, capture)
 
-    assert CAPTURE_METADATA_FIELDS == ("commit", "device", "model", "temperature")
+    assert CAPTURE_METADATA_FIELDS == ("captured_at", "commit", "device", "model", "temperature")
+
+
+def test_capture_validator_accepts_utc_capture_timestamp_and_gate_echoes_it():
+    manifest, capture, scores = _evaluator_case("pt")
+    capture["metadata"]["captured_at"] = "2026-08-02T03:00:00+00:00"
+
+    assert evaluate_gate(manifest, capture, scores)["captured_at"] == capture["metadata"]["captured_at"]
+
+
+@pytest.mark.parametrize(
+    "captured_at",
+    ["not-a-time", "2026-08-02T03:00:00", "2026-08-02T10:00:00+07:00"],
+)
+def test_capture_validator_rejects_non_utc_capture_timestamp(captured_at):
+    manifest, capture, _ = _evaluator_case("pt")
+    capture["metadata"]["captured_at"] = captured_at
+
+    with pytest.raises(ValueError, match="metadata"):
+        validate_capture(manifest, capture)
 
 
 def test_capture_validator_rejects_boolean_schema_version():
@@ -424,6 +459,10 @@ def test_offline_gate_marks_portuguese_context_not_applicable_and_checks_term_su
     result = evaluate_gate(manifest, capture, scores)
 
     assert result["pages"]["mangadex_pt"]["context_score"] == "not_applicable"
+    assert {
+        arm["context_score"]
+        for arm in result["pages"]["mangadex_pt"]["arms"].values()
+    } == {"not_applicable"}
     conflict_manifest, conflict_capture, conflict_scores = _evaluator_case("term_surface_conflict")
     with pytest.raises(ValueError, match="term"):
         evaluate_gate(conflict_manifest, conflict_capture, conflict_scores)
@@ -439,6 +478,24 @@ def test_portuguese_rtl_is_checked_even_without_valid_response_or_score():
 
     with pytest.raises(ValueError, match="PT reading_direction"):
         evaluate_gate(manifest, capture, scores)
+
+
+def test_blocked_arm_reports_safety_failures_from_every_page():
+    manifest, capture, scores = _evaluator_case("pt")
+    for score in scores:
+        if score["arm"] != "ordered_microbatch":
+            continue
+        if score["page_id"] == "mangadex_pt" and score["attempt"] == 1:
+            score["critical_error"] = True
+        if score["page_id"] == "s-manga_ja_1":
+            score["correctness"] = 0
+
+    reasons = evaluate_gate(manifest, capture, scores)["arms"]["ordered_microbatch"]["reasons"]
+
+    assert reasons == [
+        "mangadex_pt: critical_error",
+        "s-manga_ja_1: safety median 0",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -488,6 +545,14 @@ def test_capture_validator_allows_only_the_successful_batch_response_in_partial_
     assert ("mangadex_pt", "batch_control", 1) not in validate_capture(manifest, capture)["valid_attempts"]
 
 
+def test_capture_validator_wraps_invalid_baseline_as_capture_error():
+    manifest, capture, _ = _evaluator_case("pt")
+    capture["baseline"]["mangadex_pt"] = []
+
+    with pytest.raises(ValueError, match="^capture không hợp lệ:"):
+        validate_capture(manifest, capture)
+
+
 def test_term_surface_forms_may_differ_between_attempts_but_not_within_one_response():
     manifest, capture, scores = _evaluator_case("pt")
     score = next(
@@ -507,6 +572,25 @@ def test_preview_latency_is_rejected_until_a_future_gate_selects_full_page(capsy
     assert "unavailable until Task 6 selects full_page" in capsys.readouterr().err
 
 
+def test_probe_cli_rejects_attempt_count_other_than_three(capsys):
+    with pytest.raises(SystemExit):
+        run_probe_main(
+            [
+                "run",
+                "--manifest",
+                "x",
+                "--baseline",
+                "x",
+                "--out",
+                "x",
+                "--attempts",
+                "2",
+            ]
+        )
+
+    assert "invalid choice" in capsys.readouterr().err
+
+
 def test_probe_cli_creates_output_parent_before_running_probe(tmp_path, monkeypatch):
     class FakeTranslator:
         def _generate(self, *_):
@@ -523,8 +607,10 @@ def test_probe_cli_creates_output_parent_before_running_probe(tmp_path, monkeypa
     monkeypatch.setattr("server.run_real_page_probe.platform.platform", lambda: "device-x")
     out = tmp_path / "new" / "captures" / "probe.json"
 
-    def fake_probe(*_, **__):
+    def fake_probe(*_, **kwargs):
         assert out.parent.is_dir()
+        captured_at = kwargs["metadata"]["captured_at"]
+        assert datetime.fromisoformat(captured_at).utcoffset() == timedelta(0)
         return {
             "schema_version": 1,
             "prompt_version": "comic-page-eval-v1",
@@ -532,7 +618,7 @@ def test_probe_cli_creates_output_parent_before_running_probe(tmp_path, monkeypa
             "fixture_sha256": {},
             "baseline": {},
             "attempts": [],
-            "metadata": {"commit": "commit-x", "device": "device-x", "model": "model-x", "temperature": 0.37},
+            "metadata": kwargs["metadata"],
         }
 
     monkeypatch.setattr("server.run_real_page_probe.run_quality_probe", fake_probe)
@@ -542,6 +628,7 @@ def test_probe_cli_creates_output_parent_before_running_probe(tmp_path, monkeypa
     capture = json.loads(out.read_text(encoding="utf-8"))
     assert capture["attempts"] == []
     assert capture["metadata"] == {
+        "captured_at": capture["metadata"]["captured_at"],
         "commit": "commit-x",
         "device": "device-x",
         "model": "model-x",
@@ -654,6 +741,17 @@ def test_reviewed_manifest_and_six_canonical_images_are_valid():
         "s-manga_ja_2": {"fragmented_blocks", "text_clipped", "source_text_exposed"},
     }
     assert "detector_missing_bubble" not in labels["mangadex_pt"]
+
+
+def test_manifest_validator_requires_portuguese_rtl(tmp_path):
+    manifest = load_manifest(MANIFEST)
+    portuguese = next(item for item in manifest["fixtures"] if item.get("src_lang") == "pt")
+    portuguese["reading_direction"] = "ltr"
+    path = tmp_path / "invalid-pt-direction.json"
+    path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="PT reading_direction"):
+        validate_manifest(path, image_root=FIXTURE_DIR)
 
 
 def test_manifest_validator_rejects_broken_source_region_and_reference_schema(tmp_path):
