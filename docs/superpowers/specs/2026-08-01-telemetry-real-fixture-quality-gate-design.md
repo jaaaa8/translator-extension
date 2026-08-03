@@ -312,7 +312,7 @@ CI chỉ đọc manifest và capture đã commit:
 - exact ID set, không trùng, không thiếu, translation không rỗng;
 - `reading_order` là dãy liên tục và khớp expected manifest;
 - source page Portuguese bắt buộc có `reading_direction: rtl`;
-- term group đã annotate không xuất hiện với nhiều surface form xung đột trong cùng trang;
+- term group đã annotate không xuất hiện với nhiều surface form xung đột trong cùng trang, trừ khi reviewer chấm `terms = 0`;
 - tính và báo `translated_chars`, `source_chars`, tỷ lệ độ dài và `chars_per_kpx` theo bbox.
 
 Các số độ dài chỉ là warning trong Spec A. Text bbox hiện không phải balloon/layout bbox, nên chưa được dùng làm pass/fail trước Spec C.

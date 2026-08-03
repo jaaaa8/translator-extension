@@ -37,7 +37,10 @@
       }
     },
     "rerun_failed_attempts": false,
-    "call_delay_seconds": 10
+    "call_delay_seconds": 10,
+    "observations": [
+      "ordered_microbatch bị block chỉ bởi mangadex_pt (critical_error và safety median 0), không phải hai trang Nhật. Trên JA-only, ordered_microbatch và full_page đều beat batch_control; full_page beat ordered_microbatch còn ordered_microbatch không beat full_page, nên lựa chọn full_page vẫn vững nếu bỏ PT khỏi so sánh candidate."
+    ]
   },
   "manual_review": {
     "captured_at": "2026-08-03T10:01:35.922932+00:00",
