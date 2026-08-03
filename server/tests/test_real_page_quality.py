@@ -272,6 +272,87 @@ def test_quality_probe_records_call_start_relative_to_probe():
     assert [call["duration"] for call in calls] == [1, 1, 1, 1, 1]
 
 
+def test_quality_probe_paces_every_logical_call_without_charging_duration():
+    class RateLimitError(Exception):
+        code = 429
+
+    expected_calls = (
+        [["b3"], ["b1", "b2"]] * 2
+        + [["b1"], ["b2", "b3"]] * 2
+        + [["b1", "b2", "b3"]] * 2
+    )
+    now = [0]
+    generated = []
+    sleeps = []
+
+    def clock():
+        return now[0]
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    def generate(_, decode):
+        ids = expected_calls[len(generated)]
+        generated.append(ids)
+        now[0] += 2
+        if len(generated) == 4:
+            raise RateLimitError("RESOURCE_EXHAUSTED")
+        return decode(
+            json.dumps([{"id": item_id, "translation": item_id} for item_id in ids])
+        )
+
+    capture = run_quality_probe(
+        {"fixtures": [_policy_page()]},
+        {"page-1": [["b3"], ["b1", "b2"]]},
+        generate,
+        attempts=2,
+        clock=clock,
+        call_delay_seconds=10,
+        sleep=sleep,
+    )
+    calls = [call for row in capture["attempts"] for call in row["calls"]]
+
+    assert generated == expected_calls
+    assert sleeps == [10] * 9
+    assert [call["started"] for call in calls] == list(range(0, 120, 12))
+    assert [call["duration"] for call in calls] == [2] * 10
+    assert (calls[3]["status"], calls[3]["error_code"]) == (
+        "rate_limited",
+        "rate_limited",
+    )
+
+
+@pytest.mark.parametrize("delay_kwargs", [{}, {"call_delay_seconds": 0}])
+def test_quality_probe_zero_delay_never_sleeps(delay_kwargs):
+    expected_calls = [
+        ["b3"],
+        ["b1", "b2"],
+        ["b1"],
+        ["b2", "b3"],
+        ["b1", "b2", "b3"],
+    ]
+    generated = []
+
+    def generate(_, decode):
+        ids = expected_calls[len(generated)]
+        generated.append(ids)
+        return decode(
+            json.dumps([{"id": item_id, "translation": item_id} for item_id in ids])
+        )
+
+    run_quality_probe(
+        {"fixtures": [_policy_page()]},
+        {"page-1": [["b3"], ["b1", "b2"]]},
+        generate,
+        attempts=1,
+        sleep=lambda _: pytest.fail("zero delay must not sleep"),
+        **delay_kwargs,
+    )
+
+    assert generated == expected_calls
+
+
 def test_quality_probe_classifies_structured_decoder_errors_as_invalid_response():
     def generate(_, decode):
         try:
@@ -647,7 +728,39 @@ def test_probe_cli_rejects_attempt_count_other_than_three(capsys):
     assert "invalid choice" in capsys.readouterr().err
 
 
-def test_probe_cli_creates_output_parent_before_running_probe(tmp_path, monkeypatch):
+@pytest.mark.parametrize("value", ["-1", "nan", "inf"])
+def test_probe_cli_rejects_invalid_call_delay_before_validation(value, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "server.run_real_page_probe.validate_manifest",
+        lambda _: pytest.fail("invalid delay must fail before manifest validation"),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        run_probe_main(
+            [
+                "run",
+                "--manifest",
+                "manifest.json",
+                "--baseline",
+                "baseline.json",
+                "--out",
+                "capture.json",
+                "--call-delay-seconds",
+                value,
+            ]
+        )
+
+    assert exit_info.value.code == 2
+    assert "số hữu hạn không âm" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("delay_args", "expected_delay"),
+    [([], 0), (["--call-delay-seconds", "10"], 10.0)],
+)
+def test_probe_cli_creates_output_parent_before_running_probe(
+    tmp_path, monkeypatch, delay_args, expected_delay
+):
     class FakeTranslator:
         def _generate(self, *_):
             pytest.fail("empty manifest must not call Gemini")
@@ -665,6 +778,7 @@ def test_probe_cli_creates_output_parent_before_running_probe(tmp_path, monkeypa
 
     def fake_probe(*_, **kwargs):
         assert out.parent.is_dir()
+        assert kwargs["call_delay_seconds"] == expected_delay
         captured_at = kwargs["metadata"]["captured_at"]
         assert datetime.fromisoformat(captured_at).utcoffset() == timedelta(0)
         return {
@@ -679,7 +793,18 @@ def test_probe_cli_creates_output_parent_before_running_probe(tmp_path, monkeypa
 
     monkeypatch.setattr("server.run_real_page_probe.run_quality_probe", fake_probe)
 
-    run_probe_main(["run", "--manifest", "manifest.json", "--baseline", "baseline.json", "--out", str(out)])
+    run_probe_main(
+        [
+            "run",
+            "--manifest",
+            "manifest.json",
+            "--baseline",
+            "baseline.json",
+            "--out",
+            str(out),
+            *delay_args,
+        ]
+    )
 
     capture = json.loads(out.read_text(encoding="utf-8"))
     assert capture["attempts"] == []

@@ -60,7 +60,7 @@ producer-relative overlay xấp xỉ `first_overlay_ms - accepted_offset_ms`, v�
 MV3 wake. Stage không chạy phải giữ `null`, không thay bằng `0`; aggregate scope chỉ dùng
 fallback `0` cho `fetch_ms`/`analysis_ms` khi không có page row đo được.
 
-Regression handoff hiện tại: Python suite `server/tests` có 188 passed (3 warning dependency)
+Regression handoff hiện tại: Python suite `server/tests` có 195 passed (3 warning dependency)
 và 9 JS test file có exit 0; đây là automated coverage, không thay thế evidence browser/Gemini bên dưới.
 
 Lỗi Gemini/response từ `/translate-items` trả `error_code` máy đọc được:
@@ -83,8 +83,7 @@ replay capture, trích baseline đã lưu trong worklog vào scratch ignored r�
 ```powershell
 $baselinePath = '.tmp-real-pages/2026-08-01-browser-baseline.json'
 New-Item -ItemType Directory -Force (Split-Path $baselinePath) | Out-Null
-$baseline = (Get-Content -Raw docs/superpowers/worklogs/2026-08-01-real-page-quality-baseline.json | ConvertFrom-Json).telemetry_validation.baseline
-$baseline | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8 $baselinePath
+& 'D:\MangaTranslator\venv\Scripts\python.exe' -c "import json,pathlib; w=json.loads(pathlib.Path('docs/superpowers/worklogs/2026-08-01-real-page-quality-baseline.json').read_text(encoding='utf-8')); pathlib.Path('.tmp-real-pages/2026-08-01-browser-baseline.json').write_text(json.dumps(w['telemetry_validation']['baseline'], ensure_ascii=False), encoding='utf-8')"
 & 'D:\MangaTranslator\venv\Scripts\python.exe' -m server.run_real_page_probe run --manifest server/tests/fixtures/real_pages/manifest.json --baseline $baselinePath --out .tmp-real-pages/2026-08-01-policy-probe.json --attempts 3
 ```
 

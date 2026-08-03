@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import platform
 import subprocess
 import sys
@@ -26,7 +27,10 @@ def _run(argv):
     parser.add_argument("--out", required=True)
     parser.add_argument("--attempts", type=int, choices=(3,), default=3)
     parser.add_argument("--preview-latency", action="store_true")
+    parser.add_argument("--call-delay-seconds", type=float, default=0)
     args = parser.parse_args(argv)
+    if not math.isfinite(args.call_delay_seconds) or args.call_delay_seconds < 0:
+        parser.error("--call-delay-seconds phải là số hữu hạn không âm")
     if args.preview_latency:
         parser.error("--preview-latency is unavailable until Task 6 selects full_page")
     manifest = validate_manifest(args.manifest)
@@ -50,6 +54,7 @@ def _run(argv):
         translator._generate,
         attempts=args.attempts,
         metadata=metadata,
+        call_delay_seconds=args.call_delay_seconds,
     )
     out_path.write_text(json.dumps(capture, ensure_ascii=False, indent=2), encoding="utf-8")
 

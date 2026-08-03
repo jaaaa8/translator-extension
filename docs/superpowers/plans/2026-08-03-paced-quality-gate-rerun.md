@@ -37,14 +37,15 @@
 - Modify: `server/run_real_page_probe.py:1-54`
 - Test: `server/tests/test_real_page_quality.py:219-350`
 - Test: `server/tests/test_real_page_quality.py:624-692`
-- Modify: `work-flow.md:63-64`
+- Modify: `work-flow.md:63-87`
+- Modify: `docs/superpowers/plans/2026-08-03-paced-quality-gate-rerun.md`
 
 **Interfaces:**
 - Consumes: `run_quality_probe(manifest, baseline, generate, attempts=3, clock=time.perf_counter, *, metadata=None)` và CLI `server.run_real_page_probe run` hiện có.
 - Produces: `run_quality_probe(manifest, baseline, generate, attempts=3, clock=time.perf_counter, *, metadata=None, call_delay_seconds=0, sleep=time.sleep)` và CLI option `--call-delay-seconds <finite non-negative float>`.
 - Does not produce: capture mới, score mới hoặc thay đổi production translator.
 
-- [ ] **Step 1: Viết failing test cho pacing xuyên biên và sau 429**
+- [x] **Step 1: Viết failing test cho pacing xuyên biên và sau 429**
 
 Thêm vào `server/tests/test_real_page_quality.py`:
 
@@ -95,7 +96,7 @@ def test_quality_probe_paces_every_logical_call_without_charging_duration():
     assert (calls[3]["status"], calls[3]["error_code"]) == ("rate_limited", "rate_limited")
 ```
 
-- [ ] **Step 2: Viết failing test cho cả default core và explicit zero**
+- [x] **Step 2: Viết failing test cho cả default core và explicit zero**
 
 ```python
 @pytest.mark.parametrize("delay_kwargs", [{}, {"call_delay_seconds": 0}])
@@ -120,7 +121,7 @@ def test_quality_probe_zero_delay_never_sleeps(delay_kwargs):
     assert generated == expected_calls
 ```
 
-- [ ] **Step 3: Chạy hai test core để xác nhận RED đúng lý do**
+- [x] **Step 3: Chạy hai test core để xác nhận RED đúng lý do**
 
 Run:
 
@@ -130,7 +131,7 @@ Run:
 
 Expected: FAIL vì `run_quality_probe()` chưa nhận `call_delay_seconds`/`sleep`; không chấp nhận failure do fixture hoặc decoder.
 
-- [ ] **Step 4: Implement core pacing tối thiểu**
+- [x] **Step 4: Implement core pacing tối thiểu**
 
 Đổi signature và đầu hàm trong `server/real_page_quality.py`:
 
@@ -162,13 +163,13 @@ started = clock()
 
 Không đổi `try/except`, `capture_call`, decoder hoặc thứ tự vòng lặp.
 
-- [ ] **Step 5: Chạy lại test core để xác nhận GREEN**
+- [x] **Step 5: Chạy lại test core để xác nhận GREEN**
 
 Run cùng lệnh Step 3.
 
 Expected: `3 passed` vì test explicit/default zero được parametrize thành hai case.
 
-- [ ] **Step 6: Viết failing test CLI validation và pass-through**
+- [x] **Step 6: Viết failing test CLI validation và pass-through**
 
 Thêm test validation:
 
@@ -236,7 +237,7 @@ run_probe_main(
 
 Giữ nguyên các patch hiện có, đặc biệt target `server.translator.GeminiTranslator`.
 
-- [ ] **Step 7: Chạy CLI tests để xác nhận RED đúng lý do**
+- [x] **Step 7: Chạy CLI tests để xác nhận RED đúng lý do**
 
 Run:
 
@@ -246,7 +247,7 @@ Run:
 
 Expected: FAIL vì option chưa tồn tại hoặc chưa truyền xuống core. Test invalid phải fail assertion message, không được được coi là GREEN chỉ vì argparse báo “unrecognized arguments”.
 
-- [ ] **Step 8: Implement CLI option, validation và pass-through**
+- [x] **Step 8: Implement CLI option, validation và pass-through**
 
 Trong `server/run_real_page_probe.py`, thêm `import math`, thêm argument:
 
@@ -274,20 +275,18 @@ capture = run_quality_probe(
 )
 ```
 
-- [ ] **Step 9: Chạy focused suite và CLI help**
+- [x] **Step 9: Chạy focused suite và CLI help**
 
 Run:
 
 ```powershell
 & 'D:\MangaTranslator\venv\Scripts\python.exe' -m pytest server/tests/test_real_page_quality.py -q
-$env:GEMINI_API_KEY=''
 & 'D:\MangaTranslator\venv\Scripts\python.exe' -m server.run_real_page_probe run --help
-Remove-Item Env:\GEMINI_API_KEY -ErrorAction SilentlyContinue
 ```
 
-Expected: toàn bộ `test_real_page_quality.py` PASS; help có `--call-delay-seconds` và không khởi tạo Gemini.
+Expected: toàn bộ `test_real_page_quality.py` PASS; help exit `0` và có `--call-delay-seconds`.
 
-- [ ] **Step 10: Chạy full regression và lấy số thật**
+- [x] **Step 10: Chạy full regression và lấy số thật**
 
 Run Python:
 
@@ -308,26 +307,26 @@ foreach ($test in $jsTests) {
 
 Expected: Python full suite PASS với số mới `188 + N` được đọc từ output; 9/9 JS files exit `0`.
 
-- [ ] **Step 11: Cập nhật regression handoff bằng số đo thật**
+- [x] **Step 11: Cập nhật regression handoff bằng số đo thật**
 
 Dùng `apply_patch` sửa `work-flow.md:63`, thay `188 passed` bằng đúng số từ Step 10. Giữ nguyên warning count theo output thực; không dự đoán trước con số. Đồng thời thay hai dòng PowerShell trích `telemetry_validation.baseline` tại `work-flow.md:86-87` bằng cùng lệnh Python ghi UTF-8 không BOM ở Task 2 Step 2; giữ nguyên đường dẫn scratch và lệnh replay hiện có.
 
-- [ ] **Step 12: Audit diff trước commit**
+- [x] **Step 12: Audit diff trước commit**
 
 Run:
 
 ```powershell
 git diff --check
 git status --short
-git diff -- server/real_page_quality.py server/run_real_page_probe.py server/tests/test_real_page_quality.py work-flow.md
+git diff -- server/real_page_quality.py server/run_real_page_probe.py server/tests/test_real_page_quality.py work-flow.md docs/superpowers/plans/2026-08-03-paced-quality-gate-rerun.md
 ```
 
-Expected: chỉ bốn file trong Task 1 thay đổi; không có capture, score, `.tmp-real-pages` hoặc thay đổi production translator.
+Expected: chỉ năm file trong Task 1 thay đổi; không có capture, score, `.tmp-real-pages` hoặc thay đổi production translator.
 
-- [ ] **Step 13: Commit code checkpoint**
+- [x] **Step 13: Commit code checkpoint**
 
 ```powershell
-git add server/real_page_quality.py server/run_real_page_probe.py server/tests/test_real_page_quality.py work-flow.md
+git add server/real_page_quality.py server/run_real_page_probe.py server/tests/test_real_page_quality.py work-flow.md docs/superpowers/plans/2026-08-03-paced-quality-gate-rerun.md
 git commit -m "feat: pace real-page quality probe"
 git status --porcelain
 ```
@@ -531,7 +530,7 @@ Không thêm `telemetry_validation` copy và không sửa worklog 2026-08-01.
 
 - [ ] **Step 5: Cập nhật nguồn quyết định trong work-flow**
 
-Dùng `apply_patch` sửa `work-flow.md:91-103` trong cùng change set với worklog mới:
+Dùng `apply_patch` sửa block lệnh evaluate và đoạn nguồn quyết định hiện tại trong `work-flow.md` trong cùng change set với worklog mới:
 
 - lệnh evaluate dùng capture/scores/output 2026-08-03;
 - nguồn quyết định hiện tại là worklog 2026-08-03;

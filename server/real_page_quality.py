@@ -517,9 +517,18 @@ def evaluate_gate(manifest, capture, manual_scores):
 
 
 def run_quality_probe(
-    manifest, baseline, generate, attempts=3, clock=time.perf_counter, *, metadata=None
+    manifest,
+    baseline,
+    generate,
+    attempts=3,
+    clock=time.perf_counter,
+    *,
+    metadata=None,
+    call_delay_seconds=0,
+    sleep=time.sleep,
 ):
     rows = []
+    logical_calls = 0
     probe_started = clock()
     for page in source_pages(manifest):
         for arm in QUALITY_ARMS:
@@ -527,6 +536,9 @@ def run_quality_probe(
             for attempt in range(1, attempts + 1):
                 calls, translations = [], []
                 for batch_id, batch in enumerate(batches, 1):
+                    if logical_calls and call_delay_seconds > 0:
+                        sleep(call_delay_seconds)
+                    logical_calls += 1
                     started = clock()
                     try:
                         decoded = generate(
