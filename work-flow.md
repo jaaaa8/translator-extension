@@ -60,7 +60,7 @@ producer-relative overlay xấp xỉ `first_overlay_ms - accepted_offset_ms`, v�
 MV3 wake. Stage không chạy phải giữ `null`, không thay bằng `0`; aggregate scope chỉ dùng
 fallback `0` cho `fetch_ms`/`analysis_ms` khi không có page row đo được.
 
-Regression handoff hiện tại: Python suite `server/tests` có 195 passed (3 warning dependency)
+Regression handoff hiện tại: Python suite `server/tests` có 196 passed (3 warning dependency)
 và 9 JS test file có exit 0; đây là automated coverage, không thay thế evidence browser/Gemini bên dưới.
 
 Lỗi Gemini/response từ `/translate-items` trả `error_code` máy đọc được:
@@ -90,16 +90,16 @@ New-Item -ItemType Directory -Force (Split-Path $baselinePath) | Out-Null
 Evaluate capture offline, không gọi Gemini:
 
 ```powershell
-& 'D:\MangaTranslator\venv\Scripts\python.exe' -m server.run_real_page_probe evaluate --manifest server/tests/fixtures/real_pages/manifest.json --capture server/tests/fixtures/real_pages/captures/2026-08-01-policy-probe.json --scores server/tests/fixtures/real_pages/captures/2026-08-01-manual-scores.json --out .tmp-real-pages/2026-08-01-policy-evaluation.json
+& 'D:\MangaTranslator\venv\Scripts\python.exe' -m server.run_real_page_probe evaluate --manifest server/tests/fixtures/real_pages/manifest.json --capture server/tests/fixtures/real_pages/captures/2026-08-03-policy-probe-paced.json --scores server/tests/fixtures/real_pages/captures/2026-08-03-manual-scores.json --out .tmp-real-pages/2026-08-03-policy-evaluation.json
 ```
 
-Worklog `docs/superpowers/worklogs/2026-08-01-real-page-quality-baseline.json` là nguồn
-quyết định hiện tại: real-browser telemetry cold/warm đã chạy; detector/OCR transcript và
-reading order fixture đã được người đọc review, và `jaa` đã xác nhận 16 rubric rows hợp
-lệ. Policy probe có 16 response hợp lệ nhưng decision vẫn `inconclusive`: JA1
-`batch_control` chỉ có một response hợp lệ. Portuguese chỉ là diagnostic
-(`production_pt_supported=false`), không phải production proof. Không có policy Spec B/C
-hay sửa overlay Spec C trong gate này.
+Worklog `docs/superpowers/worklogs/2026-08-03-real-page-quality-gate-rerun.json` là nguồn
+quyết định hiện tại. Paced probe có 26 response hợp lệ và `jaa` đã chấm đủ 26 rubric rows;
+evaluator trả `decision=selected`, `selected=full_page`, reason `candidate duy nhất đạt gate`.
+`telemetry_validation_reference` tái dùng browser telemetry và baseline từ worklog
+2026-08-01 tại commit `277f9df`; không chụp browser telemetry mới. Portuguese chỉ là
+diagnostic (`production_pt_supported=false`), không phải production proof. Kết quả này cho
+phép bắt đầu Spec B với policy `full_page`; production Spec B/C chưa được triển khai.
 
 ### Cổng chuyển giao Spec B/C
 
