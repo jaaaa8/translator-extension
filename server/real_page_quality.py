@@ -394,7 +394,7 @@ def _validate_scores(manifest, valid_attempts, manual_scores):
                 _valid_text(value) for value in block_forms.values()
             ):
                 raise ValueError("term forms không hợp lệ")
-            if len({value.strip().casefold() for value in block_forms.values()}) > 1:
+            if score["terms"] != 0 and len({value.strip().casefold() for value in block_forms.values()}) > 1:
                 raise ValueError("term surface form xung đột")
         rows[key] = score
     if set(rows) != valid_attempts:

@@ -575,6 +575,17 @@ def test_offline_gate_marks_portuguese_context_not_applicable_and_checks_term_su
         evaluate_gate(broken_manifest, capture, scores)
 
 
+def test_term_surface_conflict_is_allowed_when_terms_is_zero():
+    manifest, capture, scores = _evaluator_case("term_surface_conflict")
+    for score in scores:
+        if score["page_id"] == "s-manga_ja_1" and score["arm"] == "batch_control":
+            score["terms"] = 0
+
+    result = evaluate_gate(manifest, capture, scores)
+
+    assert result["pages"]["s-manga_ja_1"]["context_score"] == 4
+
+
 def test_portuguese_rtl_is_checked_even_without_valid_response_or_score():
     manifest, capture, scores = _evaluator_case("pt_without_scores")
     manifest["fixtures"][0]["reading_direction"] = "ltr"
