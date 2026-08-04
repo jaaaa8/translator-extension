@@ -248,7 +248,10 @@ const manifest = JSON.parse(fs.readFileSync(
   "utf8",
 ));
 
-for (const page of manifest.fixtures) {
+const pages = manifest.fixtures.filter((page) => page.role === "source_page");
+assert.strictEqual(pages.length, 3);
+
+for (const page of pages) {
   const input = page.regions.map((region) => ({
     block_id: region.fixture_block_id,
     bbox: [...region.bbox],
@@ -449,9 +452,12 @@ Trong popup test, resolve storage không có direction và assert ngay lần đ�
 ```javascript
 assert.strictEqual(first.elements.readingDirection.value, "rtl");
 assert.match(first.elements.currentLanguages.textContent, /RTL/);
+assert.deepStrictEqual(first.writes, []);
 first.elements.readingDirection.onchange({ target: { value: "ltr" } });
-assert.deepStrictEqual(first.writes.at(-1), { readingDirection: "ltr" });
+assert.deepStrictEqual({ ...first.writes.at(-1) }, { readingDirection: "ltr" });
 ```
+
+Default `rtl` ở startup chỉ là state/display default, không được gọi `chrome.storage.local.set()`. Giữ nguyên assertion cũ `writes == [{ srcLang: "ja" }]` sau khi người dùng chỉ đổi source language; không sửa test thành một startup write ngầm.
 
 Trong content-progressive test, fake `storage.onChanged` phải lưu listener. Assert default start message có `reading_direction: "rtl"`; emit `{readingDirection:{newValue:"ltr"}}`, gọi action mới và assert snapshot mới là `ltr` trong khi request cũ vẫn `rtl`.
 
@@ -489,6 +495,8 @@ def version_shape(value):
 assert version_shape(payload["versions"]) == version_shape(config.PIPELINE_VERSIONS)
 assert payload["versions"]["layout_order"] == "reading-order-v1"
 ```
+
+Trước Task 4, assertion `version_shape(...)` đầu tiên đã pass vì production/acceptance đang có cùng shape cấp cao; red signal của step này là assertion `layout_order` thứ hai. Sau Task 5, cùng helper mới đi sâu vào `recognizers` để bắt PT shape drift.
 
 Run red gates:
 
@@ -547,6 +555,8 @@ blocks.map((block, reading_order) => ({
 ```
 
 Key cũng chứa explicit direction và `layout_order`; không dựa vào contextHash order như bảo đảm tình cờ.
+
+Việc đổi field context từ `{blockId, srcText}` sang `{reading_order, block_id, src_text}` cố ý tạo namespace hot-translation key mới ngoài các version bump. Đây là migration cost đã duyệt, không phải regression; ghi nó trong handoff cùng coarse page-cache purge một lần.
 
 Cập nhật central fake `/health` version objects trong `background-progressive.test.js` và `progressive-integration.test.js` với `layout_order: "reading-order-v1"`; không tạo default trong test harness.
 
