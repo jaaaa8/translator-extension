@@ -207,21 +207,23 @@ function createIntegration({ server = createServer(), session = storageSession()
     summary: () => new Promise((resolve) => runtimeMessages.emit({ type: "benchmarkSummary" }, {}, resolve)),
     pageStatus: () => new Promise((resolve) => runtimeMessages.emit({ type: "pageStatus" }, {}, resolve)),
     legacyOcr(name) { return new Promise((resolve) => runtimeMessages.emit({ type: "ocrImage", url: `https://reader/${name}.jpg`, srcLang: "ja" }, {}, resolve)); },
-    sendRenderMetric(requestId, value) { pair.content.postMessage({ type: "render_metric", request_id: requestId, first_overlay_ms: value }); },
+    sendRenderMetric(requestId, jobId, value) { pair.content.postMessage({ type: "render_metric", request_id: requestId, job_id: jobId, first_overlay_ms: value }); },
   };
 }
 
 (async () => {
   const app = createIntegration();
   const result = await app.click();
-  const coldRequestId = app.trace.find(([side, event]) => side === "content" && event.type === "start_scope")[1].request_id;
+  const coldStart = app.trace.find(([side, event]) => side === "content" && event.type === "start_scope")[1];
+  const coldRequestId = coldStart.request_id;
   assert.strictEqual(app.text(), "A translated");
   assert.ok(Number.isFinite(result.first_overlay_ms));
   assert.strictEqual(result.firstOverlayMs, undefined);
   assert.deepStrictEqual(Object.keys(result.metrics).sort(), [
-    "analysis_ms", "fetch_ms", "first_ocr_ms", "first_translation_ms", "queue_wait_ms", "total_ms",
+    "analysis_ms", "fetch_ms", "final_translation_ms", "first_ocr_ms", "first_overlay_ms", "first_translation_ms", "ocr_done_ms", "queue_wait_ms", "total_ms",
   ]);
   assert.ok(Object.values(result.metrics).every((value) => value === null || Number.isFinite(value)));
+  assert.deepEqual(result.page_metrics.map((row) => [row.job_id, row.first_overlay_ms]), [[coldStart.jobs[0].job_id, result.first_overlay_ms]]);
 
   const summary = await app.summary();
   assert.deepStrictEqual(Object.keys(summary).sort(), [
@@ -243,7 +245,7 @@ function createIntegration({ server = createServer(), session = storageSession()
   assert.strictEqual(warmSummary.counters.translation_calls, 0);
   assert.ok(Number.isFinite(warmSummary.first_overlay_ms.p50));
   assert.ok(Number.isFinite(warmSummary.first_overlay_ms.p95));
-  app.sendRenderMetric(coldRequestId, 999999);
+  app.sendRenderMetric(coldRequestId, coldStart.jobs[0].job_id, 999999);
   await Promise.resolve();
   await Promise.resolve();
   assert.deepStrictEqual(await app.summary(), warmSummary);

@@ -1,0 +1,1626 @@
+{
+  "schema_version": 1,
+  "prompt_version": "comic-page-eval-v1",
+  "policy_version": "real-page-policy-v1",
+  "fixture_sha256": {
+    "mangadex_pt": "8c25aea5e76a9264d83698ee4953b4e037593a49c05b2517de4ebd14a1d84c60",
+    "s-manga_ja_1": "267ac9ea29bdf0bfbb3686e2806a77b0c52d1178f2810c426ba357b277976023",
+    "s-manga_ja_2": "7d6867a5c37db97d1f6ce32d5e5fd082d3bf3ac8e9f6914a2497b51f1fd0b9b0"
+  },
+  "baseline": {
+    "mangadex_pt": [
+      [
+        "b06"
+      ],
+      [
+        "b03"
+      ],
+      [
+        "b01",
+        "b02"
+      ],
+      [
+        "b05"
+      ],
+      [
+        "b07",
+        "b04"
+      ]
+    ],
+    "s-manga_ja_1": [
+      [
+        "b20",
+        "b05"
+      ],
+      [
+        "b11",
+        "b21",
+        "b14",
+        "b06",
+        "b15",
+        "b10",
+        "b01",
+        "b13",
+        "b04",
+        "b07",
+        "b16"
+      ],
+      [
+        "b17",
+        "b12",
+        "b19",
+        "b18",
+        "b08",
+        "b09",
+        "b02",
+        "b03"
+      ]
+    ],
+    "s-manga_ja_2": [
+      [
+        "b08",
+        "b06"
+      ],
+      [
+        "b01",
+        "b02",
+        "b16",
+        "b03",
+        "b17",
+        "b15",
+        "b09",
+        "b12",
+        "b14",
+        "b11",
+        "b13"
+      ],
+      [
+        "b10",
+        "b07",
+        "b05",
+        "b04"
+      ]
+    ]
+  },
+  "attempts": [
+    {
+      "page_id": "mangadex_pt",
+      "arm": "batch_control",
+      "attempt": 1,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b06"
+          ],
+          "started": 3.739999738172628e-05,
+          "duration": 0.8740729000019201,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 2,
+          "fixture_block_ids": [
+            "b03"
+          ],
+          "started": 0.8741147000000637,
+          "duration": 0.7654814999987138,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 3,
+          "fixture_block_ids": [
+            "b01",
+            "b02"
+          ],
+          "started": 1.639599799997086,
+          "duration": 1.0026582000027702,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 4,
+          "fixture_block_ids": [
+            "b05"
+          ],
+          "started": 2.642262800000026,
+          "duration": 0.7552383999973244,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 5,
+          "fixture_block_ids": [
+            "b07",
+            "b04"
+          ],
+          "started": 3.397504000000481,
+          "duration": 0.7693159999980708,
+          "status": "success",
+          "error_code": null
+        }
+      ],
+      "responses": {
+        "b06": "Vấn đề là tôi đã quá phấn khích và vượt quá giới hạn.",
+        "b03": "TÔI MUỐN BIẾT THÊM VỀ CÔ ẤY! TÔI MUỐN Ở BÊN CÔ ẤY!",
+        "b01": "ĐOÁT LÀ CÔ GÁI NÀO VẬY TRỜI? XINH GHÊ!",
+        "b02": "TRƯỚC GIỜ CHƯA TỪNG THẤY CÔ ẢY! SAO MÌNH LẠI KHÔNG ĐỂ Ý CHỨ?",
+        "b05": "ĐỒ NGỐC! MÌNH QUÊN HỎI TÊN CÔ ẤY MẤT RỒI.",
+        "b07": "MONG LÀ CÔ ẤY KHÔNG GHÉT MÌNH.",
+        "b04": "CHỜ ĐÃ..."
+      }
+    },
+    {
+      "page_id": "mangadex_pt",
+      "arm": "batch_control",
+      "attempt": 2,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b06"
+          ],
+          "started": 4.166830499998468,
+          "duration": 0.6569657000000007,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 2,
+          "fixture_block_ids": [
+            "b03"
+          ],
+          "started": 4.823798800000077,
+          "duration": 0.8330186999992293,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 3,
+          "fixture_block_ids": [
+            "b01",
+            "b02"
+          ],
+          "started": 5.65682039999956,
+          "duration": 0.9885670000003302,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 4,
+          "fixture_block_ids": [
+            "b05"
+          ],
+          "started": 6.64538999999786,
+          "duration": 0.8882515000004787,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 5,
+          "fixture_block_ids": [
+            "b07",
+            "b04"
+          ],
+          "started": 7.533644799998001,
+          "duration": 0.9443783000024268,
+          "status": "success",
+          "error_code": null
+        }
+      ],
+      "responses": {
+        "b06": "Vấn đề là tôi đã quá phấn khích và vượt quá giới hạn.",
+        "b03": "TÔI MUỐN BIẾT THÊM VỀ CÔ ẤY! TÔI MUỐN Ở BÊN CÔ ẤY!",
+        "b01": "CÔ GÓI ĐÓ LÀ AI VẬY? XINH QUÁ ĐI!",
+        "b02": "MÌNH CHƯA TỪNG THẤY CÔ ẤY BAO GIỜ! SAO MÌNH LẠI KHÔNG ĐỂ Ý CHỨ?",
+        "b05": "ĐỒ NGỐC! MÌNH LẠI QUÊN HỎI TÊN CÔ ẤY RỒI.",
+        "b07": "MONG LÀ CẬU ẤY KHÔNG GHÉT MÌNH.",
+        "b04": "ĐỢI ĐÃ..."
+      }
+    },
+    {
+      "page_id": "mangadex_pt",
+      "arm": "batch_control",
+      "attempt": 3,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b06"
+          ],
+          "started": 8.478042099999584,
+          "duration": 0.7620152999988932,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 2,
+          "fixture_block_ids": [
+            "b03"
+          ],
+          "started": 9.240059799998562,
+          "duration": 0.9723618999996688,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 3,
+          "fixture_block_ids": [
+            "b01",
+            "b02"
+          ],
+          "started": 10.21242699999857,
+          "duration": 1.0135872999999265,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 4,
+          "fixture_block_ids": [
+            "b05"
+          ],
+          "started": 11.226022200000443,
+          "duration": 0.7339391999994405,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 5,
+          "fixture_block_ids": [
+            "b07",
+            "b04"
+          ],
+          "started": 11.9599675999998,
+          "duration": 0.8243088999988686,
+          "status": "success",
+          "error_code": null
+        }
+      ],
+      "responses": {
+        "b06": "Vấn đề là tôi đã quá phấn khích và vượt quá giới hạn.",
+        "b03": "TÔI MUỐN BIẾT THÊM VỀ CÔ ẤY! TÔI MUỐN Ở BÊN CÔ ẤY!",
+        "b01": "ĐOÁ CÔ GÁI ĐÓ LÀ AI VẬY? TRÔNG XINH QUÁ!",
+        "b02": "MÌNH CHƯA TỪNG THẤY CẬU ẤY TRƯỚC ĐÂY! SAO MÌNH LẠI KHÔNG ĐỂ Ý CHỨ?",
+        "b05": "ĐỒ NGỐC! MÌNH QUÊN HỎI TÊN CÔ ẤY MẤT RỒI.",
+        "b07": "MONG LÀ CÔ ẤY KHÔNG GHÉT MÌNH.",
+        "b04": "ĐỢI ĐÃ..."
+      }
+    },
+    {
+      "page_id": "mangadex_pt",
+      "arm": "ordered_microbatch",
+      "attempt": 1,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b01"
+          ],
+          "started": 12.784330999998929,
+          "duration": 0.8574671999995189,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 2,
+          "fixture_block_ids": [
+            "b02"
+          ],
+          "started": 13.641800800000055,
+          "duration": 1.1956890000001295,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 3,
+          "fixture_block_ids": [
+            "b03",
+            "b04"
+          ],
+          "started": 14.837494899999001,
+          "duration": 0.9093342999985907,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 4,
+          "fixture_block_ids": [
+            "b05"
+          ],
+          "started": 15.746839100000216,
+          "duration": 0.717207599998801,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 5,
+          "fixture_block_ids": [
+            "b06",
+            "b07"
+          ],
+          "started": 16.46404949999851,
+          "duration": 1.2010325000010198,
+          "status": "success",
+          "error_code": null
+        }
+      ],
+      "responses": {
+        "b01": "ĐỨA CÁI ĐÓ LÀ AI VẬY TRỜI? CÔ ẤY ĐẸP QUÁ ĐI!",
+        "b02": "TÔI CHƯA TỪNG THẤY CÔ ẤY TRƯỚC ĐÂY! SAO MÌNH LẠI KHÔNG ĐỂ Ý CƠ CHỨ?",
+        "b03": "TÔI MUỐN BIẾT THÊM VỀ CÔ ẤY! TÔI MUỐN Ở CẠNH CÔ ẤY!",
+        "b04": "ĐỢI ĐÃ...",
+        "b05": "ĐỒ NGỐC! MÌNH QUÊN HỎI TÊN CÔ ẤY MẤT RỒI.",
+        "b06": "Vì quá hứng thú nên tôi đã lạm quá giới hạn.",
+        "b07": "Mong là cô ấy không ghét mình."
+      }
+    },
+    {
+      "page_id": "mangadex_pt",
+      "arm": "ordered_microbatch",
+      "attempt": 2,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b01"
+          ],
+          "started": 17.66508839999733,
+          "duration": 0.8058221000028425,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 2,
+          "fixture_block_ids": [
+            "b02"
+          ],
+          "started": 18.470917099999497,
+          "duration": 0.7976746999993338,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 3,
+          "fixture_block_ids": [
+            "b03",
+            "b04"
+          ],
+          "started": 19.2685954999979,
+          "duration": 0.8006939000006241,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 4,
+          "fixture_block_ids": [
+            "b05"
+          ],
+          "started": 20.069293799999286,
+          "duration": 0.7019638999991002,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 5,
+          "fixture_block_ids": [
+            "b06",
+            "b07"
+          ],
+          "started": 20.771260899997287,
+          "duration": 0.8046522000004188,
+          "status": "success",
+          "error_code": null
+        }
+      ],
+      "responses": {
+        "b01": "ĐỨA CÁI ĐÓ LÀ AI VẬY TRỜI? CÔ ẤY ĐẸP QUÁ ĐI!",
+        "b02": "TÔI CHƯA TỪNG THẤY CÔ ẤY TRƯỚC ĐÂY! SAO MÌNH LẠI KHÔNG CHÚ Ý CƠ CHỨ?",
+        "b03": "TÔI MUỐN BIẾT THÊM VỀ CÔ ẤY! TÔI MUỐN Ở CẠNH CÔ ẤY!",
+        "b04": "ĐỢI ĐÃ...",
+        "b05": "ĐỒ NGỐC! MÌNH QUÊN HỎI TÊN CÔ ẤY MẤT RỒI.",
+        "b06": "Vấn đề là tôi đã quá phấn khích và vượt quá giới hạn.",
+        "b07": "Mong là cô ấy không ghét mình."
+      }
+    },
+    {
+      "page_id": "mangadex_pt",
+      "arm": "ordered_microbatch",
+      "attempt": 3,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b01"
+          ],
+          "started": 21.575920999999653,
+          "duration": 0.8291262999991886,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 2,
+          "fixture_block_ids": [
+            "b02"
+          ],
+          "started": 22.405050699999265,
+          "duration": 0.8005014000009396,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 3,
+          "fixture_block_ids": [
+            "b03",
+            "b04"
+          ],
+          "started": 23.205554899999697,
+          "duration": 0.8043939999988652,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 4,
+          "fixture_block_ids": [
+            "b05"
+          ],
+          "started": 24.009952199998224,
+          "duration": 0.7148225999990245,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 5,
+          "fixture_block_ids": [
+            "b06",
+            "b07"
+          ],
+          "started": 24.724778499999957,
+          "duration": 1.0053714999994554,
+          "status": "success",
+          "error_code": null
+        }
+      ],
+      "responses": {
+        "b01": "ĐÚA CON GÁI ĐÓ LÀ AI VẬY? CÔ ẤY ĐẸP THẬT!",
+        "b02": "TÔI CHƯA TỪNG THẤY CÔ ẤY TRƯỚC ĐÂY! SAO MÌNH LẠI KHÔNG ĐỂ Ý CƠ CHỨ?",
+        "b03": "TÔI MUỐN BIẾT THÊM VỀ CÔ ẤY! TÔI MUỐN Ở CẠNH CÔ ẤY!",
+        "b04": "ĐỢI ĐÃ...",
+        "b05": "ĐỒ NGỐC! MÌNH QUÊN HỎI TÊN CÔ ẤY MẤT RỒI.",
+        "b06": "VẤN ĐỀ LÀ TỚ ĐÃ HỨNG QUÁ VÀ VƯỢT QUÁ GIỚI HẠN.",
+        "b07": "MONG LÀ CẬU ẤY KHÔNG GHÉT MÌNH."
+      }
+    },
+    {
+      "page_id": "mangadex_pt",
+      "arm": "full_page",
+      "attempt": 1,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b01",
+            "b02",
+            "b03",
+            "b04",
+            "b05",
+            "b06",
+            "b07"
+          ],
+          "started": 25.730229499997222,
+          "duration": 1.0001045999997586,
+          "status": "success",
+          "error_code": null
+        }
+      ],
+      "responses": {
+        "b01": "Đứa con gái đó là ai thế? Cậu ấy xinh quá!",
+        "b02": "Mình chưa từng thấy cậu ấy bao giờ! Sao mình lại không để ý nhỉ?",
+        "b03": "Mình muốn biết thêm về cậu ấy! Mình muốn ở bên cậu ấy!",
+        "b04": "Khoan đã...",
+        "b05": "Đúng là đồ ngốc! Mình quên hỏi tên cậu ấy mất rồi.",
+        "b06": "Vấn đề là mình đã quá phấn khích và làm quá giới hạn.",
+        "b07": "Mong là cậu ấy không ghét mình."
+      }
+    },
+    {
+      "page_id": "mangadex_pt",
+      "arm": "full_page",
+      "attempt": 2,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b01",
+            "b02",
+            "b03",
+            "b04",
+            "b05",
+            "b06",
+            "b07"
+          ],
+          "started": 26.730344499999774,
+          "duration": 1.2976952999997593,
+          "status": "success",
+          "error_code": null
+        }
+      ],
+      "responses": {
+        "b01": "Đứa con gái đó là ai thế? Cậu ấy xinh thật đấy!",
+        "b02": "Mình chưa từng thấy cậu ấy bao giờ! Sao mình lại không để ý nhỉ?",
+        "b03": "Mình muốn biết thêm về cậu ấy! Mình muốn ở bên cậu ấy!",
+        "b04": "Khoan đã...",
+        "b05": "Đồ ngốc! Mình lại quên hỏi tên cậu ấy mất rồi.",
+        "b06": "Chỉ là mình đã quá phấn khích và hơi quá đà.",
+        "b07": "Mong là cậu ấy không ghét mình."
+      }
+    },
+    {
+      "page_id": "mangadex_pt",
+      "arm": "full_page",
+      "attempt": 3,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b01",
+            "b02",
+            "b03",
+            "b04",
+            "b05",
+            "b06",
+            "b07"
+          ],
+          "started": 28.02804809999725,
+          "duration": 0.2149310000022524,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        }
+      ],
+      "responses": {}
+    },
+    {
+      "page_id": "s-manga_ja_1",
+      "arm": "batch_control",
+      "attempt": 1,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b20",
+            "b05"
+          ],
+          "started": 28.24302429999807,
+          "duration": 0.20625199999994948,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        },
+        {
+          "batch_id": 2,
+          "fixture_block_ids": [
+            "b11",
+            "b21",
+            "b14",
+            "b06",
+            "b15",
+            "b10",
+            "b01",
+            "b13",
+            "b04",
+            "b07",
+            "b16"
+          ],
+          "started": 28.44928059999802,
+          "duration": 0.20856520000234013,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        },
+        {
+          "batch_id": 3,
+          "fixture_block_ids": [
+            "b17",
+            "b12",
+            "b19",
+            "b18",
+            "b08",
+            "b09",
+            "b02",
+            "b03"
+          ],
+          "started": 28.657852599997568,
+          "duration": 1.2965049000013096,
+          "status": "success",
+          "error_code": null
+        }
+      ],
+      "responses": {
+        "b17": "Từ nay chắc không trông cậy gì được nữa",
+        "b12": "Tên chỉ giỏi khoác lác đó",
+        "b19": "Tatsumaki cũng vậy thôi",
+        "b18": "Tên Áo Choàng Hói này...",
+        "b08": "Quả là tài nghệ xuất sắc",
+        "b09": "Hừ, gì chứ",
+        "b02": "Đang tuyển anh hùng mới! Chi tiết xem tại trang web",
+        "b03": "Quái nào thế"
+      }
+    },
+    {
+      "page_id": "s-manga_ja_1",
+      "arm": "batch_control",
+      "attempt": 2,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b20",
+            "b05"
+          ],
+          "started": 29.954365499997948,
+          "duration": 1.0100989999991725,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 2,
+          "fixture_block_ids": [
+            "b11",
+            "b21",
+            "b14",
+            "b06",
+            "b15",
+            "b10",
+            "b01",
+            "b13",
+            "b04",
+            "b07",
+            "b16"
+          ],
+          "started": 30.96452899999713,
+          "duration": 1.5277413000003435,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 3,
+          "fixture_block_ids": [
+            "b17",
+            "b12",
+            "b19",
+            "b18",
+            "b08",
+            "b09",
+            "b02",
+            "b03"
+          ],
+          "started": 32.49227509999764,
+          "duration": 1.2784786000011081,
+          "status": "success",
+          "error_code": null
+        }
+      ],
+      "responses": {
+        "b20": "Lần này nhờ có sự sắp xếp của ngài McCoy nên mới được bỏ qua, nhưng sự độc đoán và tự tung tự tác của cậu ta đã quá giới hạn rồi.",
+        "b05": "bằng cách đưa tin thiệt hại xung quanh là do \"Tatsumaki tiêu chuẩn hóa tập đoàn quái nhân quỷ\"",
+        "b11": "Nhưng vụ này càng khiến uy tín của Metal Knight sụt giảm trầm trọng.",
+        "b21": "Dù muốn uốn nắn nhưng sức mạnh quá chênh lệch nên chẳng ai kiểm soát nổi.",
+        "b14": "Sự yếu kém của tòa nhà này do chính hắn thiết kế và xây dựng.",
+        "b06": "Chúng ta cũng lấy lại được niềm tin từ những người giàu có sống ở đây.",
+        "b15": "Đúng thế, vậy mà dám gọi là pháo đài bất khả xâm phạm cơ đấy.",
+        "b10": "Tất cả cũng vì lợi ích của tổ chức thôi.",
+        "b01": "Công tác tuyên truyền diễn ra suôn sẻ nhỉ.",
+        "b13": "Robot bảo vệ bị hỏng.",
+        "b04": "Nâng cao hình ảnh qua quảng cáo và...",
+        "b07": "Nghe nói là do McCoy chỉ huy đấy.",
+        "b16": "Đã bỏ ra cả chục tỷ để xây dựng mà...",
+        "b17": "Từ giờ chắc không trông chờ gì được nữa",
+        "b12": "Cái tên chỉ giỏi nói phét đó",
+        "b19": "Tatsumaki cũng vậy thôi",
+        "b18": "Tên áo choàng hói...",
+        "b08": "Đúng là tài năng xuất chúng",
+        "b09": "Hừ, gì chứ",
+        "b02": "Đang tuyển anh hùng mới! Chi tiết xem tại trang chủ",
+        "b03": "Là ai thế?"
+      }
+    },
+    {
+      "page_id": "s-manga_ja_1",
+      "arm": "batch_control",
+      "attempt": 3,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b20",
+            "b05"
+          ],
+          "started": 33.770763499996974,
+          "duration": 0.21808960000271327,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        },
+        {
+          "batch_id": 2,
+          "fixture_block_ids": [
+            "b11",
+            "b21",
+            "b14",
+            "b06",
+            "b15",
+            "b10",
+            "b01",
+            "b13",
+            "b04",
+            "b07",
+            "b16"
+          ],
+          "started": 33.98885739999969,
+          "duration": 0.20906660000036936,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        },
+        {
+          "batch_id": 3,
+          "fixture_block_ids": [
+            "b17",
+            "b12",
+            "b19",
+            "b18",
+            "b08",
+            "b09",
+            "b02",
+            "b03"
+          ],
+          "started": 34.197930799997266,
+          "duration": 0.19433660000140662,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        }
+      ],
+      "responses": {}
+    },
+    {
+      "page_id": "s-manga_ja_1",
+      "arm": "ordered_microbatch",
+      "attempt": 1,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b01",
+            "b02"
+          ],
+          "started": 34.392304400000285,
+          "duration": 0.2124478999976418,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        },
+        {
+          "batch_id": 2,
+          "fixture_block_ids": [
+            "b03",
+            "b04",
+            "b05",
+            "b06",
+            "b07",
+            "b08",
+            "b09",
+            "b10",
+            "b11",
+            "b12",
+            "b13"
+          ],
+          "started": 34.604755000000296,
+          "duration": 0.21965409999756957,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        },
+        {
+          "batch_id": 3,
+          "fixture_block_ids": [
+            "b14",
+            "b15",
+            "b16",
+            "b17",
+            "b18",
+            "b19",
+            "b20",
+            "b21"
+          ],
+          "started": 34.82441479999761,
+          "duration": 0.20237959999940358,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        }
+      ],
+      "responses": {}
+    },
+    {
+      "page_id": "s-manga_ja_1",
+      "arm": "ordered_microbatch",
+      "attempt": 2,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b01",
+            "b02"
+          ],
+          "started": 35.02680119999786,
+          "duration": 0.1979124999998021,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        },
+        {
+          "batch_id": 2,
+          "fixture_block_ids": [
+            "b03",
+            "b04",
+            "b05",
+            "b06",
+            "b07",
+            "b08",
+            "b09",
+            "b10",
+            "b11",
+            "b12",
+            "b13"
+          ],
+          "started": 35.22471999999834,
+          "duration": 1.5831123999996635,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 3,
+          "fixture_block_ids": [
+            "b14",
+            "b15",
+            "b16",
+            "b17",
+            "b18",
+            "b19",
+            "b20",
+            "b21"
+          ],
+          "started": 36.807836699998006,
+          "duration": 0.22098209999967366,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        }
+      ],
+      "responses": {
+        "b03": "Ai thế nhỉ",
+        "b04": "Nhờ nâng cao hình ảnh qua quảng cáo và",
+        "b05": "đưa tin rằng thiệt hại xung quanh là do \"Tatsumaki tiêu diệt tập đoàn quái nhân quỷ\" nên",
+        "b06": "chúng ta đã lấy lại được lòng tin từ những người giàu có sinh sống ở đây.",
+        "b07": "Nghe nói đó là do sự chỉ đạo của ngài McCoy.",
+        "b08": "Quả là tài năng xuất chúng.",
+        "b09": "Hừm, có gì đâu",
+        "b10": "Vì nghĩ cho tổ chức mà thôi.",
+        "b11": "Tuy nhiên, vụ việc này càng làm sụp đổ thêm uy tín của Metal Knight.",
+        "b12": "Đúng là kẻ chỉ giỏi ba hoa.",
+        "b13": "Robot bảo vệ bị hỏng"
+      }
+    },
+    {
+      "page_id": "s-manga_ja_1",
+      "arm": "ordered_microbatch",
+      "attempt": 3,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b01",
+            "b02"
+          ],
+          "started": 37.028827599999204,
+          "duration": 0.21600109999781125,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        },
+        {
+          "batch_id": 2,
+          "fixture_block_ids": [
+            "b03",
+            "b04",
+            "b05",
+            "b06",
+            "b07",
+            "b08",
+            "b09",
+            "b10",
+            "b11",
+            "b12",
+            "b13"
+          ],
+          "started": 37.24483129999862,
+          "duration": 0.2145449000017834,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        },
+        {
+          "batch_id": 3,
+          "fixture_block_ids": [
+            "b14",
+            "b15",
+            "b16",
+            "b17",
+            "b18",
+            "b19",
+            "b20",
+            "b21"
+          ],
+          "started": 37.45938059999753,
+          "duration": 0.2095673000003444,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        }
+      ],
+      "responses": {}
+    },
+    {
+      "page_id": "s-manga_ja_1",
+      "arm": "full_page",
+      "attempt": 1,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b01",
+            "b02",
+            "b03",
+            "b04",
+            "b05",
+            "b06",
+            "b07",
+            "b08",
+            "b09",
+            "b10",
+            "b11",
+            "b12",
+            "b13",
+            "b14",
+            "b15",
+            "b16",
+            "b17",
+            "b18",
+            "b19",
+            "b20",
+            "b21"
+          ],
+          "started": 37.66903539999839,
+          "duration": 0.1913429999985965,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        }
+      ],
+      "responses": {}
+    },
+    {
+      "page_id": "s-manga_ja_1",
+      "arm": "full_page",
+      "attempt": 2,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b01",
+            "b02",
+            "b03",
+            "b04",
+            "b05",
+            "b06",
+            "b07",
+            "b08",
+            "b09",
+            "b10",
+            "b11",
+            "b12",
+            "b13",
+            "b14",
+            "b15",
+            "b16",
+            "b17",
+            "b18",
+            "b19",
+            "b20",
+            "b21"
+          ],
+          "started": 37.86038539999936,
+          "duration": 0.20455089999813936,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        }
+      ],
+      "responses": {}
+    },
+    {
+      "page_id": "s-manga_ja_1",
+      "arm": "full_page",
+      "attempt": 3,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b01",
+            "b02",
+            "b03",
+            "b04",
+            "b05",
+            "b06",
+            "b07",
+            "b08",
+            "b09",
+            "b10",
+            "b11",
+            "b12",
+            "b13",
+            "b14",
+            "b15",
+            "b16",
+            "b17",
+            "b18",
+            "b19",
+            "b20",
+            "b21"
+          ],
+          "started": 38.06494319999911,
+          "duration": 0.20843859999877168,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        }
+      ],
+      "responses": {}
+    },
+    {
+      "page_id": "s-manga_ja_2",
+      "arm": "batch_control",
+      "attempt": 1,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b08",
+            "b06"
+          ],
+          "started": 38.27341449999949,
+          "duration": 0.9265147000005527,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 2,
+          "fixture_block_ids": [
+            "b01",
+            "b02",
+            "b16",
+            "b03",
+            "b17",
+            "b15",
+            "b09",
+            "b12",
+            "b14",
+            "b11",
+            "b13"
+          ],
+          "started": 39.19993229999818,
+          "duration": 1.3027021000016248,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 3,
+          "fixture_block_ids": [
+            "b10",
+            "b07",
+            "b05",
+            "b04"
+          ],
+          "started": 40.50264029999744,
+          "duration": 0.8386203000009118,
+          "status": "success",
+          "error_code": null
+        }
+      ],
+      "responses": {
+        "b08": "Quảng cáo cũng được đón nhận và tỷ lệ ủng hộ từ người dân đang tăng lên phải không?",
+        "b06": "Số lượng người đăng ký làm anh hùng vẫn không hề tăng lên.",
+        "b01": "Khác nào ôm bom trong người đấy",
+        "b02": "Phải tăng cường giám sát hai kẻ này hơn nữa",
+        "b16": "Ngoại trừ một số anh hùng cấp cao như Tatsumaki",
+        "b03": "Vẫn chưa tìm được người thay thế sao?",
+        "b17": "Các anh hùng dù có hội đồng lại cũng vẫn thua",
+        "b15": "Lũ quái vật hung ác xuất hiện gần như mỗi ngày",
+        "b09": "Thì đúng là vậy nhưng mà...",
+        "b12": "Trông có vẻ làm ăn khá khẩm nhỉ",
+        "b14": "Tuy nhiên, không thể lơ là được",
+        "b11": "Tôi đã xem tin tức và quảng cáo rồi",
+        "b13": "Cảm ơn ngài đã quá khen",
+        "b10": "Thật ra thì...",
+        "b07": "Tại sao chứ?",
+        "b05": "Chuyện là...",
+        "b04": "Vâng"
+      }
+    },
+    {
+      "page_id": "s-manga_ja_2",
+      "arm": "batch_control",
+      "attempt": 2,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b08",
+            "b06"
+          ],
+          "started": 41.34127040000021,
+          "duration": 1.540060999999696,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 2,
+          "fixture_block_ids": [
+            "b01",
+            "b02",
+            "b16",
+            "b03",
+            "b17",
+            "b15",
+            "b09",
+            "b12",
+            "b14",
+            "b11",
+            "b13"
+          ],
+          "started": 42.88133409999864,
+          "duration": 1.2921072999997705,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 3,
+          "fixture_block_ids": [
+            "b10",
+            "b07",
+            "b05",
+            "b04"
+          ],
+          "started": 44.173445399999764,
+          "duration": 0.7419429999972635,
+          "status": "success",
+          "error_code": null
+        }
+      ],
+      "responses": {
+        "b08": "Quảng cáo cũng được đóng lòng và tỉ lệ ủng hộ từ người dân cũng đang tăng lên phải không?",
+        "b06": "Số lượng người tình nguyện làm anh hùng vẫn không Hề tăng lên.",
+        "b01": "Khác nào ôm bom tự sát đâu",
+        "b02": "Phải tăng cường giám sát hai kẻ này hơn nữa",
+        "b16": "Trừ một số anh hùng cấp cao như Tatsumaki",
+        "b03": "Vẫn chưa tìm được người thay thế sao?",
+        "b17": "Các anh hùng dù có hợp sức lại cũng vẫn thua",
+        "b15": "Những quái nhân hung ác xuất hiện gần như mỗi ngày",
+        "b09": "Cũng đúng là vậy nhưng mà...",
+        "b12": "Trông có vẻ phất lên nhỉ",
+        "b14": "Tuy nhiên không thể chủ quan được",
+        "b11": "Ta đã xem bản tin và quảng cáo rồi",
+        "b13": "Vinh hạnh quá ạ",
+        "b10": "Thật ra thì...",
+        "b07": "Tại sao chứ?",
+        "b05": "Chuyện là...",
+        "b04": "Vâng"
+      }
+    },
+    {
+      "page_id": "s-manga_ja_2",
+      "arm": "batch_control",
+      "attempt": 3,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b08",
+            "b06"
+          ],
+          "started": 44.9154028999983,
+          "duration": 0.8463824999998906,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 2,
+          "fixture_block_ids": [
+            "b01",
+            "b02",
+            "b16",
+            "b03",
+            "b17",
+            "b15",
+            "b09",
+            "b12",
+            "b14",
+            "b11",
+            "b13"
+          ],
+          "started": 45.76179879999836,
+          "duration": 1.2841049999988172,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 3,
+          "fixture_block_ids": [
+            "b10",
+            "b07",
+            "b05",
+            "b04"
+          ],
+          "started": 47.04590819999794,
+          "duration": 0.7594288000000233,
+          "status": "success",
+          "error_code": null
+        }
+      ],
+      "responses": {
+        "b08": "Quảng cáo cũng được đón nhận và tỉ lệ ủng hộ từ người dân đang tăng lên phải không?",
+        "b06": "Số lượng người đăng ký làm anh hùng vẫn không hề tăng lên.",
+        "b01": "Khác nào ôm bom trong người.",
+        "b02": "Phải thắt chặt giám sát hai kẻ này hơn nữa.",
+        "b16": "Trừ một số anh hùng cấp cao như Tatsumaki,",
+        "b03": "Vẫn chưa tìm được người thay thế sao?",
+        "b17": "các anh hùng dù có hợp sức lại cũng vẫn thua.",
+        "b15": "Những tên quái nhân hung ác xuất hiện gần như mỗi ngày.",
+        "b09": "Cũng đúng là vậy, nhưng mà...",
+        "b12": "Trông có vẻ làm ăn khá khẩm nhỉ.",
+        "b14": "Tuy nhiên không thể chủ quan được.",
+        "b11": "Ta đã xem tin tức và quảng cáo rồi.",
+        "b13": "Vinh hạnh quá.",
+        "b10": "Thật ra thì...",
+        "b07": "Tại sao chứ?",
+        "b05": "Chuyện là...",
+        "b04": "Vâng"
+      }
+    },
+    {
+      "page_id": "s-manga_ja_2",
+      "arm": "ordered_microbatch",
+      "attempt": 1,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b01",
+            "b02"
+          ],
+          "started": 47.805415200000425,
+          "duration": 0.8872520999975677,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 2,
+          "fixture_block_ids": [
+            "b03",
+            "b04",
+            "b05",
+            "b06",
+            "b07",
+            "b08",
+            "b09",
+            "b10",
+            "b11",
+            "b12",
+            "b13"
+          ],
+          "started": 48.692669599997316,
+          "duration": 1.3034648000029847,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 3,
+          "fixture_block_ids": [
+            "b14",
+            "b15",
+            "b16",
+            "b17"
+          ],
+          "started": 49.996138899998186,
+          "duration": 0.9259984999989683,
+          "status": "success",
+          "error_code": null
+        }
+      ],
+      "responses": {
+        "b01": "Khác nào đang ôm một quả bom trong người đâu.",
+        "b02": "Phải tăng cường giám sát hai người này hơn nữa.",
+        "b03": "Vẫn chưa tìm thấy người thay thế sao?",
+        "b04": "Vâng.",
+        "b05": "Chuyện là...",
+        "b06": "Số lượng người đăng ký làm anh hùng vẫn không hề tăng lên.",
+        "b07": "Tại sao chứ?",
+        "b08": "Quảng cáo đang được đón nhận và tỉ lệ ủng hộ từ người dân cũng đang tăng lên cơ mà?",
+        "b09": "Đúng là vậy nhưng...",
+        "b10": "Thực ra là――",
+        "b11": "Tôi đã xem tin tức và quảng cáo rồi đấy.",
+        "b12": "Trông có vẻ phát đạt lắm nhỉ.",
+        "b13": "Ngài quá khen.",
+        "b14": "Tuy nhiên, không thể chủ quan được.",
+        "b15": "Những kẻ dị nhân hung ác xuất hiện hầu như mỗi ngày.",
+        "b16": "Trừ một số anh hùng cấp cao như Tatsumaki,",
+        "b17": "nhiều anh hùng dù có hợp sức lại cũng vẫn thua cuộc."
+      }
+    },
+    {
+      "page_id": "s-manga_ja_2",
+      "arm": "ordered_microbatch",
+      "attempt": 2,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b01",
+            "b02"
+          ],
+          "started": 50.922160399997665,
+          "duration": 0.8740336000009847,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 2,
+          "fixture_block_ids": [
+            "b03",
+            "b04",
+            "b05",
+            "b06",
+            "b07",
+            "b08",
+            "b09",
+            "b10",
+            "b11",
+            "b12",
+            "b13"
+          ],
+          "started": 51.79619869999806,
+          "duration": 1.2572932000002766,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 3,
+          "fixture_block_ids": [
+            "b14",
+            "b15",
+            "b16",
+            "b17"
+          ],
+          "started": 53.05349579999893,
+          "duration": 0.9193558000006306,
+          "status": "success",
+          "error_code": null
+        }
+      ],
+      "responses": {
+        "b01": "Khác nào ôm bom trong người đấy",
+        "b02": "Hai kẻ này phải được tăng cường giám sát hơn nữa",
+        "b03": "Vẫn chưa tìm thấy người thay thế sao?",
+        "b04": "Vâng.",
+        "b05": "Chuyện là...",
+        "b06": "Số lượng người đăng ký làm anh hùng vẫn không hề tăng lên.",
+        "b07": "Tại sao?",
+        "b08": "Quảng cáo vẫn đang rất được lòng và tỷ lệ ủng hộ từ người dân cũng tăng lên cơ mà?",
+        "b09": "Đúng là vậy nhưng...",
+        "b10": "Thực ra là――",
+        "b11": "Tôi đã xem bản tin và quảng cáo rồi đấy.",
+        "b12": "Trông có vẻ làm ăn khấm khá nhỉ.",
+        "b13": "Cảm ơn ngài đã quá khen.",
+        "b14": "Tuy nhiên, không thể chủ quan.",
+        "b15": "Những kẻ dị nhân hung ác xuất hiện hầu như mỗi ngày.",
+        "b16": "Trừ một số anh hùng cấp cao như Tatsumaki,",
+        "b17": "các anh hùng dù có hợp sức lại vẫn phải thua cuộc."
+      }
+    },
+    {
+      "page_id": "s-manga_ja_2",
+      "arm": "ordered_microbatch",
+      "attempt": 3,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b01",
+            "b02"
+          ],
+          "started": 53.97286650000024,
+          "duration": 0.7412773999967612,
+          "status": "success",
+          "error_code": null
+        },
+        {
+          "batch_id": 2,
+          "fixture_block_ids": [
+            "b03",
+            "b04",
+            "b05",
+            "b06",
+            "b07",
+            "b08",
+            "b09",
+            "b10",
+            "b11",
+            "b12",
+            "b13"
+          ],
+          "started": 54.714146499998606,
+          "duration": 0.4341533000006166,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        },
+        {
+          "batch_id": 3,
+          "fixture_block_ids": [
+            "b14",
+            "b15",
+            "b16",
+            "b17"
+          ],
+          "started": 55.14830330000041,
+          "duration": 0.2130401999966125,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        }
+      ],
+      "responses": {
+        "b01": "Khác gì ôm bom tự sát đâu",
+        "b02": "Hai đứa này phải được tăng cường giám sát hơn nữa"
+      }
+    },
+    {
+      "page_id": "s-manga_ja_2",
+      "arm": "full_page",
+      "attempt": 1,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b01",
+            "b02",
+            "b03",
+            "b04",
+            "b05",
+            "b06",
+            "b07",
+            "b08",
+            "b09",
+            "b10",
+            "b11",
+            "b12",
+            "b13",
+            "b14",
+            "b15",
+            "b16",
+            "b17"
+          ],
+          "started": 55.36136830000032,
+          "duration": 1.6925654999977269,
+          "status": "success",
+          "error_code": null
+        }
+      ],
+      "responses": {
+        "b01": "Khác nào đang ôm bom trong người đâu.",
+        "b02": "Chúng ta phải tăng cường giám sát hai kẻ này hơn nữa.",
+        "b03": "Vẫn chưa tìm được người thay thế sao?",
+        "b04": "Vâng.",
+        "b05": "Chuyện là...",
+        "b06": "Số lượng người đăng ký làm anh hùng mãi vẫn không tăng lên.",
+        "b07": "Tại sao chứ?",
+        "b08": "Quảng cáo cũng được đón nhận và tỉ lệ ủng hộ từ người dân đang tăng lên cơ mà?",
+        "b09": "Đúng là vậy nhưng...",
+        "b10": "Thực ra thì――",
+        "b11": "Tôi đã xem tin tức và quảng cáo rồi.",
+        "b12": "Trông có vẻ làm ăn phát đạt phết nhỉ.",
+        "b13": "Ngài quá khen.",
+        "b14": "Tuy nhiên, không thể chủ quan được.",
+        "b15": "Những tên quái nhân hung ác xuất hiện gần như mỗi ngày.",
+        "b16": "Nếu ngoại trừ một số anh hùng cấp cao như Tatsumaki,",
+        "b17": "thì dù có hội đồng lại cũng vẫn sẽ thua mà thôi."
+      }
+    },
+    {
+      "page_id": "s-manga_ja_2",
+      "arm": "full_page",
+      "attempt": 2,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b01",
+            "b02",
+            "b03",
+            "b04",
+            "b05",
+            "b06",
+            "b07",
+            "b08",
+            "b09",
+            "b10",
+            "b11",
+            "b12",
+            "b13",
+            "b14",
+            "b15",
+            "b16",
+            "b17"
+          ],
+          "started": 57.053942700000334,
+          "duration": 0.20836039999994682,
+          "status": "rate_limited",
+          "error_code": "rate_limited"
+        }
+      ],
+      "responses": {}
+    },
+    {
+      "page_id": "s-manga_ja_2",
+      "arm": "full_page",
+      "attempt": 3,
+      "calls": [
+        {
+          "batch_id": 1,
+          "fixture_block_ids": [
+            "b01",
+            "b02",
+            "b03",
+            "b04",
+            "b05",
+            "b06",
+            "b07",
+            "b08",
+            "b09",
+            "b10",
+            "b11",
+            "b12",
+            "b13",
+            "b14",
+            "b15",
+            "b16",
+            "b17"
+          ],
+          "started": 57.26230989999749,
+          "duration": 1.754942800002027,
+          "status": "success",
+          "error_code": null
+        }
+      ],
+      "responses": {
+        "b01": "Khác nào đang ôm bom trong người đấy.",
+        "b02": "Chúng ta phải tăng cường giám sát hai kẻ này hơn nữa.",
+        "b03": "Vẫn chưa tìm được người thay thế sao?",
+        "b04": "Vâng.",
+        "b05": "Chuyện là...",
+        "b06": "Số lượng người đăng ký làm anh hùng mãi vẫn không tăng lên.",
+        "b07": "Tại sao?",
+        "b08": "Quảng cáo cũng được đón nhận và tỉ lệ ủng hộ từ người dân đang tăng lên mà nhỉ?",
+        "b09": "Chuyện đó thì đúng là vậy, nhưng...",
+        "b10": "Thực ra thì...",
+        "b11": "Tôi đã xem tin tức và quảng cáo rồi.",
+        "b12": "Trông có vẻ làm ăn phát đạt phết nhỉ.",
+        "b13": "Ngài quá khen.",
+        "b14": "Tuy nhiên, không thể chủ quan được.",
+        "b15": "Bọn quái nhân hung ác xuất hiện gần như mỗi ngày.",
+        "b16": "Trừ một số anh hùng cấp cao như Tatsumaki ra...",
+        "b17": "Dù có hợp sức lại thì các anh hùng khác vẫn cứ thua cuộc."
+      }
+    }
+  ],
+  "metadata": {
+    "captured_at": "2026-08-02T17:26:47.972115+00:00",
+    "commit": "1b7308ced8e7225701b6717cec2780106f9b104f",
+    "device": "Windows-11-10.0.26200-SP0",
+    "model": "gemini-flash-lite-latest",
+    "temperature": 0.2
+  }
+}

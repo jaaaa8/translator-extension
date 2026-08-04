@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 import asyncio
 import json
+import time
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -103,16 +104,24 @@ async def ocr_stream(
         return JSONResponse(status_code=409, content={"error": "analysis_missing"})
 
     async def stream():
+        analysis_started = time.perf_counter()
         try:
             analysis = cached_analysis
             if analysis is None:
-                analysis = await asyncio.to_thread(pipeline.analyze, data, crop_or_error, analysis_key)
+                analysis, analysis_cache_hit = await asyncio.to_thread(
+                    pipeline.analyze_with_status, data, crop_or_error, analysis_key
+                )
+            else:
+                analysis_cache_hit = True
+            analysis_ms = max(0, round((time.perf_counter() - analysis_started) * 1000))
             yield _ndjson({
                 "type": "analysis_ready",
                 "analysis_key": analysis_key,
                 "image_w": analysis.image_w,
                 "image_h": analysis.image_h,
                 "regions": len(analysis.regions),
+                "analysis_ms": analysis_ms,
+                "analysis_cache_hit": analysis_cache_hit,
             })
             iterator = pipeline._iter_ocr(analysis, analysis_key, src_lang, ocr_key, lambda: False)
             while not await request.is_disconnected():
@@ -157,7 +166,7 @@ def translate_items(body: TranslateItemsBody):
     if body.src_lang not in LANGS:
         return JSONResponse(
             status_code=422,
-            content={"error": f"src_lang khÃ´ng há»— trá»£: {body.src_lang}"},
+            content={"error": f"src_lang không hỗ trợ: {body.src_lang}"},
         )
     rows = [item.model_dump() for item in body.items]
     if len({row["id"] for row in rows}) != len(rows):
@@ -167,8 +176,16 @@ def translate_items(body: TranslateItemsBody):
             rows, body.src_lang, body.dst_lang
         )
         return {"items": _normalize_items(translated, [row["id"] for row in rows])}
-    except (TranslateError, ValueError) as error:
-        return JSONResponse(status_code=502, content={"error": f"gemini: {error}"})
+    except TranslateError as error:
+        return JSONResponse(
+            status_code=429 if error.code == 429 else 502,
+            content={"error": f"gemini: {error}", "error_code": error.error_kind or "generation_error"},
+        )
+    except ValueError as error:
+        return JSONResponse(
+            status_code=502,
+            content={"error": f"gemini: {error}", "error_code": "invalid_response"},
+        )
 
 
 @app.post("/translate")

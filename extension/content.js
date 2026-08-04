@@ -88,7 +88,7 @@ function translatePage(scope, requestSrcLang = srcLang, requestDstLang = dstLang
   let jobs;
   try { jobs = snapshotJobs(scope, requestId, srcLang, dstLang); }
   catch (error) { return Promise.resolve({ ok: false, error: error.message || String(error) }); }
-  const done = new Promise((resolve) => pendingScopes.set(requestId, { resolve, startedAt: performance.now(), firstOverlayMs: null }));
+  const done = new Promise((resolve) => pendingScopes.set(requestId, { resolve, startedAt: performance.now(), firstOverlayMs: null, firstOverlayByJob: new Map() }));
   const message = { type: "start_scope", request_id: requestId, replaces_request_id: replacesRequestId, scope, src_lang: srcLang, dst_lang: dstLang, jobs };
   activeScopeMessages.set(requestId, message);
   translationPort().postMessage(message);
@@ -110,7 +110,10 @@ function handleEvent(event) {
   if (event.type === "scope_done") {
     const pending = pendingScopes.get(event.request_id);
     if (!pending) return;
-    cleanupRequest(event.request_id, { ok: true, images: event.images, blocks: event.translated, failed: event.failed, cacheHit: event.cache_hit === true, first_overlay_ms: pending.firstOverlayMs, metrics: event.metrics });
+    const pageMetrics = (event.page_metrics || []).map((row) => pending.firstOverlayByJob.has(row.job_id)
+      ? { ...row, first_overlay_ms: pending.firstOverlayByJob.get(row.job_id) } : row);
+    const metrics = pending.firstOverlayMs == null ? event.metrics : { ...(event.metrics || {}), first_overlay_ms: Number.isFinite(event.metrics?.first_overlay_ms) ? Math.min(event.metrics.first_overlay_ms, pending.firstOverlayMs) : pending.firstOverlayMs };
+    cleanupRequest(event.request_id, { ok: true, images: event.images, blocks: event.translated, failed: event.failed, cacheHit: event.cache_hit === true, first_overlay_ms: pending.firstOverlayMs, metrics, page_metrics: pageMetrics });
   }
 }
 
@@ -141,7 +144,12 @@ function upsertOverlayBlock(img, binding, event) {
   block.element.textContent = event.trans_text;
   position(img);
   const pending = pendingScopes.get(binding.requestId);
-  if (pending && pending.firstOverlayMs == null) { pending.firstOverlayMs = Math.round(performance.now() - pending.startedAt); translationPort().postMessage({ type: "render_metric", request_id: binding.requestId, first_overlay_ms: pending.firstOverlayMs }); }
+  if (pending && !pending.firstOverlayByJob.has(event.job_id)) {
+    const firstOverlayMs = Math.round(performance.now() - pending.startedAt);
+    pending.firstOverlayByJob.set(event.job_id, firstOverlayMs);
+    if (pending.firstOverlayMs == null || firstOverlayMs < pending.firstOverlayMs) pending.firstOverlayMs = firstOverlayMs;
+    translationPort().postMessage({ type: "render_metric", request_id: binding.requestId, job_id: event.job_id, first_overlay_ms: firstOverlayMs });
+  }
 }
 
 function removeOverlay(img) { const overlay = overlays.get(img); if (!overlay) return; overlay.resizeObserver.disconnect(); overlay.container.remove(); overlays.delete(img); }

@@ -10,7 +10,7 @@
 
 Spec A tạo một nền đo đủ tin cậy để Spec B quyết định chính sách dịch theo dữ liệu thay vì suy luận từ code:
 
-1. Thời gian từng stage của một trang thật được ghi đúng, gồm cả `analysis_ms`, thời điểm OCR hoàn tất và từng call Gemini.
+1. Thời gian từng stage của một trang thật được ghi đúng, gồm cả `analysis_ms`, thời điểm OCR hoàn tất và từng request extension → server `/translate-items`.
 2. Sáu ảnh người dùng cung cấp được đưa ra khỏi `server/vendor/` đang bị Git ignore và lưu đúng một bản trong fixture được track.
 3. Ba trang nguồn có ground truth về thứ tự đọc, transcript OCR cố định và metadata ngôn ngữ/bố cục.
 4. Chất lượng dịch được chấm tay theo rubric cố định; CI chỉ kiểm các guardrail có tính xác định và không gọi Gemini.
@@ -136,13 +136,23 @@ Mỗi phần tử `regions` dùng ID fixture độc lập với runtime `block_i
 }
 ```
 
-`kind` chỉ nhận `dialogue`, `sfx` hoặc `sign`. Đây là annotation dành riêng cho reviewer/evaluator, không được gửi cho Gemini và không thuộc production request contract. Mọi kind vẫn được dịch và phải trả exact ID; chỉ `dialogue` tham gia điểm ngữ cảnh hội thoại. Cụ thể, poster ngang trên `s-manga_ja_1` phải được annotate là `sign`, không được giả làm lời thoại.
+`kind` chỉ nhận `dialogue`, `sfx` hoặc `sign`. Đây là annotation dành riêng cho reviewer/evaluator, không được gửi cho Gemini và không thuộc production request contract. Boundary HTTP hiện tại lọc prompt item còn đúng `id`/`text`; policy probe Task 5 dùng allowlist riêng `id`/`text`/`reading_order`/`bbox` và không đi qua `translate_items()`, nên hai contract cố ý khác nhau. Mọi kind vẫn được dịch và phải trả exact ID; chỉ `dialogue` tham gia điểm ngữ cảnh hội thoại. Cụ thể, poster ngang trên `s-manga_ja_1` phải được annotate là `sign`, không được giả làm lời thoại.
 
 Expected order được người đọc xác nhận độc lập theo panel và chiều đọc manga. Với spread Nhật, toàn bộ nửa phải đi trước nửa trái. Với trang Portuguese, chiều đọc vẫn là RTL dù ngôn ngữ là Latin. Tuyệt đối không sinh `reading_order` bằng cách dump `sort_textblk_list()`: vendor đã sai một region trên `s-manga_ja_1` và sai chiều toàn trang trên `mangadex_pt`. Hai sai lệch này phải nằm trong `known_order_failures` để reviewer có mốc kiểm tra, không xác nhận vòng tròn chính output vendor.
 
 Region detector được ghép với anchor manifest bằng IoU lớn hơn `0.5`. Mỗi required anchor phải ghép đúng một region, một region không được ghép hai anchor. Region mới hoặc mất region phải được báo trong kết quả diagnostic, không tự sửa manifest.
 
-`term_groups` chỉ chứa thuật ngữ/tên riêng thực sự lặp trong trang và các surface form được chấp nhận. Spec A không thêm NER tự động.
+`term_groups` chỉ chứa thuật ngữ/tên riêng thực sự lặp trong trang và các surface form nguồn được chấp nhận. Mỗi group dùng schema:
+
+```json
+{
+  "canonical": "マッコイ",
+  "accepted_source_forms": ["マッコイ", "マッコイ氏"],
+  "fixture_block_ids": ["b07", "b20"]
+}
+```
+
+`canonical` là lemma ổn định và duy nhất trong một trang; nó không bắt buộc xuất hiện nguyên dạng trong transcript. `accepted_source_forms` chỉ mô tả các dạng nguồn cùng một thuật ngữ. `fixture_block_ids` phải tham chiếu ít nhất hai region khác nhau trong trang. Group phục vụ kiểm tra self-consistency giữa các block; Spec A không đóng đinh surface form tiếng Việt, không thêm NER tự động và không dùng group để tự chấm chất lượng ngữ nghĩa.
 
 ### 4.2 Ảnh tham chiếu lỗi
 
@@ -158,7 +168,7 @@ Các ảnh tham chiếu lỗi không được đưa vào điểm chất lượng
 
 ## 5. Contract telemetry
 
-Mọi thời điểm phía extension tính tương đối từ lúc producer được accepted. Mọi duration dùng millisecond nguyên, không âm.
+`analysis_ms` là duration; `*_done_ms` và `first_*_ms` là elapsed từ producer accepted, trừ `first_overlay_ms`; field này đo từ content scope start để giữ tương thích aggregate/benchmark. Mỗi row có `accepted_offset_ms`; producer-relative overlay xấp xỉ `first_overlay_ms - accepted_offset_ms`; sai số còn lại là IPC + MV3 worker wake. Stage không chạy dùng `null`. Mọi duration dùng millisecond nguyên, không âm; riêng `accepted_offset_ms` là offset chứ không phải duration và được phép âm khi một request đến sau bám vào producer đã được accept từ trước (shared producer).
 
 ### 5.1 Analysis và OCR
 
@@ -186,9 +196,10 @@ Metric trang gồm ít nhất:
 - `first_translation_ms`;
 - `final_translation_ms`;
 - `first_overlay_ms`;
+- `accepted_offset_ms`;
 - `total_ms`.
 
-`analysis_ms` là duration stage; các trường có hậu tố `_done_ms`/`first_*_ms` là elapsed time từ producer accepted. Hai loại không được trộn trong báo cáo.
+`analysis_ms` là duration stage. `*_done_ms` và `first_*_ms` là elapsed từ producer accepted, trừ `first_overlay_ms`, được content đo từ scope start; `accepted_offset_ms` cho phép xấp xỉ producer-relative overlay bằng `first_overlay_ms - accepted_offset_ms`, với sai số IPC + MV3 worker wake. Đây là offset giữa hai mốc accepted, không phải duration, nên có thể âm khi request đến sau dùng chung một producer đã được accept trước đó. Stage không chạy là `null`.
 
 `completeJob()` phải nhận hoặc tạo đúng một metric row cho mỗi job hoàn tất. Có ba nguồn row:
 
@@ -196,11 +207,11 @@ Metric trang gồm ít nhất:
 - warm page-cache hit trong `replayPage()` tạo row với `cache_hit: true`, các stage không chạy là `null` thay vì giả thành `0`;
 - lỗi trong `acceptScope()` trước khi có producer tạo row với `cache_hit: false`, các stage là `null` và `error_code` bằng mã đã phát trong `job_error`. `page_artifact_key` được phép `null` nếu lỗi xảy ra trước khi tạo key.
 
-`scope_done.metrics` vẫn là aggregate tương thích ngược, nhưng `scope_done.page_metrics` phải phát toàn bộ `request.metricRows` để record từng job thực sự rời service worker. Mỗi row gồm `job_id`, `page_artifact_key`, `cache_hit`, `error_code`, các metric trang ở trên, tổng `recognized`/`failed` và trace Gemini của đúng producer nếu có; không chứa source URL, API key hay text. Không được gọi giá trị `Math.max(...)` của nhiều row là metric của một trang.
+`scope_done.metrics` vẫn là aggregate tương thích ngược, nhưng `scope_done.page_metrics` phải phát toàn bộ `request.metricRows` để record từng job thực sự rời service worker. Mỗi row gồm `job_id`, `page_artifact_key`, `cache_hit`, `error_code`, `accepted_offset_ms`, các metric trang ở trên, tổng `recognized`/`failed` và trace request dịch của đúng producer nếu có; không chứa source URL, API key hay text. Không được gọi giá trị `Math.max(...)` của nhiều row là metric của một trang.
 
-### 5.2 Trace từng call Gemini
+### 5.2 Trace từng request dịch extension → server
 
-Mỗi call có một record không chứa source URL đầy đủ hoặc API key:
+Mỗi request extension → server `/translate-items` có một record không chứa source URL đầy đủ hoặc API key. Server có thể retry hoặc đổi client Gemini bên trong, nên số trace có thể ít hơn số Gemini attempt thật và `duration_ms` gộp thời gian retry/failover đó. Spec A không thêm telemetry attempt phía server:
 
 ```json
 {
@@ -261,6 +272,8 @@ Mỗi capture lưu:
 - lỗi/rate-limit;
 - không lưu API key.
 
+Capture phải có đúng năm metadata bắt buộc: `captured_at`, `commit`, `device`, `model` và `temperature`. `captured_at` là ISO-8601 UTC có timezone, `commit`/`device`/`model` là chuỗi không rỗng, `temperature` là số hữu hạn; thiếu, thừa hoặc sai kiểu làm `validate_capture` fail. `evaluate_gate` echo nguyên `captured_at` từ capture và không sinh timestamp mới. Đây là trust boundary cho artifact đã commit; `run_quality_probe(metadata=None)` vẫn chỉ là helper test và không tạo artifact đủ điều kiện gate.
+
 Đối với fixture Portuguese, runner dùng `source_name` từ manifest để prompt nói `Portuguese`. Đây là probe benchmark, không tuyên bố production đã hỗ trợ `src_lang=pt`.
 
 ## 7. Chấm chất lượng
@@ -286,7 +299,9 @@ Trang Portuguese chỉ chấm ba mục an toàn `Đúng nghĩa`, `Giọng/mức 
 
 `preview_then_full` không xuất hiện trong bảng chấm chất lượng; nó chỉ có record latency có điều kiện như mục 6.
 
-Worklog lưu điểm từng attempt, `context_score` hoặc `not_applicable`, ghi chú ngắn và reviewer. Không bắt buộc một bản dịch gold duy nhất vì nhiều cách dịch tự nhiên có thể cùng đúng.
+Điểm từng attempt, `context_score` hoặc `not_applicable`, ghi chú ngắn và reviewer nằm trong `captures/2026-08-01-manual-scores.json` đã commit; section `manual_review` của worklog giữ nguyên artifact evaluator. Không bắt buộc một bản dịch gold duy nhất vì nhiều cách dịch tự nhiên có thể cùng đúng.
+
+Mỗi manual score Nhật có annotation explicit `term_forms: {canonical: {fixture_block_id: target_surface_form}}`. Mỗi canonical phải có đúng các `fixture_block_ids` của term group; evaluator chuẩn hóa `strip().casefold()` và reject hơn một surface form trong chính response/attempt đó trừ khi reviewer chấm `terms = 0`. Nó không so sánh surface form giữa các attempt, không suy đoán từ translation text và không dùng NER hay LLM judge.
 
 ### 7.2 Guardrail tự động trong CI
 
@@ -296,7 +311,8 @@ CI chỉ đọc manifest và capture đã commit:
 - SHA-256 fixture đúng;
 - exact ID set, không trùng, không thiếu, translation không rỗng;
 - `reading_order` là dãy liên tục và khớp expected manifest;
-- term group đã annotate không xuất hiện với nhiều surface form xung đột trong cùng trang;
+- source page Portuguese bắt buộc có `reading_direction: rtl`;
+- term group đã annotate không xuất hiện với nhiều surface form xung đột trong cùng trang, trừ khi reviewer chấm `terms = 0`;
 - tính và báo `translated_chars`, `source_chars`, tỷ lệ độ dài và `chars_per_kpx` theo bbox.
 
 Các số độ dài chỉ là warning trong Spec A. Text bbox hiện không phải balloon/layout bbox, nên chưa được dùng làm pass/fail trước Spec C.
@@ -311,7 +327,7 @@ CI kiểm evaluator bằng capture tĩnh; CI tuyệt đối không gọi Gemini.
 4. Trên từng spread Nhật, tính median `context_score` của ba attempt hợp lệ cho `batch_control` và mỗi candidate.
 5. Nếu `batch_control` đạt median `context_score >= 5` trên cả hai spread, ghi kết quả `no_context_headroom`: với trần `6`, không candidate nào có thể đạt mức tăng `2` trên một spread. Đây là kết quả xác định “không còn headroom đủ lớn cho ordering/batching theo ngưỡng đã chọn”, không phải gate hỏng. Reading order vẫn phải được sửa như correctness bug, nhưng không ship batching mới với claim tăng chất lượng; phần tối ưu chất lượng của Spec B phải re-target sang bottleneck tiếp theo đã đo như OCR, model hoặc prompt và được duyệt lại trước implementation plan.
 6. Ngoài nhánh `no_context_headroom`, candidate qua ngưỡng cải thiện so với `batch_control` khi không thấp hơn quá `1` điểm trên bất kỳ spread nào và cao hơn ít nhất `2` điểm trên ít nhất một spread. Dung sai một điểm hấp thụ dao động nhỏ của rubric; yêu cầu tăng hai điểm ngăn một dao động đơn lẻ được gọi là thắng.
-7. Nếu không candidate nào qua ngưỡng ở nhánh còn headroom, quality gate bị chặn và Spec B không được ship policy mới. Nếu chỉ một candidate qua, chọn candidate đó. Nếu cả hai qua, so sánh `full_page` với `ordered_microbatch` bằng cùng quy tắc; nếu không arm nào thắng rõ về `context_score`, coi chất lượng hòa và dùng số call Gemini rồi total latency làm tie-breaker.
+7. Nếu không candidate nào qua ngưỡng ở nhánh còn headroom, quality gate bị chặn và Spec B không được ship policy mới. Nếu chỉ một candidate qua, chọn candidate đó. Nếu cả hai qua, so sánh `full_page` với `ordered_microbatch` bằng cùng quy tắc; nếu không arm nào thắng rõ về `context_score`, coi chất lượng hòa và dùng số call Gemini rồi total latency làm tie-breaker. Chi phí tie-break cộng toàn bộ attempt đã capture của candidate trên cả ba source page, kể cả call `failed`, `rate_limited` hoặc `invalid_response`, để lỗi thoáng qua không bị xóa khỏi chi phí policy.
 8. Chỉ khi `full_page` được chọn và first-overlay latency còn cần đánh đổi, mới chạy probe `preview_then_full` trên hai spread Nhật. Probe phải có ít nhất hai paired run trả exact ID; nếu không cải thiện first overlay hoặc làm xấu final latency/lỗi/rate-limit mà không có lợi ích đo được, giữ `full_page`.
 9. Nếu preview cải thiện first overlay nhưng phải trả thêm call/final latency, worklog trình bày đúng trade-off và mặc định chọn `full_page`. Chỉ chọn preview khi người dùng duyệt rõ sau khi xem số đo; Spec A không phát minh một ngưỡng phần trăm tùy ý.
 10. Quyết định và bằng chứng được ghi trong worklog; không sửa production policy ngay trong Spec A.
@@ -330,7 +346,9 @@ Worklog chứa ba phần:
 
 - `telemetry_validation`: một cold và một warm end-to-end run cho mỗi trang Nhật; với Portuguese chỉ chạy analysis/OCR và batch-scheduling trace bằng recognizer Latin hiện có, cộng policy probe transcript, cho tới khi Spec B thêm `pt` production. Phần này lưu `measurement_device`, từng `page_metrics` và `baseline_batches` đã review;
 - `policy_probe`: ba attempt cho mỗi trang/quality arm như mục 6, cộng `preview_then_full` latency probe nếu điều kiện kích hoạt được thỏa;
-- `manual_review`: rubric, `context_score`/`not_applicable`, critical errors và quyết định `selected`, `blocked` hoặc `no_context_headroom`.
+- `manual_review`: nguyên artifact `evaluate` (`captured_at`, `decision` là một trong `selected`/`blocked`/`inconclusive`/`no_context_headroom`, `reason`, `pages`, `arms`); rubric từng attempt nằm trong `captures/2026-08-01-manual-scores.json` đã commit.
+
+CLI `evaluate` chỉ sinh artifact quyết định deterministic dùng làm nguyên section `manual_review`. Task 7 ráp worklog ba phần từ browser telemetry đã review, raw policy capture và artifact evaluator; CLI không phát minh envelope hay schema telemetry mà nó không nhận làm input.
 
 Các run Portuguese trong Spec A là policy probe từ transcript cố định, chưa phải production proof. Production benchmark sau khi Spec B thêm `pt` và policy thắng vẫn phải tuân thủ gate hiện có: tối thiểu 20 cold + 20 warm trên một máy, báo p50/p95, first overlay/translation/total và không regress block count.
 
@@ -338,7 +356,7 @@ Fixture port `8000` và production OCR API port `8910` tiếp tục tách biệt
 
 ## 10. Xử lý lỗi
 
-- Gemini trả thiếu/trùng/sai ID: attempt `invalid_response`, không chấm điểm.
+- Gemini trả thiếu/trùng/sai ID, translation rỗng, hoặc response không phải chuỗi (kể cả `None`): attempt `invalid_response`, không chấm điểm.
 - Gemini 429 hoặc 502: lưu status/error code và latency; không thay bằng response của attempt khác.
 - Detector không ghép đủ required anchor: order diagnostic fail và không chạy quality probe bằng OCR live; runner vẫn có thể dùng frozen transcript để tách riêng lỗi translation.
 - OCR live khác frozen transcript: ghi diff, không tự cập nhật manifest. Việc cập nhật transcript cần review thủ công và commit riêng.

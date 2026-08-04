@@ -1,0 +1,184 @@
+{
+  "telemetry_validation_reference": {
+    "worklog": "docs/superpowers/worklogs/2026-08-01-real-page-quality-baseline.json",
+    "section": "telemetry_validation",
+    "source_commit": "277f9dfe62fda44c47239d86b82ac44c78786f7f"
+  },
+  "policy_probe": {
+    "capture_file": "server/tests/fixtures/real_pages/captures/2026-08-03-policy-probe-paced.json",
+    "schema_version": 1,
+    "prompt_version": "comic-page-eval-v1",
+    "policy_version": "real-page-policy-v1",
+    "metadata": {
+      "captured_at": "2026-08-03T10:01:35.922932+00:00",
+      "commit": "665769a5d25cb4d9e9d6933fa8fec883165b4ba3",
+      "device": "Windows-11-10.0.26200-SP0",
+      "model": "gemini-flash-lite-latest",
+      "temperature": 0.2
+    },
+    "attempts": 27,
+    "calls": 75,
+    "valid_responses": {
+      "total": 26,
+      "mangadex_pt": {
+        "batch_control": 3,
+        "ordered_microbatch": 3,
+        "full_page": 3
+      },
+      "s-manga_ja_1": {
+        "batch_control": 2,
+        "ordered_microbatch": 3,
+        "full_page": 3
+      },
+      "s-manga_ja_2": {
+        "batch_control": 3,
+        "ordered_microbatch": 3,
+        "full_page": 3
+      }
+    },
+    "rerun_failed_attempts": false,
+    "call_delay_seconds": 10,
+    "observations": [
+      "ordered_microbatch bị block chỉ bởi mangadex_pt (critical_error và safety median 0), không phải hai trang Nhật. Trên JA-only, ordered_microbatch và full_page đều beat batch_control; full_page beat ordered_microbatch còn ordered_microbatch không beat full_page, nên lựa chọn full_page vẫn vững nếu bỏ PT khỏi so sánh candidate."
+    ]
+  },
+  "manual_review": {
+    "captured_at": "2026-08-03T10:01:35.922932+00:00",
+    "decision": "selected",
+    "selected": "full_page",
+    "reason": "candidate duy nhất đạt gate",
+    "pages": {
+      "mangadex_pt": {
+        "arms": {
+          "batch_control": {
+            "valid_responses": 3,
+            "context_score": "not_applicable",
+            "length_metrics": {
+              "translated_chars": 861,
+              "source_chars": 861,
+              "length_ratio": 1.0,
+              "chars_per_kpx": 7.321988927724061,
+              "warning_only": true
+            }
+          },
+          "ordered_microbatch": {
+            "valid_responses": 3,
+            "context_score": "not_applicable",
+            "length_metrics": {
+              "translated_chars": 871,
+              "source_chars": 861,
+              "length_ratio": 1.0116144018583042,
+              "chars_per_kpx": 7.407029449532703,
+              "warning_only": true
+            }
+          },
+          "full_page": {
+            "valid_responses": 3,
+            "context_score": "not_applicable",
+            "length_metrics": {
+              "translated_chars": 889,
+              "source_chars": 861,
+              "length_ratio": 1.032520325203252,
+              "chars_per_kpx": 7.560102388788258,
+              "warning_only": true
+            }
+          }
+        },
+        "context_score": "not_applicable"
+      },
+      "s-manga_ja_1": {
+        "arms": {
+          "batch_control": {
+            "valid_responses": 2,
+            "context_score": 1.5,
+            "length_metrics": {
+              "translated_chars": 1917,
+              "source_chars": 618,
+              "length_ratio": 3.1019417475728157,
+              "chars_per_kpx": 5.454638576842967,
+              "warning_only": true
+            }
+          },
+          "ordered_microbatch": {
+            "valid_responses": 3,
+            "context_score": 5,
+            "length_metrics": {
+              "translated_chars": 2811,
+              "source_chars": 927,
+              "length_ratio": 3.0323624595469254,
+              "chars_per_kpx": 5.332286224832405,
+              "warning_only": true
+            }
+          },
+          "full_page": {
+            "valid_responses": 3,
+            "context_score": 5,
+            "length_metrics": {
+              "translated_chars": 2921,
+              "source_chars": 927,
+              "length_ratio": 3.151024811218986,
+              "chars_per_kpx": 5.540949150741891,
+              "warning_only": true
+            }
+          }
+        },
+        "context_score": 1.5
+      },
+      "s-manga_ja_2": {
+        "arms": {
+          "batch_control": {
+            "valid_responses": 3,
+            "context_score": 5,
+            "length_metrics": {
+              "translated_chars": 1688,
+              "source_chars": 624,
+              "length_ratio": 2.7051282051282053,
+              "chars_per_kpx": 3.9957580577964626,
+              "warning_only": true
+            }
+          },
+          "ordered_microbatch": {
+            "valid_responses": 3,
+            "context_score": 4,
+            "length_metrics": {
+              "translated_chars": 1760,
+              "source_chars": 624,
+              "length_ratio": 2.8205128205128207,
+              "chars_per_kpx": 4.166193235617165,
+              "warning_only": true
+            }
+          },
+          "full_page": {
+            "valid_responses": 3,
+            "context_score": 6,
+            "length_metrics": {
+              "translated_chars": 1802,
+              "source_chars": 624,
+              "length_ratio": 2.8878205128205128,
+              "chars_per_kpx": 4.265613756012574,
+              "warning_only": true
+            }
+          }
+        },
+        "context_score": 5
+      }
+    },
+    "arms": {
+      "batch_control": {
+        "status": "ready",
+        "reasons": []
+      },
+      "ordered_microbatch": {
+        "status": "blocked",
+        "reasons": [
+          "mangadex_pt: critical_error",
+          "mangadex_pt: safety median 0"
+        ]
+      },
+      "full_page": {
+        "status": "passed",
+        "reasons": []
+      }
+    }
+  }
+}

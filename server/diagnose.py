@@ -1,4 +1,8 @@
+import argparse
+import json
+import os
 import sys
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -33,30 +37,58 @@ def _write_report(path, rows):
             f.write(f'#{r["idx"]}  bbox={r["bbox"]}  text="{txt}"\n')
 
 
-def main(argv):
-    import argparse
+def _write_manifest_candidate(path, rows):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "candidates": [
+            {
+                "raw_vendor_index": row["idx"],
+                "bbox": row["bbox"],
+                "transcript": row["text"],
+            }
+            for row in rows
+        ]
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    from server.detector import Detector
-    from server.ocr import OcrRegistry
 
+def _parse_args(argv):
     p = argparse.ArgumentParser()
     p.add_argument("image")
     p.add_argument("--lang", default="ja")
+    p.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
+    p.add_argument("--manifest-candidate")
     p.add_argument("--conf", type=float, default=None)
     p.add_argument("--input-size", type=int, default=None)
-    args = p.parse_args(argv)
+    return p.parse_args(argv)
+
+
+def _configure_device(device):
+    if device == "cpu":
+        os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+
+def main(argv):
+    args = _parse_args(argv)
+    _configure_device(args.device)
+
+    from server.detector import Detector
+    from server.ocr import OcrRegistry
 
     img = cv2.imdecode(np.fromfile(args.image, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         raise SystemExit(f"không đọc được ảnh: {args.image}")
 
-    det = Detector(device="cuda", conf_thresh=args.conf, input_size=args.input_size)
-    engine = OcrRegistry(device="cuda").get(args.lang)
+    det = Detector(device=args.device, conf_thresh=args.conf, input_size=args.input_size)
+    engine = OcrRegistry(device=args.device).get(args.lang)
     annotated, rows = diagnose_image(img, det, engine)
 
     out_png, out_txt = args.image + ".diag.png", args.image + ".diag.txt"
     cv2.imencode(".png", annotated)[1].tofile(out_png)
     _write_report(out_txt, rows)
+    if args.manifest_candidate:
+        _write_manifest_candidate(args.manifest_candidate, rows)
     empty = sum(1 for r in rows if not r["text"])
     print(f"{len(rows)} blocks, {empty} empty -> {out_png} / {out_txt}")
 

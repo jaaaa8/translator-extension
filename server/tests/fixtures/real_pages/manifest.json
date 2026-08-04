@@ -1,0 +1,478 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "id": "mangadex_pt",
+      "role": "source_page",
+      "image": "mangadex_pt.png",
+      "sha256": "8c25aea5e76a9264d83698ee4953b4e037593a49c05b2517de4ebd14a1d84c60",
+      "src_lang": "pt",
+      "source_name": "Portuguese",
+      "reading_direction": "rtl",
+      "page_kind": "single",
+      "width": 500,
+      "height": 782,
+      "regions": [
+        {
+          "fixture_block_id": "b01",
+          "bbox": [393, 35, 90, 78],
+          "reading_order": 0,
+          "kind": "dialogue",
+          "src_text": "QUEM ERA AQUELA GAROTA? ELA É MUITO BONITA!",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b02",
+          "bbox": [15, 149, 92, 71],
+          "reading_order": 1,
+          "kind": "dialogue",
+          "src_text": "EU NUNCA TINHA VISTO ELA ANTES! COMO PUDE NÃO NOTA-LA?",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b03",
+          "bbox": [353, 317, 106, 74],
+          "reading_order": 2,
+          "kind": "dialogue",
+          "src_text": "QUERO SABER MAIS SOBRE ELA! EU QUERO FICAR COM ELA!",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b04",
+          "bbox": [412, 459, 60, 14],
+          "reading_order": 3,
+          "kind": "dialogue",
+          "src_text": "ESPERA...",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b05",
+          "bbox": [15, 437, 85, 51],
+          "reading_order": 4,
+          "kind": "dialogue",
+          "src_text": "QUE IDIOTA! EU ESQUECI DE PERGUNTAR O NOME DELA.",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b06",
+          "bbox": [357, 654, 134, 64],
+          "reading_order": 5,
+          "kind": "dialogue",
+          "src_text": "O PROBLEMA É QUE EU ME EMPOLGUEI E PASSEI DOS LIMITES.",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b07",
+          "bbox": [2, 697, 90, 45],
+          "reading_order": 6,
+          "kind": "dialogue",
+          "src_text": "TOMARA QUE ELA NÃO ME ODEIE.",
+          "required": true
+        }
+      ],
+      "term_groups": [],
+      "known_order_failures": [
+        "vendor trả LTR trong khi ground truth manga là RTL",
+        "vendor indices 0 và 1 là hai box trùng cho cùng một bóng thoại"
+      ]
+    },
+    {
+      "id": "s-manga_ja_1",
+      "role": "source_page",
+      "image": "s-manga_ja_1.png",
+      "sha256": "267ac9ea29bdf0bfbb3686e2806a77b0c52d1178f2810c426ba357b277976023",
+      "src_lang": "ja",
+      "source_name": "Japanese",
+      "reading_direction": "rtl",
+      "page_kind": "spread",
+      "width": 1107,
+      "height": 871,
+      "regions": [
+        {
+          "fixture_block_id": "b01",
+          "bbox": [1010, 50, 58, 154],
+          "reading_order": 0,
+          "kind": "dialogue",
+          "src_text": "宣伝工作はうまくいったな",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b02",
+          "bbox": [824, 173, 133, 19],
+          "reading_order": 1,
+          "kind": "sign",
+          "src_text": "新人ヒーロー募集中！くわしくはＨＰへ",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b03",
+          "bbox": [659, 45, 30, 60],
+          "reading_order": 2,
+          "kind": "dialogue",
+          "src_text": "誰だよ",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b04",
+          "bbox": [596, 162, 54, 127],
+          "reading_order": 3,
+          "kind": "dialogue",
+          "src_text": "ＣＭによるイメージ向上と",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b05",
+          "bbox": [963, 362, 117, 145],
+          "reading_order": 4,
+          "kind": "dialogue",
+          "src_text": "周辺被害を「タツマキによる鬼怪人集団の撃退」によるものと報道することで",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b06",
+          "bbox": [770, 353, 76, 147],
+          "reading_order": 5,
+          "kind": "dialogue",
+          "src_text": "ここで暮らす富豪達からの信頼も回復できた",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b07",
+          "bbox": [689, 354, 46, 146],
+          "reading_order": 6,
+          "kind": "dialogue",
+          "src_text": "マッコイ氏の指揮だそうですな",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b08",
+          "bbox": [594, 370, 56, 63],
+          "reading_order": 7,
+          "kind": "dialogue",
+          "src_text": "流石の手腕だ",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b09",
+          "bbox": [1008, 663, 57, 52],
+          "reading_order": 8,
+          "kind": "dialogue",
+          "src_text": "フフなに",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b10",
+          "bbox": [602, 653, 92, 111],
+          "reading_order": 9,
+          "kind": "dialogue",
+          "src_text": "組織の為と思えばこそですよ",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b11",
+          "bbox": [378, 38, 114, 148],
+          "reading_order": 10,
+          "kind": "dialogue",
+          "src_text": "しかしこの件でメタルナイトの信用は更に失墜したな",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b12",
+          "bbox": [32, 50, 54, 96],
+          "reading_order": 11,
+          "kind": "dialogue",
+          "src_text": "あの口だけ番長め",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b13",
+          "bbox": [387, 257, 78, 95],
+          "reading_order": 12,
+          "kind": "dialogue",
+          "src_text": "ガードロボットの故障",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b14",
+          "bbox": [255, 259, 101, 112],
+          "reading_order": 13,
+          "kind": "dialogue",
+          "src_text": "奴に設計建築を任せたこのビルの脆弱さ",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b15",
+          "bbox": [130, 252, 97, 114],
+          "reading_order": 14,
+          "kind": "dialogue",
+          "src_text": "ああよくも不落の要塞だなどと",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b16",
+          "bbox": [36, 259, 47, 131],
+          "reading_order": 15,
+          "kind": "dialogue",
+          "src_text": "建設に何百億と費やしておいて",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b17",
+          "bbox": [460, 503, 48, 110],
+          "reading_order": 16,
+          "kind": "dialogue",
+          "src_text": "今後はアテにできんだろう",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b18",
+          "bbox": [148, 504, 46, 103],
+          "reading_order": 17,
+          "kind": "dialogue",
+          "src_text": "ハゲマントめ…",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b19",
+          "bbox": [456, 667, 59, 86],
+          "reading_order": 18,
+          "kind": "dialogue",
+          "src_text": "タツマキにしたってそうだ",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b20",
+          "bbox": [179, 665, 173, 106],
+          "reading_order": 19,
+          "kind": "dialogue",
+          "src_text": "今回はマッコイ氏の計らいで不問に付したが独善と独走がすぎる",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b21",
+          "bbox": [59, 666, 101, 125],
+          "reading_order": 20,
+          "kind": "dialogue",
+          "src_text": "指導しようにも力がケタ違いで誰も手綱を握れぬ始末",
+          "required": true
+        }
+      ],
+      "term_groups": [
+        {
+          "canonical": "マッコイ",
+          "accepted_source_forms": [
+            "マッコイ",
+            "マッコイ氏"
+          ],
+          "fixture_block_ids": [
+            "b07",
+            "b20"
+          ]
+        },
+        {
+          "canonical": "タツマキ",
+          "accepted_source_forms": [
+            "タツマキ"
+          ],
+          "fixture_block_ids": [
+            "b05",
+            "b19"
+          ]
+        }
+      ],
+      "known_order_failures": [
+        "vendor index 5 thuộc panel trên và phải đứng trước vendor indices 3 và 4"
+      ]
+    },
+    {
+      "id": "s-manga_ja_2",
+      "role": "source_page",
+      "image": "s-manga_ja_2.png",
+      "sha256": "7d6867a5c37db97d1f6ce32d5e5fd082d3bf3ac8e9f6914a2497b51f1fd0b9b0",
+      "src_lang": "ja",
+      "source_name": "Japanese",
+      "reading_direction": "rtl",
+      "page_kind": "spread",
+      "width": 1105,
+      "height": 868,
+      "regions": [
+        {
+          "fixture_block_id": "b01",
+          "bbox": [1002, 39, 67, 200],
+          "reading_order": 0,
+          "kind": "dialogue",
+          "src_text": "爆弾を抱えてるのと同じだぞ",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b02",
+          "bbox": [816, 63, 101, 130],
+          "reading_order": 1,
+          "kind": "dialogue",
+          "src_text": "この二人はこれまで以上に監視を強化しなくては",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b03",
+          "bbox": [738, 47, 55, 183],
+          "reading_order": 2,
+          "kind": "dialogue",
+          "src_text": "代わる人材はまだ見つからんのか？",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b04",
+          "bbox": [625, 21, 31, 47],
+          "reading_order": 3,
+          "kind": "dialogue",
+          "src_text": "はい",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b05",
+          "bbox": [597, 119, 20, 89],
+          "reading_order": 4,
+          "kind": "dialogue",
+          "src_text": "それが…",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b06",
+          "bbox": [939, 424, 115, 131],
+          "reading_order": 5,
+          "kind": "dialogue",
+          "src_text": "ヒーローの志願者は一向に増えておりません",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b07",
+          "bbox": [634, 434, 23, 96],
+          "reading_order": 6,
+          "kind": "dialogue",
+          "src_text": "なぜだ？",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b08",
+          "bbox": [940, 642, 125, 154],
+          "reading_order": 7,
+          "kind": "dialogue",
+          "src_text": "広告も好評で市民からの支持率も上昇しとるんだろ？",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b09",
+          "bbox": [611, 655, 50, 153],
+          "reading_order": 8,
+          "kind": "dialogue",
+          "src_text": "それはそうなんですが",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b10",
+          "bbox": [461, 42, 32, 113],
+          "reading_order": 9,
+          "kind": "dialogue",
+          "src_text": "実は――",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b11",
+          "bbox": [451, 243, 51, 119],
+          "reading_order": 10,
+          "kind": "dialogue",
+          "src_text": "報道とＣＭを見たぞ",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b12",
+          "bbox": [320, 245, 72, 98],
+          "reading_order": 11,
+          "kind": "dialogue",
+          "src_text": "景気がよさそうじゃないか",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b13",
+          "bbox": [34, 316, 57, 84],
+          "reading_order": 12,
+          "kind": "dialogue",
+          "src_text": "恐れ入ります",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b14",
+          "bbox": [449, 524, 52, 117],
+          "reading_order": 13,
+          "kind": "dialogue",
+          "src_text": "しかし油断はできません",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b15",
+          "bbox": [286, 545, 87, 98],
+          "reading_order": 14,
+          "kind": "dialogue",
+          "src_text": "毎日の様に発生する凶悪怪人達",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b16",
+          "bbox": [148, 521, 76, 154],
+          "reading_order": 15,
+          "kind": "dialogue",
+          "src_text": "タツマキなどの一部の上位ヒーローを除けば",
+          "required": true
+        },
+        {
+          "fixture_block_id": "b17",
+          "bbox": [44, 520, 76, 118],
+          "reading_order": 16,
+          "kind": "dialogue",
+          "src_text": "束になっても負けてしまうヒーロー達",
+          "required": true
+        }
+      ],
+      "term_groups": [],
+      "known_order_failures": []
+    },
+    {
+      "id": "mangadex_pt_overlay_partial_and_crop",
+      "role": "failure_reference",
+      "image": "references/mangadex_pt_overlay_partial_and_crop.png",
+      "sha256": "2f1a89dda583183971c891bf945d583394887191bb816f8dbbe686002aba40d2",
+      "source_page": "mangadex_pt",
+      "labels": [
+        "partial_translation",
+        "overlay_missing",
+        "white_bbox_exposes_source",
+        "text_clipped"
+      ]
+    },
+    {
+      "id": "s-manga_ja_overlay_1",
+      "role": "failure_reference",
+      "image": "references/s-manga_ja_overlay_1.png",
+      "sha256": "e10082842e79b116bc2e4fc3a5c354dce2f05567672c9023a15ac61fd0dd8f40",
+      "source_page": "s-manga_ja_1",
+      "labels": [
+        "fragmented_blocks",
+        "text_clipped",
+        "oversized_text",
+        "source_text_exposed"
+      ]
+    },
+    {
+      "id": "s-manga_ja_overlay_2",
+      "role": "failure_reference",
+      "image": "references/s-manga_ja_overlay_2.png",
+      "sha256": "9e5c9c6952786e2e5c8263e46677bf14568df5a7c060b660b9501330c103c3a4",
+      "source_page": "s-manga_ja_2",
+      "labels": [
+        "fragmented_blocks",
+        "text_clipped",
+        "source_text_exposed"
+      ]
+    }
+  ]
+}

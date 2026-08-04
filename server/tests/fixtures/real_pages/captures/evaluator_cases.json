@@ -1,0 +1,111 @@
+{
+  "manifest": {
+    "fixtures": [
+      {"id": "mangadex_pt", "role": "source_page", "sha256": "sha-pt", "src_lang": "pt", "reading_direction": "rtl", "regions": [{"fixture_block_id": "b1", "src_text": "um", "reading_order": 0, "bbox": [1, 1, 10, 10]}, {"fixture_block_id": "b2", "src_text": "dois", "reading_order": 1, "bbox": [12, 1, 10, 10]}], "term_groups": []},
+      {"id": "s-manga_ja_1", "role": "source_page", "sha256": "sha-ja-1", "src_lang": "ja", "reading_direction": "rtl", "regions": [{"fixture_block_id": "b1", "src_text": "one", "reading_order": 0, "bbox": [1, 1, 10, 10]}, {"fixture_block_id": "b2", "src_text": "two", "reading_order": 1, "bbox": [12, 1, 10, 10]}], "term_groups": [{"canonical": "Hero", "accepted_source_forms": ["Hero"], "fixture_block_ids": ["b1", "b2"]}]},
+      {"id": "s-manga_ja_2", "role": "source_page", "sha256": "sha-ja-2", "src_lang": "ja", "reading_direction": "rtl", "regions": [{"fixture_block_id": "b1", "src_text": "one", "reading_order": 0, "bbox": [1, 1, 10, 10]}, {"fixture_block_id": "b2", "src_text": "two", "reading_order": 1, "bbox": [12, 1, 10, 10]}], "term_groups": [{"canonical": "Hero", "accepted_source_forms": ["Hero"], "fixture_block_ids": ["b1", "b2"]}]}
+    ]
+  },
+  "invalid_captures": {
+    "missing": {"error": "successful call membership"},
+    "duplicate": {"error": "duplicate fixture block id"},
+    "invented": {"error": "successful call membership"},
+    "empty_translation": {"error": "empty translation"}
+  },
+  "cases": {
+    "no_headroom": {
+      "scores": {
+        "batch_control": {"s-manga_ja_1": {"terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 2, "pronouns": 1, "coherence": 2}},
+        "ordered_microbatch": {"s-manga_ja_1": {"terms": 2, "pronouns": 2, "coherence": 2}, "s-manga_ja_2": {"terms": 2, "pronouns": 2, "coherence": 2}},
+        "full_page": {"s-manga_ja_1": {"terms": 2, "pronouns": 2, "coherence": 2}, "s-manga_ja_2": {"terms": 2, "pronouns": 2, "coherence": 2}}
+      }
+    },
+    "pt": {
+      "scores": {
+        "batch_control": {"s-manga_ja_1": {"terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 1, "pronouns": 1, "coherence": 1}},
+        "ordered_microbatch": {"s-manga_ja_1": {"terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 2, "pronouns": 1, "coherence": 2}},
+        "full_page": {"s-manga_ja_1": {"terms": 1, "pronouns": 1, "coherence": 1}, "s-manga_ja_2": {"terms": 1, "pronouns": 1, "coherence": 1}}
+      }
+    },
+    "candidate_critical_error": {
+      "critical_errors": [["ordered_microbatch", "s-manga_ja_1", 1]],
+      "scores": {
+        "batch_control": {"s-manga_ja_1": {"terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 1, "pronouns": 1, "coherence": 1}},
+        "ordered_microbatch": {"s-manga_ja_1": {"terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 2, "pronouns": 1, "coherence": 2}},
+        "full_page": {"s-manga_ja_1": {"terms": 1, "pronouns": 1, "coherence": 1}, "s-manga_ja_2": {"terms": 1, "pronouns": 1, "coherence": 1}}
+      }
+    },
+    "candidate_safety_zero": {
+      "scores": {
+        "batch_control": {"s-manga_ja_1": {"terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 1, "pronouns": 1, "coherence": 1}},
+        "ordered_microbatch": {"s-manga_ja_1": {"correctness": 0, "terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 2, "pronouns": 1, "coherence": 2}},
+        "full_page": {"s-manga_ja_1": {"terms": 1, "pronouns": 1, "coherence": 1}, "s-manga_ja_2": {"terms": 1, "pronouns": 1, "coherence": 1}}
+      }
+    },
+    "two_valid_responses": {
+      "valid_attempts": {"ordered_microbatch": {"mangadex_pt": 2, "s-manga_ja_1": 2, "s-manga_ja_2": 2}},
+      "scores": {
+        "batch_control": {"s-manga_ja_1": {"terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 1, "pronouns": 1, "coherence": 1}},
+        "ordered_microbatch": {"s-manga_ja_1": {"terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 2, "pronouns": 1, "coherence": 2}},
+        "full_page": {"s-manga_ja_1": {"terms": 1, "pronouns": 1, "coherence": 1}, "s-manga_ja_2": {"terms": 1, "pronouns": 1, "coherence": 1}}
+      }
+    },
+    "pt_without_scores": {
+      "valid_attempts": {"batch_control": {"mangadex_pt": 0}, "ordered_microbatch": {"mangadex_pt": 0}, "full_page": {"mangadex_pt": 0}},
+      "scores": {
+        "batch_control": {"s-manga_ja_1": {"terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 1, "pronouns": 1, "coherence": 1}},
+        "ordered_microbatch": {"s-manga_ja_1": {"terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 2, "pronouns": 1, "coherence": 2}},
+        "full_page": {"s-manga_ja_1": {"terms": 1, "pronouns": 1, "coherence": 1}, "s-manga_ja_2": {"terms": 1, "pronouns": 1, "coherence": 1}}
+      }
+    },
+    "term_surface_conflict": {
+      "scores": {
+        "batch_control": {"s-manga_ja_1": {"term_forms": {"Hero": {"b1": "Anh hùng", "b2": "Hiệp sĩ"}}}, "s-manga_ja_2": {"terms": 1, "pronouns": 1, "coherence": 1}},
+        "ordered_microbatch": {"s-manga_ja_1": {"terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 2, "pronouns": 1, "coherence": 2}},
+        "full_page": {"s-manga_ja_1": {"terms": 1, "pronouns": 1, "coherence": 1}, "s-manga_ja_2": {"terms": 1, "pronouns": 1, "coherence": 1}}
+      }
+    },
+    "inconclusive": {
+      "valid_attempts": {"ordered_microbatch": {"s-manga_ja_1": 1}, "full_page": {"s-manga_ja_1": 1}},
+      "scores": {
+        "batch_control": {"s-manga_ja_1": {"terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 1, "pronouns": 1, "coherence": 1}},
+        "ordered_microbatch": {"s-manga_ja_1": {"terms": 2, "pronouns": 2, "coherence": 2}, "s-manga_ja_2": {"terms": 2, "pronouns": 2, "coherence": 2}},
+        "full_page": {"s-manga_ja_1": {"terms": 2, "pronouns": 2, "coherence": 2}, "s-manga_ja_2": {"terms": 2, "pronouns": 2, "coherence": 2}}
+      }
+    },
+    "blocked_regression": {
+      "scores": {
+        "batch_control": {"s-manga_ja_1": {"terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 1, "pronouns": 1, "coherence": 1}},
+        "ordered_microbatch": {"s-manga_ja_1": {"terms": 1, "pronouns": 1, "coherence": 1}, "s-manga_ja_2": {"terms": 1, "pronouns": 1, "coherence": 1}},
+        "full_page": {"s-manga_ja_1": {"terms": 1, "pronouns": 1, "coherence": 1}, "s-manga_ja_2": {"terms": 1, "pronouns": 1, "coherence": 1}}
+      }
+    },
+    "tie_break_calls_then_latency": {
+      "split_batches": true,
+      "latency": {"ordered_microbatch": 1, "full_page": 9},
+      "scores": {
+        "batch_control": {"s-manga_ja_1": {"terms": 1, "pronouns": 1, "coherence": 1}, "s-manga_ja_2": {"terms": 1, "pronouns": 1, "coherence": 1}},
+        "ordered_microbatch": {"s-manga_ja_1": {"terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 2, "pronouns": 1, "coherence": 2}},
+        "full_page": {"s-manga_ja_1": {"terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 2, "pronouns": 1, "coherence": 2}}
+      }
+    },
+    "tie_break_latency": {
+      "latency": {"ordered_microbatch": 9, "full_page": 1},
+      "scores": {
+        "batch_control": {"s-manga_ja_1": {"terms": 1, "pronouns": 1, "coherence": 1}, "s-manga_ja_2": {"terms": 1, "pronouns": 1, "coherence": 1}},
+        "ordered_microbatch": {"s-manga_ja_1": {"terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 2, "pronouns": 1, "coherence": 2}},
+        "full_page": {"s-manga_ja_1": {"terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 2, "pronouns": 1, "coherence": 2}}
+      }
+    },
+    "tie_break_failed_attempt_cost": {
+      "valid_attempts": {"ordered_microbatch": {"mangadex_pt": 2, "s-manga_ja_1": 2, "s-manga_ja_2": 2}},
+      "latency": {"ordered_microbatch": 1, "full_page": 10},
+      "failed_latency": {"ordered_microbatch": 100},
+      "scores": {
+        "batch_control": {"s-manga_ja_1": {"terms": 1, "pronouns": 1, "coherence": 1}, "s-manga_ja_2": {"terms": 1, "pronouns": 1, "coherence": 1}},
+        "ordered_microbatch": {"s-manga_ja_1": {"terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 2, "pronouns": 1, "coherence": 2}},
+        "full_page": {"s-manga_ja_1": {"terms": 2, "pronouns": 1, "coherence": 2}, "s-manga_ja_2": {"terms": 2, "pronouns": 1, "coherence": 2}}
+      }
+    }
+  }
+}

@@ -1,0 +1,464 @@
+[
+    {
+        "page_id": "mangadex_pt",
+        "arm": "batch_control",
+        "attempt": 1,
+        "correctness": 1,
+        "terms": "not_applicable",
+        "pronouns": "not_applicable",
+        "tone": 1,
+        "coherence": "not_applicable",
+        "conciseness": 1,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "b01 hỏng chữ 'ĐOÁ CÔ GÁI ĐÓ'; b03 và b06 xưng 'tôi' trong khi b02/b05/b07 xưng 'mình'; b06 dịch bám chữ 'vượt quá giới hạn', cần rút gọn cho vừa bong bóng.",
+        "term_forms": {}
+    },
+    {
+        "page_id": "mangadex_pt",
+        "arm": "batch_control",
+        "attempt": 2,
+        "correctness": 1,
+        "terms": "not_applicable",
+        "pronouns": "not_applicable",
+        "tone": 1,
+        "coherence": "not_applicable",
+        "conciseness": 1,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "b01 vẫn hỏng chữ 'ĐOÁ'; b02 'KHÔNG CHÚ Ý ĐƯỢC CHỨ' sượng; b03/b06 xưng 'tôi' lệch với 'mình' ở các bong bóng còn lại; b06 dài và cứng.",
+        "term_forms": {}
+    },
+    {
+        "page_id": "mangadex_pt",
+        "arm": "batch_control",
+        "attempt": 3,
+        "correctness": 1,
+        "terms": "not_applicable",
+        "pronouns": "not_applicable",
+        "tone": 1,
+        "coherence": "not_applicable",
+        "conciseness": 1,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "b01 sai chính tả 'CÔ GÓI'; b03/b06 xưng 'tôi' trong khi phần còn lại xưng 'mình'; b06 vẫn là câu dịch bám chữ, cần chỉnh nhẹ.",
+        "term_forms": {}
+    },
+    {
+        "page_id": "mangadex_pt",
+        "arm": "full_page",
+        "attempt": 1,
+        "correctness": 2,
+        "terms": "not_applicable",
+        "pronouns": "not_applicable",
+        "tone": 1,
+        "coherence": "not_applicable",
+        "conciseness": 2,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "Nghĩa đầy đủ, độ dài hợp bong bóng; b01 'Đứa con gái đó' hơi miệt thị so với giọng ngưỡng mộ; b01/b02 dùng 'cổ' nhưng b03/b05/b07 dùng 'cô ấy'.",
+        "term_forms": {}
+    },
+    {
+        "page_id": "mangadex_pt",
+        "arm": "full_page",
+        "attempt": 2,
+        "correctness": 2,
+        "terms": "not_applicable",
+        "pronouns": "not_applicable",
+        "tone": 1,
+        "coherence": "not_applicable",
+        "conciseness": 2,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "Nghĩa đúng và gọn; b01 'Đứa con gái đó' lệch giọng; 'cổ' (b01/b02/b07) lẫn với 'cô ấy' (b03/b05) trong cùng một mạch độc thoại.",
+        "term_forms": {}
+    },
+    {
+        "page_id": "mangadex_pt",
+        "arm": "full_page",
+        "attempt": 3,
+        "correctness": 2,
+        "terms": "not_applicable",
+        "pronouns": "not_applicable",
+        "tone": 1,
+        "coherence": "not_applicable",
+        "conciseness": 2,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "Nghĩa và độ dài đạt; b01 'Đứa con gái đó' lệch giọng, và gọi cô gái lạ là 'cậu ấy' xuyên suốt b01-b07 nên không hợp vai cậu bé vừa phải lòng.",
+        "term_forms": {}
+    },
+    {
+        "page_id": "mangadex_pt",
+        "arm": "ordered_microbatch",
+        "attempt": 1,
+        "correctness": 1,
+        "terms": "not_applicable",
+        "pronouns": "not_applicable",
+        "tone": 0,
+        "coherence": "not_applicable",
+        "conciseness": 1,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "b01 'ĐỨA CÁI ĐÓ' hỏng chữ; b02 'KHÔNG NH RA' cụt từ và xưng 'TỚ' rồi 'MÌNH' ngay trong một bong bóng độc thoại nội tâm (xưng 'tớ' là nói với người khác); b06 dịch cứng, xưng 'tôi'.",
+        "term_forms": {}
+    },
+    {
+        "page_id": "mangadex_pt",
+        "arm": "ordered_microbatch",
+        "attempt": 2,
+        "correctness": 0,
+        "terms": "not_applicable",
+        "pronouns": "not_applicable",
+        "tone": 0,
+        "coherence": "not_applicable",
+        "conciseness": 1,
+        "critical_error": true,
+        "reviewer": "jaa",
+        "note": "b01 bịa 'ĐOÁN XEM ... LÀ AI KÌA?' biến độc thoại nội tâm thành câu hỏi với người khác; b06 'HỨNG QUÁ' thô và 'LẠM QUÁ ĐÀ' không phải cụm tiếng Việt; xưng hô tôi/tớ/mình lẫn lộn toàn trang.",
+        "term_forms": {}
+    },
+    {
+        "page_id": "mangadex_pt",
+        "arm": "ordered_microbatch",
+        "attempt": 3,
+        "correctness": 0,
+        "terms": "not_applicable",
+        "pronouns": "not_applicable",
+        "tone": 0,
+        "coherence": "not_applicable",
+        "conciseness": 1,
+        "critical_error": true,
+        "reviewer": "jaa",
+        "note": "b01 bịa 'ĐOÁN XEM ... LÀ AI KÌA?' như đang hỏi người khác trong khi nguồn là độc thoại; b02 'KHÔNG NH RA' cụt từ và lẫn 'TỚ'/'MÌNH'; b06 vẫn xưng 'tôi' và dịch cứng.",
+        "term_forms": {}
+    },
+    {
+        "page_id": "s-manga_ja_1",
+        "arm": "batch_control",
+        "attempt": 1,
+        "correctness": 0,
+        "terms": 0,
+        "pronouns": 1,
+        "tone": 2,
+        "coherence": 1,
+        "conciseness": 1,
+        "critical_error": true,
+        "reviewer": "jaa",
+        "note": "b05 dịch タツマキ thành danh từ chung 'lốc xoáy' trong khi b19 giữ 'Tatsumaki', làm sai chủ thể của bản tin bịa (thành 'lốc xoáy đánh bại quái nhân') và cắt đứt liên kết với b19; b06 'những giới giàu có' sai kết hợp từ; b16 'mấy chục, mấy trăm tỉ' nước đôi; b20/b21 lược chủ ngữ nên không rõ đang nói về Tatsumaki.",
+        "term_forms": {
+            "マッコイ": {
+                "b07": "McCoy",
+                "b20": "McCoy"
+            },
+            "タツマキ": {
+                "b05": "lốc xoáy",
+                "b19": "Tatsumaki"
+            }
+        }
+    },
+    {
+        "page_id": "s-manga_ja_1",
+        "arm": "batch_control",
+        "attempt": 3,
+        "correctness": 0,
+        "terms": 0,
+        "pronouns": 0,
+        "tone": 2,
+        "coherence": 1,
+        "conciseness": 2,
+        "critical_error": true,
+        "reviewer": "jaa",
+        "note": "b05 lại dịch タツマキ thành 'lốc xoáy' còn b19 giữ 'Tatsumaki' — sai chủ thể câu tuyên truyền và đứt liên kết thuật ngữ; b21 gọi Tatsumaki là 'hắn' trong khi 'hắn' ở b14 đang chỉ Metal Knight, gây nhầm người và sai giới.",
+        "term_forms": {
+            "マッコイ": {
+                "b07": "McCoy",
+                "b20": "McCoy"
+            },
+            "タツマキ": {
+                "b05": "lốc xoáy",
+                "b19": "Tatsumaki"
+            }
+        }
+    },
+    {
+        "page_id": "s-manga_ja_1",
+        "arm": "full_page",
+        "attempt": 1,
+        "correctness": 2,
+        "terms": 1,
+        "pronouns": 2,
+        "tone": 2,
+        "coherence": 2,
+        "conciseness": 1,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "b05/b19 đều là 'Tatsumaki', b07/b20 đều 'ngài McCoy'; 'hắn' (Metal Knight) và 'cô ta' (Tatsumaki) tách bạch rõ; b18 để nguyên 'Hagemanto' nên mất nghĩa biệt danh; b14 dài và b16 'bao nhiêu là chục tỉ' sượng, cần chỉnh nhẹ.",
+        "term_forms": {
+            "マッコイ": {
+                "b07": "McCoy",
+                "b20": "McCoy"
+            },
+            "タツマキ": {
+                "b05": "Tatsumaki",
+                "b19": "Tatsumaki"
+            }
+        }
+    },
+    {
+        "page_id": "s-manga_ja_1",
+        "arm": "full_page",
+        "attempt": 2,
+        "correctness": 2,
+        "terms": 1,
+        "pronouns": 2,
+        "tone": 2,
+        "coherence": 2,
+        "conciseness": 1,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "Thuật ngữ và đại từ nhất quán, mạch b04-b06 và b13-b16 liền; b18 chế tên lai 'Hage Mantle' không có trong nguồn; b14 'lại do... nhưng lại' lặp và dài.",
+        "term_forms": {
+            "マッコイ": {
+                "b07": "McCoy",
+                "b20": "McCoy"
+            },
+            "タツマキ": {
+                "b05": "Tatsumaki",
+                "b19": "Tatsumaki"
+            }
+        }
+    },
+    {
+        "page_id": "s-manga_ja_1",
+        "arm": "full_page",
+        "attempt": 3,
+        "correctness": 1,
+        "terms": 1,
+        "pronouns": 2,
+        "tone": 2,
+        "coherence": 1,
+        "conciseness": 1,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "b04 để nguyên 'CM' chưa dịch; b14 'rất dễ tổn thương' sai kết hợp cho tòa nhà; b16 'để rồi tốn hàng chục tỷ' đảo trình tự (tiền đã chi trước khi khoe pháo đài) làm gãy logic b15-b16; b21 'chẳng ai dám cương toả' thiếu tân ngữ và tối nghĩa; b18 dùng tên tiếng Anh 'Cape Baldy'.",
+        "term_forms": {
+            "マッコイ": {
+                "b07": "McCoy",
+                "b20": "McCoy"
+            },
+            "タツマキ": {
+                "b05": "Tatsumaki",
+                "b19": "Tatsumaki"
+            }
+        }
+    },
+    {
+        "page_id": "s-manga_ja_1",
+        "arm": "ordered_microbatch",
+        "attempt": 1,
+        "correctness": 1,
+        "terms": 2,
+        "pronouns": 2,
+        "tone": 2,
+        "coherence": 1,
+        "conciseness": 2,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "b05 bỏ mất 鬼 (cấp Quỷ) khi dịch 鬼怪人集団 thành 'tập đoàn quái nhân'; b14 'kẻ mà ta đã giao phó thiết kế' gắn mệnh đề chỉ người vào 'tòa nhà' nên gãy cú pháp và đứt mạch từ b13; thuật ngữ Tatsumaki/McCoy nhất quán, b18 'Áo Choàng Hói' giữ được nghĩa biệt danh.",
+        "term_forms": {
+            "マッコイ": {
+                "b07": "McCoy",
+                "b20": "McCoy"
+            },
+            "タツマキ": {
+                "b05": "Tatsumaki",
+                "b19": "Tatsumaki"
+            }
+        }
+    },
+    {
+        "page_id": "s-manga_ja_1",
+        "arm": "ordered_microbatch",
+        "attempt": 2,
+        "correctness": 1,
+        "terms": 2,
+        "pronouns": 2,
+        "tone": 2,
+        "coherence": 2,
+        "conciseness": 1,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "b05 bỏ 'cấp Quỷ' của 鬼怪人集団; b21 'chẳng ai có thể cương nổi' cụt từ (phải là 'cầm cương') và câu dài; chuỗi b04-b06 và b13-b16 nối mạch tốt, thuật ngữ nhất quán.",
+        "term_forms": {
+            "マッコイ": {
+                "b07": "McCoy",
+                "b20": "McCoy"
+            },
+            "タツマキ": {
+                "b05": "Tatsumaki",
+                "b19": "Tatsumaki"
+            }
+        }
+    },
+    {
+        "page_id": "s-manga_ja_1",
+        "arm": "ordered_microbatch",
+        "attempt": 3,
+        "correctness": 1,
+        "terms": 2,
+        "pronouns": 1,
+        "tone": 2,
+        "coherence": 1,
+        "conciseness": 2,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "b05 bỏ 'cấp Quỷ'; b14 'kẻ mà hắn đã nhận thiết kế và thi công' gãy cú pháp và đảo quan hệ giao việc (nguồn là tổ chức giao cho hắn), làm đứt mạch b13-b14; b20 lược chủ ngữ nên phải suy ngược từ b19 mới biết đang nói Tatsumaki.",
+        "term_forms": {
+            "マッコイ": {
+                "b07": "McCoy",
+                "b20": "McCoy"
+            },
+            "タツマキ": {
+                "b05": "Tatsumaki",
+                "b19": "Tatsumaki"
+            }
+        }
+    },
+    {
+        "page_id": "s-manga_ja_2",
+        "arm": "batch_control",
+        "attempt": 1,
+        "correctness": 2,
+        "terms": 1,
+        "pronouns": 2,
+        "tone": 2,
+        "coherence": 1,
+        "conciseness": 2,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "b15 dịch 怪人 thành 'quái vật' thay vì 'quái nhân'; b16-b17 để rời hai mệnh đề nên liên kết loại trừ ('trừ ... thì các anh hùng khác') yếu; b13 'Vinh hạnh quá ạ' chấp nhận được cho 恐れ入ります.",
+        "term_forms": {}
+    },
+    {
+        "page_id": "s-manga_ja_2",
+        "arm": "batch_control",
+        "attempt": 2,
+        "correctness": 2,
+        "terms": 2,
+        "pronouns": 2,
+        "tone": 2,
+        "coherence": 1,
+        "conciseness": 2,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "Thuật ngữ 'quái nhân' chuẩn, vai trên/dưới rõ ở b04-b06 và b13; b16-b17 thiếu từ nối nên vế loại trừ và vế 'vẫn thua' hơi rời.",
+        "term_forms": {}
+    },
+    {
+        "page_id": "s-manga_ja_2",
+        "arm": "batch_control",
+        "attempt": 3,
+        "correctness": 2,
+        "terms": 2,
+        "pronouns": 2,
+        "tone": 2,
+        "coherence": 2,
+        "conciseness": 2,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "b01 thêm 'tự sát' so với nguồn nhưng vẫn giữ đúng hình ảnh 'ôm bom'; b16-b17 nối mạch bằng chủ ngữ ngầm; không phát hiện lỗi đáng kể khác.",
+        "term_forms": {}
+    },
+    {
+        "page_id": "s-manga_ja_2",
+        "arm": "full_page",
+        "attempt": 1,
+        "correctness": 2,
+        "terms": 2,
+        "pronouns": 2,
+        "tone": 2,
+        "coherence": 2,
+        "conciseness": 2,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "Không phát hiện lỗi đáng kể; b16-b17 nối bằng 'Nếu ngoại trừ... thì các anh hùng khác...' rất liền mạch, chỉ 'có hội lại' ở b17 hơi thiếu tự nhiên.",
+        "term_forms": {}
+    },
+    {
+        "page_id": "s-manga_ja_2",
+        "arm": "full_page",
+        "attempt": 2,
+        "correctness": 2,
+        "terms": 2,
+        "pronouns": 2,
+        "tone": 2,
+        "coherence": 2,
+        "conciseness": 2,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "Không phát hiện lỗi đáng kể; b17 'có chụm lại' hơi thiếu tự nhiên so với 'hợp sức', b02 'hai người này' trung tính hơn giọng cảnh giác của nguồn nhưng không sai.",
+        "term_forms": {}
+    },
+    {
+        "page_id": "s-manga_ja_2",
+        "arm": "full_page",
+        "attempt": 3,
+        "correctness": 2,
+        "terms": 1,
+        "pronouns": 2,
+        "tone": 2,
+        "coherence": 2,
+        "conciseness": 2,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "b15 dịch 怪人 thành 'dị nhân' lệch thuật ngữ; phần còn lại đúng nghĩa, b13 'Ngài quá khen' đúng sắc thái 恐れ入ります, b16-b17 nối mạch tốt.",
+        "term_forms": {}
+    },
+    {
+        "page_id": "s-manga_ja_2",
+        "arm": "ordered_microbatch",
+        "attempt": 1,
+        "correctness": 2,
+        "terms": 1,
+        "pronouns": 2,
+        "tone": 2,
+        "coherence": 1,
+        "conciseness": 2,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "b15 'dị nhân' lệch thuật ngữ 怪人; b16-b17 không có từ nối nên hai vế rời nhau; các bong bóng còn lại đúng vai và gọn.",
+        "term_forms": {}
+    },
+    {
+        "page_id": "s-manga_ja_2",
+        "arm": "ordered_microbatch",
+        "attempt": 2,
+        "correctness": 1,
+        "terms": 1,
+        "pronouns": 2,
+        "tone": 1,
+        "coherence": 1,
+        "conciseness": 1,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "b14 'không thể lơ lửng được' sai từ (phải là 'lơ là'/'chủ quan') làm câu mất nghĩa và gãy mạch dẫn sang b15-b17; b02 'hai đứa này' hạ thấp, không hợp cuộc họp cấp cao; b15 'dị nhân' lệch thuật ngữ; b08 dài, thừa 'mà phải không'.",
+        "term_forms": {}
+    },
+    {
+        "page_id": "s-manga_ja_2",
+        "arm": "ordered_microbatch",
+        "attempt": 3,
+        "correctness": 1,
+        "terms": 1,
+        "pronouns": 2,
+        "tone": 2,
+        "coherence": 2,
+        "conciseness": 1,
+        "critical_error": false,
+        "reviewer": "jaa",
+        "note": "b15 'Những kẻ quái dị tội ác' sai cấu trúc ('tội ác' là danh từ dùng như tính từ) và làm mất thuật ngữ 'quái nhân'; b08 dài, thừa 'mà phải không'; b16-b17 nối mạch ổn.",
+        "term_forms": {}
+    }
+]
