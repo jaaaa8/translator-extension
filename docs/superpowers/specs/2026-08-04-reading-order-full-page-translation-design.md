@@ -345,7 +345,7 @@ Giữ `producer.translationBatchTrace` và `page_metrics[].translation_batches` 
 
 ### 12.1 Reading-order comparator
 
-Node test đọc trực tiếp manifest Spec A, dùng `image`, `width`, `height`, `page_kind`, bbox và expected `reading_order`; không hard-code filename và không viết lại thuật toán bằng Python.
+Node test đọc trực tiếp manifest Spec A, dùng `image`, `width`, `height`, `page_kind`, `reading_direction`, bbox và expected `reading_order`; direction phải được truyền từ từng manifest entry vào helper, không hard-code RTL, không hard-code filename và không viết lại thuật toán bằng Python.
 
 Trên cả ba fixture:
 
