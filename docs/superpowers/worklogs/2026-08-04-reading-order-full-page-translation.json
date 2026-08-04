@@ -1,0 +1,8 @@
+{
+  "spec": "reading-order-full-page-translation",
+  "status": "baseline_verified",
+  "control_baseline_path": "docs/superpowers/worklogs/2026-08-01-real-page-quality-baseline.json",
+  "control_baseline_commit": "9b1d153df7bccbb8dce34eaa451e47d32ee70bab",
+  "control_policy": "microbatch-3-8-250-500-v1",
+  "control_policy_batch_count": 25
+}
