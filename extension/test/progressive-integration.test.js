@@ -126,7 +126,7 @@ function createServer() {
 
 async function eventually(predicate, label) {
   for (let i = 0; i < 100; i++) {
-    const value = predicate();
+    const value = await predicate();
     if (value) return value;
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
@@ -279,6 +279,7 @@ function createIntegration({ server = createServer(), session = storageSession()
   const statusAfterReopen = await replacement.pageStatus();
   assert.ok(statusBefore.background >= 1);
   assert.deepStrictEqual(statusAfterReopen, statusBefore);
+  await eventually(async () => Number.isFinite((await replacement.summary()).cancel_latency_ms.p50), "replacement cancellation telemetry");
   replacementServer.finishSource("A");
   await eventually(() => replacementServer.calls.ocrStream === 1, "deferred OCR stream");
   replacementServer.finishPage("A");
