@@ -226,6 +226,7 @@ function createBackgroundApp({ storage = fakeStorage(), server = createFakeServe
   };
   server.setResponseVersions(vm.runInContext(`(${JSON.stringify(server.versions)})`, context));
   vm.runInContext(fs.readFileSync("extension/page-cache.js", "utf8"), context);
+  vm.runInContext(fs.readFileSync("extension/reading-order.js", "utf8"), context);
   vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
   return {
     context,
@@ -296,6 +297,7 @@ const context = {
   fetch: async () => ({ ok: true, json: async () => ({}) }),
 };
 vm.createContext(context);
+vm.runInContext(fs.readFileSync("extension/reading-order.js", "utf8"), context);
 vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
 
 (async () => {

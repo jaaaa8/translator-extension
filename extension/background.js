@@ -1,4 +1,6 @@
-if (typeof importScripts === "function") importScripts("page-cache.js");
+if (typeof importScripts === "function") {
+  importScripts("page-cache.js", "reading-order.js");
+}
 
 const SERVER = "http://127.0.0.1:8910";
 const MAX_CONCURRENT = 2;

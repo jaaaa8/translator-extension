@@ -163,6 +163,7 @@ function createIntegration({ server = createServer(), session = storageSession()
   };
   server.clone = pair.toBackground;
   vm.runInContext(fs.readFileSync("extension/page-cache.js", "utf8"), background);
+  vm.runInContext(fs.readFileSync("extension/reading-order.js", "utf8"), background);
   vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), background);
   connects.emit(pair.background);
 
