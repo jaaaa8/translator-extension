@@ -75,6 +75,17 @@ async function flush() {
 }
 
 (async () => {
+  const direction = popup();
+  direction.elements.readingDirection ||= { value: "" };
+  direction.elements.currentLanguages ||= { textContent: "" };
+  direction.settings.resolve({ srcLang: "es", dstLang: "vi" });
+  await flush();
+  assert.strictEqual(direction.elements.readingDirection.value, "rtl");
+  assert.match(direction.elements.currentLanguages.textContent, /RTL/);
+  assert.deepStrictEqual(direction.writes, []);
+  direction.elements.readingDirection.onchange({ target: { value: "ltr" } });
+  assert.deepStrictEqual({ ...direction.writes.at(-1) }, { readingDirection: "ltr" });
+
   const first = popup();
   first.settings.resolve({ srcLang: "es", dstLang: "vi" });
   await flush();

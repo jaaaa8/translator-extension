@@ -7,6 +7,7 @@
       label { display: block; margin: 8px 0 2px; font-size: 12px; color: #555; }
       select { width: 100%; }
       #status, #cacheStatus { margin-top: 10px; font-size: 12px; }
+      #currentLanguages { margin-top: 8px; font-size: 12px; color: #555; }
       .row { display: flex; align-items: center; gap: 6px; }
       .action { width: 100%; margin-top: 12px; padding: 8px; font-weight: bold; cursor: pointer; }
       .action + .action { margin-top: 6px; }
@@ -26,6 +27,12 @@
     <select id="dstLang">
       <option value="vi">Tiếng Việt</option>
       <option value="en">Tiếng Anh</option>
+    </select>
+    <div id="currentLanguages"></div>
+    <label for="readingDirection">Hướng đọc</label>
+    <select id="readingDirection">
+      <option value="rtl">Phải sang trái (RTL)</option>
+      <option value="ltr">Trái sang phải (LTR)</option>
     </select>
     <button id="translateLoaded" class="action">Dịch webtoon đã tải</button>
     <button id="translateVisible" class="action">Dịch trang đang xem</button>

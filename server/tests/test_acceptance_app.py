@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from server import config
 from server.acceptance_app import (
     AcceptanceConfig,
     AcceptanceState,
@@ -16,6 +17,12 @@ from server.acceptance_app import (
     state,
     wait_gate,
 )
+
+
+def version_shape(value):
+    if isinstance(value, dict):
+        return {key: version_shape(child) for key, child in sorted(value.items())}
+    return str
 
 
 def client() -> TestClient:
@@ -74,7 +81,10 @@ def ndjson(response):
 
 def test_health_exposes_complete_fixed_versions_for_extension_keys():
     with client() as http:
-        assert http.get("/health").json()["versions"] == {
+        payload = http.get("/health").json()
+        assert version_shape(payload["versions"]) == version_shape(config.PIPELINE_VERSIONS)
+        assert payload["versions"]["layout_order"] == "reading-order-v1"
+        assert payload["versions"] == {
             "detector": "acceptance-detector-v1",
             "dedupe": "acceptance-dedupe-v1",
             "prep": "acceptance-prep-v1",
@@ -85,6 +95,7 @@ def test_health_exposes_complete_fixed_versions_for_extension_keys():
             "translator_model": "acceptance-translator-v1",
             "prompt": "acceptance-prompt-v1",
             "policy": "acceptance-policy-v1",
+            "layout_order": "reading-order-v1",
             "page_schema": "acceptance-page-v1",
         }
 

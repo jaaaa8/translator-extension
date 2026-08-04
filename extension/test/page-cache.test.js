@@ -46,6 +46,17 @@ function page(key, state, access, text = "x") {
   assert.strictEqual(await cache.purgeIncompatible({ prompt: "v2" }), 1);
   assert.strictEqual(await cache.getPage("wrong-version"), null);
 
+  const migrationStorage = fakeStorage();
+  const migrationCache = new PageCache(migrationStorage);
+  await migrationCache.putPage({
+    ...page("old-layout", "complete", 1),
+    versions: { prompt: "v2", layout_order: "reading-order-v0" },
+  });
+  await migrationCache.putJob({ job_id: "layout-ledger", state: "queued" });
+  assert.strictEqual(await migrationCache.purgeIncompatible({ prompt: "v2", layout_order: "reading-order-v1" }), 1);
+  assert.strictEqual(await migrationCache.getPage("old-layout"), null);
+  assert.ok((await migrationCache.rehydrate()).jobs.some((job) => job.job_id === "layout-ledger"));
+
   const versionStorage = fakeStorage();
   const versionCache = new PageCache(versionStorage);
   const currentVersions = {
@@ -70,6 +81,12 @@ function page(key, state, access, text = "x") {
   await cache.putJob({ job_id: "j1", state: "running", created_at: 1 });
   const rehydrated = await cache.rehydrate();
   assert.strictEqual(rehydrated.jobs[0].state, "queued");
+
+  const descriptorCache = new PageCache(fakeStorage());
+  await descriptorCache.putJob({ job_id: "new", descriptor: { reading_direction: "ltr" } });
+  assert.strictEqual((await descriptorCache.rehydrate()).jobs.find((job) => job.job_id === "new").descriptor.reading_direction, "ltr");
+  await descriptorCache.putJob({ job_id: "legacy", descriptor: { src_lang: "ja" } });
+  assert.strictEqual((await descriptorCache.rehydrate()).jobs.find((job) => job.job_id === "legacy").descriptor.reading_direction, undefined);
 
   const tiny = new PageCache(fakeStorage(), { budgetBytes: 20 });
   await assert.rejects(tiny.putPage(page("too-large", "running", 1, "x".repeat(100))), CacheFullError);

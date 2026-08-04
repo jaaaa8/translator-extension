@@ -2,6 +2,7 @@ const MIN_SIZE = 400;
 let enabled = true;
 let srcLang = "ja";
 let dstLang = "vi";
+let readingDirection = "rtl";
 let currentRequestId = null;
 let port = null;
 let pruneFrame = 0;
@@ -11,14 +12,20 @@ const jobBindings = new Map();
 const pendingScopes = new Map();
 const activeScopeMessages = new Map();
 
-chrome.storage.local.get(["enabled", "srcLang", "dstLang"]).then((value) => {
+function uiDirection(value) {
+  return value === "ltr" ? "ltr" : "rtl";
+}
+
+chrome.storage.local.get(["enabled", "srcLang", "dstLang", "readingDirection"]).then((value) => {
   enabled = value.enabled !== false;
   srcLang = value.srcLang || "ja";
   dstLang = value.dstLang || "vi";
+  readingDirection = uiDirection(value.readingDirection);
 });
 chrome.storage.onChanged.addListener((changes) => {
   if (changes.srcLang) srcLang = changes.srcLang.newValue;
   if (changes.dstLang) dstLang = changes.dstLang.newValue;
+  if (changes.readingDirection) readingDirection = uiDirection(changes.readingDirection.newValue);
   if (changes.enabled) {
     enabled = changes.enabled.newValue;
     for (const { container } of overlays.values()) container.style.display = enabled ? "" : "none";
@@ -81,6 +88,7 @@ function snapshotJobs(scope, requestId, requestSrcLang, requestDstLang) {
 function translatePage(scope, requestSrcLang = srcLang, requestDstLang = dstLang) {
   const requestId = crypto.randomUUID();
   const replacesRequestId = currentRequestId;
+  const requestReadingDirection = readingDirection;
   if (replacesRequestId) cleanupRequest(replacesRequestId, { ok: false, error: "superseded" });
   currentRequestId = requestId;
   srcLang = requestSrcLang;
@@ -89,7 +97,7 @@ function translatePage(scope, requestSrcLang = srcLang, requestDstLang = dstLang
   try { jobs = snapshotJobs(scope, requestId, srcLang, dstLang); }
   catch (error) { return Promise.resolve({ ok: false, error: error.message || String(error) }); }
   const done = new Promise((resolve) => pendingScopes.set(requestId, { resolve, startedAt: performance.now(), firstOverlayMs: null, firstOverlayByJob: new Map() }));
-  const message = { type: "start_scope", request_id: requestId, replaces_request_id: replacesRequestId, scope, src_lang: srcLang, dst_lang: dstLang, jobs };
+  const message = { type: "start_scope", request_id: requestId, replaces_request_id: replacesRequestId, scope, src_lang: srcLang, dst_lang: dstLang, reading_direction: requestReadingDirection, jobs };
   activeScopeMessages.set(requestId, message);
   translationPort().postMessage(message);
   return done;

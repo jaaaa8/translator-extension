@@ -79,6 +79,12 @@ function canonicalCrop(crop) {
     rounded.right === 1 && rounded.bottom === 1 ? "full" : rounded;
 }
 
+function normalizeReadingDirection(value) {
+  if (value == null) return "rtl";
+  if (value === "rtl" || value === "ltr") return value;
+  throw new Error("invalid reading_direction");
+}
+
 async function hashValue(value) {
   const bytes = new TextEncoder().encode(JSON.stringify(value));
   const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -101,7 +107,7 @@ async function buildKeys(job, versions) {
     analysisKey, job.src_lang, versions.recognizers[job.src_lang],
   ]);
   const overlayKey = await hashValue([
-    sourceRevision, crop, ocrKey, job.dst_lang,
+    sourceRevision, crop, ocrKey, job.dst_lang, job.reading_direction, versions.layout_order,
     versions.translator_model, versions.prompt, versions.policy,
   ]);
   return {
@@ -232,8 +238,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "prewarmJob") {
     ready.then(async () => {
       if (!serverVersions) await refreshServerVersions(false);
-      const request = createRequest(null, { request_id: `prewarm:${Date.now()}`, scope: "prewarm", src_lang: msg.src_lang, dst_lang: msg.dst_lang, jobs: [msg.job || msg] });
-      await attachDescriptor(request, { ...(msg.job || msg), scope: "prewarm", src_lang: msg.src_lang, dst_lang: msg.dst_lang }, { job_id: `prewarm:${Date.now()}`, state: "queued" });
+      const source = msg.job || msg;
+      const descriptor = { ...source, scope: "prewarm", src_lang: msg.src_lang, dst_lang: msg.dst_lang, reading_direction: normalizeReadingDirection(source.reading_direction) };
+      const request = createRequest(null, { request_id: `prewarm:${Date.now()}`, scope: "prewarm", src_lang: msg.src_lang, dst_lang: msg.dst_lang, jobs: [descriptor] });
+      await attachDescriptor(request, descriptor, { job_id: `prewarm:${Date.now()}`, state: "queued" });
       admitRequestJobs(request);
     }).then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: String(error) }));
     return true;
@@ -451,7 +459,19 @@ async function acceptScope(port, message) {
   await ready; const request = createRequest(port, message); requests.set(request.requestId, request);
   if (!message.jobs?.length) { if (message.replaces_request_id) releaseRequest(message.replaces_request_id, request); scopeDone(request); return; }
   if (!serverVersions) try { await refreshServerVersions(false); } catch {}
-  for (const row of message.jobs) { const descriptor = { ...row, src_lang: request.srcLang, dst_lang: request.dstLang, scope: request.scope }; const ledger = { job_id: descriptor.job_id, request_id: request.requestId, scope: request.scope, src_lang: request.srcLang, dst_lang: request.dstLang, descriptor, state: "queued", created_at: Date.now() }; try { if (request.scope === "visible") await pageCache?.putJob(ledger); await attachDescriptor(request, descriptor, ledger); } catch (error) { const code = typeof CacheFullError !== "undefined" && error instanceof CacheFullError ? "cache_full" : "request_failed"; port?.postMessage({ type: "job_error", request_id: request.requestId, job_id: descriptor.job_id, code, error: String(error) }); completeJob(request, descriptor.job_id, 0, 1, false, null, null, null, { pageKey: descriptor.page_artifact_key, errorCode: code }); } }
+  for (const row of message.jobs) {
+    const descriptor = { ...row, src_lang: request.srcLang, dst_lang: request.dstLang, scope: request.scope };
+    try {
+      descriptor.reading_direction = normalizeReadingDirection(message.reading_direction);
+      const ledger = { job_id: descriptor.job_id, request_id: request.requestId, scope: request.scope, src_lang: request.srcLang, dst_lang: request.dstLang, descriptor, state: "queued", created_at: Date.now() };
+      if (request.scope === "visible") await pageCache?.putJob(ledger);
+      await attachDescriptor(request, descriptor, ledger);
+    } catch (error) {
+      const code = typeof CacheFullError !== "undefined" && error instanceof CacheFullError ? "cache_full" : "request_failed";
+      port?.postMessage({ type: "job_error", request_id: request.requestId, job_id: descriptor.job_id, code, error: String(error) });
+      completeJob(request, descriptor.job_id, 0, 1, false, null, null, null, { pageKey: descriptor.page_artifact_key, errorCode: code });
+    }
+  }
   if (message.replaces_request_id) releaseRequest(message.replaces_request_id, request);
   admitRequestJobs(request);
 }
@@ -645,13 +665,19 @@ function queueTranslation(producer, block) { if (producer.prewarmOnly || produce
 function ocrBlockFromEvent(event) { return { block_id: event.block_id, bbox: event.bbox, src_text: event.src_text ?? event.text, trans_text: null, state: "ocr_complete" }; }
 async function applyOcrBlock(producer, event) { const block = ocrBlockFromEvent(event); mark(producer, "first_ocr"); if (!producer.page.blocks.some((b) => b.block_id === block.block_id)) producer.page.blocks.push(block); lruSet(hotOcr, producer.ocrKey, producer.page.blocks, 256); queueTranslation(producer, block); await persist(producer); }
 async function translationKeyForBatch(producer, blocks, block) {
-  const contextHash = await hashValue(blocks.map((row) => ({ blockId: row.block_id, srcText: row.src_text })));
+  const contextHash = await hashValue(blocks.map((block, reading_order) => ({
+    reading_order,
+    block_id: block.block_id,
+    src_text: block.src_text,
+  })));
   return hashValue([
     producer.ocrKey,
     block.block_id,
     await hashValue(block.src_text),
     contextHash,
     producer.descriptor.dst_lang,
+    producer.descriptor.reading_direction,
+    producer.page.versions.layout_order,
     producer.page.versions.translator_model,
     producer.page.versions.prompt,
     producer.page.versions.policy,
@@ -825,7 +851,7 @@ function releaseRequest(requestId, replacement = null) {
   requests.delete(requestId);
 }
 function disconnectPort(port) { ports.delete(port); for (const request of requests.values()) if (request.port === port) releaseRequest(request.requestId); }
-function offlineLedger(job) { const request = createRequest(null, { request_id: job.request_id, scope: "visible", src_lang: job.src_lang, dst_lang: job.dst_lang, jobs: [job.descriptor] }); request.connected = false; requests.set(request.requestId, request); return { request, descriptor: job.descriptor, ledger: job }; }
+function offlineLedger(job) { job.descriptor.reading_direction = normalizeReadingDirection(job.descriptor.reading_direction); const request = createRequest(null, { request_id: job.request_id, scope: "visible", src_lang: job.src_lang, dst_lang: job.dst_lang, jobs: [job.descriptor] }); request.connected = false; requests.set(request.requestId, request); return { request, descriptor: job.descriptor, ledger: job }; }
 function restoreProducer(job) { offlineJobs.push(offlineLedger(job)); }
 async function resumeOfflineJobs() { const jobs = offlineJobs.splice(0); for (const row of jobs) { await attachDescriptor(row.request, row.descriptor, row.ledger); admitRequestJobs(row.request); } }
 

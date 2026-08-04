@@ -6,7 +6,7 @@ const { webcrypto } = require("crypto");
 const versions = {
   detector: "d1", dedupe: "dd1", prep: "p1",
   recognizers: { ja: "ja1", es: "es1" },
-  translator_model: "g1", prompt: "p1", policy: "batch1", page_schema: "page-v1",
+  translator_model: "g1", prompt: "p1", policy: "batch1", layout_order: "reading-order-v1", page_schema: "page-v1",
 };
 
 function eventTarget() {

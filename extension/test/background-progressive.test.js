@@ -80,7 +80,7 @@ function createFakeServer() {
   const versions = {
     detector: "d1", dedupe: "dd1", prep: "p1",
     recognizers: { ja: "r-ja", es: "r-es" },
-    translator_model: "g1", prompt: "pr1", policy: "po1", page_schema: "page-v1",
+    translator_model: "g1", prompt: "pr1", policy: "po1", layout_order: "reading-order-v1", page_schema: "page-v1",
   };
   const counts = { health: 0, source: 0, ocr: 0, coldOcr: 0, warmOcr: 0, translate: 0, aborted: 0 };
   const translationBatches = [];
@@ -244,7 +244,7 @@ function createBackgroundApp({ storage = fakeStorage(), server = createFakeServe
       return { job_id: jobId, source_url: source, crop: null, natural_width: 100, natural_height: 200, priority: 0, distance: 0, ...extra };
     },
     startScope(requestId, scope, job, replacesRequestId) {
-      return { type: "start_scope", request_id: requestId, replaces_request_id: replacesRequestId, scope, src_lang: "ja", dst_lang: "vi", jobs: job ? [job] : [] };
+      return { type: "start_scope", request_id: requestId, replaces_request_id: replacesRequestId, scope, src_lang: "ja", dst_lang: "vi", reading_direction: "rtl", jobs: job ? [job] : [] };
     },
     async waitFor(type, port) {
       await waitUntil(
@@ -305,13 +305,39 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
   // acceptScope to only retain foreground work must make this fail.
   assert.strictEqual(typeof context.acceptScope, "function");
 
+  await scenario("start_scope defaults missing direction and rejects invalid direction before producer creation", async () => {
+    const server = createFakeServer();
+    server.holdSource("default-direction");
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const port = app.connect();
+    const missingDirection = app.startScope("default-direction", "visible", app.job("default-direction-job", "https://x/default-direction.jpg"));
+    delete missingDirection.reading_direction;
+    port.receive(missingDirection);
+    await app.waitFor("page_job_accepted", port);
+    assert.strictEqual(app.storedJob("default-direction-job").descriptor.reading_direction, "rtl");
+    server.releaseSource("default-direction");
+    await app.waitFor("scope_done", port);
+
+    const beforeSource = server.counts.source;
+    const invalid = app.connect();
+    invalid.receive({
+      ...app.startScope("invalid-direction", "visible", app.job("invalid-direction-job", "https://x/invalid-direction.jpg")),
+      reading_direction: "vertical",
+    });
+    const error = await app.waitFor("job_error", invalid);
+    assert.match(error.error, /invalid reading_direction/);
+    assert.strictEqual(server.counts.source, beforeSource);
+    assert.strictEqual(app.debug().producers, 0);
+  });
+
   await scenario("A continues after disconnect and exact return makes zero calls", async () => {
     const server = createFakeServer();
     server.holdSource("detached");
     const app = createBackgroundApp({ server });
     await app.ready();
     const job = app.job("detached-job", "https://x/detached.jpg");
-    const keys = await app.keysFor(job);
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
     const first = app.connect();
     first.receive(app.startScope("detached-request", "visible", job));
     await app.waitFor("page_job_accepted", first);
@@ -440,21 +466,69 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     assert.deepStrictEqual(Object.keys(loaded.storage.rows).filter((key) => key.startsWith("mt:")), []);
   });
 
+  await scenario("restored legacy ledger defaults direction before keys and repersist", async () => {
+    const descriptor = {
+      job_id: "legacy-direction-job",
+      source_url: "https://x/legacy-direction.jpg",
+      crop: null,
+      natural_width: 100,
+      natural_height: 200,
+      priority: 0,
+      distance: 0,
+      src_lang: "ja",
+      dst_lang: "vi",
+      scope: "visible",
+    };
+    const storage = fakeStorage({
+      "mt:job:legacy-direction-job": {
+        job_id: descriptor.job_id,
+        request_id: "legacy-direction-request",
+        scope: "visible",
+        src_lang: "ja",
+        dst_lang: "vi",
+        descriptor,
+        state: "queued",
+        created_at: 1,
+      },
+    });
+    const server = createFakeServer();
+    server.holdSource("legacy-direction");
+    const app = createBackgroundApp({ storage, server });
+    await app.ready();
+    await waitUntil(() => app.storedJob(descriptor.job_id)?.page_artifact_key, "legacy direction repersist");
+    const stored = app.storedJob(descriptor.job_id);
+    const expected = await app.keysFor({ ...descriptor, reading_direction: "rtl" });
+    assert.strictEqual(stored.descriptor.reading_direction, "rtl");
+    assert.strictEqual(stored.page_artifact_key, expected.pageArtifactKey);
+    server.releaseSource("legacy-direction");
+    await waitUntil(() => app.storedJob(descriptor.job_id) === undefined, "legacy direction completion");
+  });
+
   await scenario("prewarm performs OCR only at prewarm priority without persistence", async () => {
     const app = createBackgroundApp();
     await app.ready();
+    const job = app.job("prewarm-job", "https://x/prewarm.jpg");
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    app.server.holdSource("prewarm");
     const response = await app.message({
       type: "prewarmJob",
       src_lang: "ja",
       dst_lang: "vi",
-      job: app.job("prewarm-job", "https://x/prewarm.jpg"),
+      job,
     });
     assert.strictEqual(response.ok, true);
+    app.context.__prewarmKey = keys.pageArtifactKey;
+    assert.strictEqual(vm.runInContext("producers.get(__prewarmKey).descriptor.reading_direction", app.context), "rtl");
+    assert.strictEqual(app.storedJob("prewarm-job"), undefined);
+    assert.strictEqual(app.page(keys.pageArtifactKey), undefined);
+    app.server.releaseSource("prewarm");
     await waitUntil(() => app.server.counts.ocr === 1 && app.debug().producers === 0, "prewarm completion");
     assert.deepStrictEqual(
       { source: app.server.counts.source, ocr: app.server.counts.ocr, translate: app.server.counts.translate },
       { source: 1, ocr: 1, translate: 0 }
     );
+    assert.strictEqual(app.storedJob("prewarm-job"), undefined);
+    assert.strictEqual(app.page(keys.pageArtifactKey), undefined);
     assert.deepStrictEqual(Object.keys(app.storage.rows).filter((key) => key.startsWith("mt:")), []);
     assert.strictEqual(vm.runInContext("requestTier({ connected: true, scope: 'prewarm' })", app.context), 2);
   });
@@ -581,7 +655,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       dst_lang: "vi",
       scope: "visible",
     };
-    const keys = await app.keysFor(descriptor);
+    const keys = await app.keysFor({ ...descriptor, reading_direction: "rtl" });
     const now = Date.now();
     storage.rows[`mt:page:${keys.pageArtifactKey}`] = {
       schema_version: "page-v1",
@@ -790,7 +864,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const app = createBackgroundApp();
     await app.ready();
     const job = app.job("partial-job", "https://x/partial.jpg");
-    const keys = await app.keysFor(job);
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
     const now = Date.now();
     app.storage.rows[`mt:page:${keys.pageArtifactKey}`] = {
       schema_version: "page-v1",
@@ -849,7 +923,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const app = createBackgroundApp({ server });
     await app.ready();
     const job = app.job("ocr-partial-job", "https://x/ocr-partial.jpg");
-    const keys = await app.keysFor(job);
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
     const port = app.connect();
     port.receive(app.startScope("ocr-partial", "visible", job));
     const done = await app.waitFor("scope_done", port);
@@ -963,8 +1037,8 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     await app.ready();
     const good = app.job("good-image", "https://x/good.jpg");
     const broken = app.job("broken-image", "https://x/broken.jpg");
-    const goodKeys = await app.keysFor(good);
-    const brokenKeys = await app.keysFor(broken);
+    const goodKeys = await app.keysFor({ ...good, reading_direction: "rtl" });
+    const brokenKeys = await app.keysFor({ ...broken, reading_direction: "rtl" });
     const port = app.connect();
     port.receive({ ...app.startScope("mixed-images", "visible"), jobs: [good, broken] });
     const done = await app.waitFor("scope_done", port);
@@ -992,7 +1066,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const app = createBackgroundApp({ server });
     await app.ready();
     const job = app.job("batch-partial-job", "https://x/batch-partial.jpg");
-    const keys = await app.keysFor(job);
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
     const port = app.connect();
     port.receive(app.startScope("batch-partial", "visible", job));
     const done = await app.waitFor("scope_done", port);
@@ -1019,7 +1093,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     await app.ready();
     const source = "https://x/invalid-ids.jpg";
     const firstJob = app.job("invalid-first", source);
-    const keys = await app.keysFor(firstJob);
+    const keys = await app.keysFor({ ...firstJob, reading_direction: "rtl" });
     const first = app.connect();
     first.receive(app.startScope("invalid-first", "visible", firstJob));
     const failed = await app.waitFor("scope_done", first);
@@ -1190,9 +1264,9 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const port = app.connect();
     const source = "https://x/stale-cloud.jpg";
     const oldJob = app.job("stale-old-job", source);
-    const oldKeys = await app.keysFor(oldJob);
+    const oldKeys = await app.keysFor({ ...oldJob, reading_direction: "rtl" });
     const newJob = app.job("stale-new-job", source);
-    const newKeys = await app.keysFor(newJob, "ja", "en");
+    const newKeys = await app.keysFor({ ...newJob, reading_direction: "rtl" }, "ja", "en");
     port.receive(app.startScope("stale-old", "visible", oldJob));
     await waitUntil(() => server.counts.translate === 1, "old cloud request");
     port.receive({
@@ -1356,7 +1430,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
   const versions = {
     detector: "d1", dedupe: "dd1", prep: "p1",
     recognizers: { ja: "r-ja", es: "r-es" },
-    translator_model: "g1", prompt: "pr1", policy: "po1", page_schema: "page-v1",
+    translator_model: "g1", prompt: "pr1", policy: "po1", layout_order: "reading-order-v1", page_schema: "page-v1",
   };
   const job = {
     source_url: "https://x/page.jpg?token=secret",
@@ -1365,15 +1439,36 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     natural_height: 1600,
     src_lang: "ja",
     dst_lang: "vi",
+    reading_direction: "rtl",
   };
   const vi = await context.buildKeys(job, versions);
   const en = await context.buildKeys({ ...job, dst_lang: "en" }, versions);
   const es = await context.buildKeys({ ...job, src_lang: "es" }, versions);
+  const ltr = await context.buildKeys({ ...job, reading_direction: "ltr" }, versions);
+  const oldLayout = await context.buildKeys(job, { ...versions, layout_order: "reading-order-v0" });
   assert.strictEqual(vi.analysisKey, en.analysisKey);
   assert.strictEqual(vi.ocrKey, en.ocrKey);
   assert.notStrictEqual(vi.pageArtifactKey, en.pageArtifactKey);
   assert.strictEqual(vi.analysisKey, es.analysisKey);
   assert.notStrictEqual(vi.ocrKey, es.ocrKey);
+  assert.strictEqual(vi.analysisKey, ltr.analysisKey);
+  assert.strictEqual(vi.ocrKey, ltr.ocrKey);
+  assert.notStrictEqual(vi.overlayKey, ltr.overlayKey);
+  assert.strictEqual(vi.analysisKey, oldLayout.analysisKey);
+  assert.strictEqual(vi.ocrKey, oldLayout.ocrKey);
+  assert.notStrictEqual(vi.overlayKey, oldLayout.overlayKey);
+
+  const blocks = [
+    { block_id: "b2", src_text: "second" },
+    { block_id: "b1", src_text: "first" },
+  ];
+  const producer = { ocrKey: "ocr-key", descriptor: { dst_lang: "vi", reading_direction: "rtl" }, page: { versions } };
+  const translationKey = await context.translationKeyForBatch(producer, blocks, blocks[0]);
+  const ltrTranslationKey = await context.translationKeyForBatch({ ...producer, descriptor: { ...producer.descriptor, reading_direction: "ltr" } }, blocks, blocks[0]);
+  const layoutTranslationKey = await context.translationKeyForBatch({ ...producer, page: { versions: { ...versions, layout_order: "reading-order-v0" } } }, blocks, blocks[0]);
+  const promptTranslationKey = await context.translationKeyForBatch({ ...producer, page: { versions: { ...versions, prompt: "pr2" } } }, blocks, blocks[0]);
+  const policyTranslationKey = await context.translationKeyForBatch({ ...producer, page: { versions: { ...versions, policy: "po2" } } }, blocks, blocks[0]);
+  assert.strictEqual(new Set([translationKey, ltrTranslationKey, layoutTranslationKey, promptTranslationKey, policyTranslationKey]).size, 5);
 
   const parsed = [];
   for await (const row of context.readNdjson(

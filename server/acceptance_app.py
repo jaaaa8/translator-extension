@@ -303,6 +303,7 @@ async def health():
             "translator_model": "acceptance-translator-v1",
             "prompt": "acceptance-prompt-v1",
             "policy": "acceptance-policy-v1",
+            "layout_order": "reading-order-v1",
             "page_schema": "acceptance-page-v1",
         },
     }
