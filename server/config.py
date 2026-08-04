@@ -9,7 +9,7 @@ GEMINI_API_KEY_SECONDARY = os.getenv("GEMINI_API_KEY_SECONDARY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 PIPELINE_VERSIONS = {
     "detector": "comic-text-detector-v1",
-    "dedupe": "iou-0.5-area-bbox-v2",
+    "dedupe": "iou-0.5-area-clamp-exact-v3",
     "prep": "upscale48-border8-v1",
     "recognizers": {"ja": "manga-ocr-v1", "es": "paddleocr-es-v1"},
     "translator_model": GEMINI_MODEL,

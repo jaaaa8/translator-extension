@@ -150,6 +150,11 @@ class DupeDetector:
         return regions((10, 10, 100, 50), (10, 10, 101, 50))
 
 
+class ClampDuplicateDetector:
+    def detect(self, img):
+        return regions((-10, 10, 20, 20), (0, 10, 10, 20))
+
+
 def test_duplicate_regions_are_ocred_once():
     engine = CountingEngine()
     pipeline = Pipeline(
@@ -161,6 +166,22 @@ def test_duplicate_regions_are_ocred_once():
     out = pipeline.ocr_image(encode_png(300, 200), "es")
     assert engine.calls == 1
     assert out["blocks"] == [{"bbox": [10, 10, 101, 50], "src_text": "hola"}]
+
+
+def test_regions_equal_after_clamp_are_ocred_once():
+    engine = CountingEngine()
+    pipeline = Pipeline(
+        detector=ClampDuplicateDetector(),
+        ocr=SharedOcr(engine),
+        translator=FakeTranslator(),
+    )
+
+    analysis = pipeline.analyze(encode_png(300, 200), None, "clamp-dedupe")
+    events = list(pipeline.iter_ocr("clamp-dedupe", "es", "clamp-dedupe-ocr"))
+    blocks = [event for event in events if event["type"] == "ocr_block"]
+
+    assert (len(analysis.regions), engine.calls, len(blocks)) == (1, 1, 1)
+    assert blocks[0]["bbox"] == [0, 10, 10, 20]
 
 
 class CountingEngine:

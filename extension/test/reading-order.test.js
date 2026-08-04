@@ -90,6 +90,26 @@ const bridge = [
 ];
 assert.deepStrictEqual(ids(orderPage({ blocks: bridge, image_w: 500, image_h: 800, reading_direction: "rtl" })), ["z-top", "m-bridge", "a-bottom"]);
 
+const duplicateGeometry = [
+  { block_id: "z-duplicate", bbox: [100, 100, 40, 40] },
+  { block_id: "a-duplicate", bbox: [100, 100, 40, 40] },
+];
+for (const blocks of [duplicateGeometry, duplicateGeometry.slice().reverse()]) {
+  assert.throws(
+    () => orderPage({ blocks, image_w: 500, image_h: 800, reading_direction: "rtl" }),
+    /Duplicate bbox geometry/,
+  );
+}
+assert.doesNotThrow(() => orderPage({
+  blocks: [
+    { block_id: "z-size", bbox: [100, 100, 40, 40] },
+    { block_id: "a-size", bbox: [100, 100, 50, 40] },
+  ],
+  image_w: 500,
+  image_h: 800,
+  reading_direction: "rtl",
+}));
+
 const helperPath = path.resolve(__dirname, "../reading-order.js");
 const source = fs.readFileSync(helperPath, "utf8");
 const lowSource = source.replace(

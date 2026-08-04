@@ -1,4 +1,3 @@
-from collections import Counter
 from hashlib import sha256
 from math import ceil, floor
 from threading import Lock
@@ -117,21 +116,22 @@ class Pipeline:
                 _dedupe_regions(self.detector.detect(work)),
                 key=lambda region: (-region.bbox[2] * region.bbox[3], *region.bbox),
             )
-            ordinals = Counter()
+            seen_bboxes = set()
             prepared = []
             for region in regions:
                 x, y, bw, bh = region.bbox
-                x, y = max(0, x), max(0, y)
                 x2, y2 = min(work_w, x + bw), min(work_h, y + bh)
+                x, y = max(0, x), max(0, y)
                 if x2 <= x or y2 <= y:
                     continue
                 bbox = (offset_x + x, offset_y + y, x2 - x, y2 - y)
-                ordinal = ordinals[bbox]
-                ordinals[bbox] += 1
+                if bbox in seen_bboxes:
+                    continue
+                seen_bboxes.add(bbox)
                 crop_rgb = cv2.cvtColor(work[y:y2, x:x2], cv2.COLOR_BGR2RGB)
                 prepared.append(
                     PreparedRegion(
-                        stable_block_id(analysis_key, bbox, ordinal),
+                        stable_block_id(analysis_key, bbox, 0),
                         bbox,
                         _prep_crop(crop_rgb),
                     )

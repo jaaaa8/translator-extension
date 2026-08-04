@@ -83,6 +83,9 @@
   }
 
   function orderPage({ blocks, image_w, image_h, reading_direction }) {
+    if (new Set(blocks.map((block) => JSON.stringify(block.bbox))).size !== blocks.length) {
+      throw new Error("Duplicate bbox geometry");
+    }
     const copies = blocks.map((block) => ({ ...block, bbox: [...block.bbox] }));
     const page_kind = image_w / image_h >= SPREAD_RATIO ? "spread" : "single";
     if (page_kind === "single") {
