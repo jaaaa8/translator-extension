@@ -88,21 +88,23 @@
       "manual_ltr": {
         "source_language": "ja",
         "direction": "ltr",
+        "cache_state": "network_full_page",
         "popup_content_background": { "scope": "loaded", "source_language": "ja", "destination_language": "vi", "direction": "ltr", "job_count": 1, "image_dimensions": { "width": 1105, "height": 868 } },
         "request": { "source_language": "ja", "destination_language": "vi", "direction": "ltr", "page_dimensions": { "width": 1105, "height": 868 }, "item_count": 17 },
         "scope_metrics_ms": { "queue_wait": 0, "fetch": 2, "analysis": 0, "first_ocr": 10, "ocr_done": 14, "first_translation": 9449, "final_translation": 9449, "first_overlay": 9455, "total": 9450 },
-        "page": { "analysis_cache_hit": true, "recognized": 17, "failed": 0, "translation_batches": [{ "batch_id": 1, "phase": "full_page", "block_count": 17, "cache_hit": false, "error_code": null }] },
+        "page": { "cache_hit": false, "analysis_cache_hit": true, "recognized": 17, "failed": 0, "translation_batches": [{ "batch_id": 1, "phase": "full_page", "block_count": 17, "cache_hit": false, "error_code": null }] },
         "server_delta": { "ocr_stream_200": 2, "translate_items_200": 1 },
         "instrumentation_restored": true
       },
       "pt": {
         "source_language": "pt",
         "direction": "rtl",
+        "cache_state": "network_full_page",
         "popup_content_background": { "scope": "loaded", "source_language": "pt", "destination_language": "vi", "direction": "rtl", "job_count": 1, "image_dimensions": { "width": 500, "height": 782 } },
-        "ocr_request": { "source_language": "pt", "has_image": true },
-        "translation_request": { "source_language": "pt", "destination_language": "vi", "direction": "rtl", "page_dimensions": { "width": 500, "height": 782 }, "item_count": 7 },
+        "ocr_request": { "src_lang": "pt", "has_image": true },
+        "translation_request": { "src_lang": "pt", "dst_lang": "vi", "reading_direction": "rtl", "page_dimensions": { "width": 500, "height": 782 }, "item_count": 7 },
         "scope_metrics_ms": { "queue_wait": 0, "analysis": 0, "first_ocr": 0, "ocr_done": 5095, "first_translation": 48703, "final_translation": 48703, "first_overlay": 48725, "total": 48704 },
-        "page": { "analysis_cache_hit": true, "recognized": 7, "failed": 0, "translation_batches": [{ "batch_id": 1, "phase": "full_page", "block_count": 7, "started_ms": 5096, "cache_hit": false, "error_code": null }] },
+        "page": { "cache_hit": false, "analysis_cache_hit": true, "recognized": 7, "failed": 0, "translation_batches": [{ "batch_id": 1, "phase": "full_page", "block_count": 7, "started_ms": 5096, "cache_hit": false, "error_code": null }] },
         "counters": { "translation_calls": 1, "rate_limited": 0, "stale_work": 0 },
         "instrumentation_restored": true
       }
@@ -113,7 +115,7 @@
       "endpoint_delta_after_ltr": { "ocr_stream_200": 3, "translate_items_200": 1 },
       "pt_interceptor_observed": ["ja_popup_prewarm", "pt"],
       "remaining_ocr_stream": "es_prewarm",
-      "conclusion": "One Latin engine initialization was observed; no second Paddle creation sequence appeared for ES on the same production process."
+      "conclusion": "Bounded runtime observation: ES prewarm did not increase Paddle creation markers after PT on the same production process. The markers alone do not prove a unique engine instance."
     },
     "first_overlay_tradeoff": "All full-page network runs emitted first_translation and first_overlay only after ocr_done. This deliberately delays first overlay until complete-page OCR and translation; it is a latency trade-off, not an optimization claim.",
     "initial_ja1": "The first manual run had one successful server OCR and translation request but its worker metric sample was lost on worker restart; it is excluded from recorded timings."
