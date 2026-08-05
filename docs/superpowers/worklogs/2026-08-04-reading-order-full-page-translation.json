@@ -55,6 +55,21 @@
       }
     }
   },
+  "post_final_review_update": {
+    "status": "verified_no_open_findings",
+    "commit": "1855a2700d35362619208579cca185aab14782ff",
+    "finding": "pre_ocr_terminal_stale_stage_retry",
+    "impact": "a late request during terminal cleanup could attach to a rejected OCR stage and fail without retrying source fetch, OCR, or translation",
+    "resolution": "finishProducer and failProducer synchronously release producer stages before deleting the producer map entry and awaiting job cleanup",
+    "verification": {
+      "red": "old cleanup order returned translated=0 failed=1 for the late request",
+      "green": "late request returned translated=1 failed=0 with source=2, ocr=1, translate=1",
+      "focused_node": "background-progressive.test.js transport OK",
+      "full_node": "10/10 sequential test files exited 0",
+      "review": "Terra medium PASS with no Critical, Important, or Minor findings"
+    },
+    "test_ocr": "explicitly_not_run"
+  },
   "runtime_telemetry": {
     "status": "captured_pending_review",
     "commit": "bec403b37253e4c5be18061b6baf971993a80b20",
