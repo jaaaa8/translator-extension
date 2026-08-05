@@ -453,7 +453,7 @@ function accepted(request, descriptor, page, cacheHit) {
 }
 function replayPage(request, jobId, page, cacheHit) {
   if (page.image_w) request.port?.postMessage({ type: "progress", request_id: request.requestId, job_id: jobId, image_w: page.image_w, image_h: page.image_h });
-  if (cacheHit) for (const block of page.blocks) if (block.trans_text) request.port?.postMessage({ type: "translation", request_id: request.requestId, job_id: jobId, block_id: block.block_id, bbox: block.bbox, src_text: block.src_text, trans_text: block.trans_text, image_w: page.image_w, image_h: page.image_h, cache_hit: true });
+  if (cacheHit || page.state === "complete") for (const block of page.blocks) if (block.trans_text) request.port?.postMessage({ type: "translation", request_id: request.requestId, job_id: jobId, block_id: block.block_id, bbox: block.bbox, src_text: block.src_text, trans_text: block.trans_text, image_w: page.image_w, image_h: page.image_h, cache_hit: true });
   if (cacheHit) completeJob(request, jobId, page.blocks.length, 0, true, { recognized: page.blocks.length, failed: 0 }, null, null, { pageKey: page.page_artifact_key });
 }
 async function acceptScope(port, message) {

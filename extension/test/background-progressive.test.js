@@ -50,6 +50,7 @@ function fakeStorage(seed = {}) {
     },
     async set(values) {
       if (this.failWrites) throw new Error("quota");
+      if (this.beforeSet) await this.beforeSet(values);
       Object.assign(rows, JSON.parse(JSON.stringify(values)));
     },
     async remove(keys) {
@@ -403,6 +404,37 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       })),
       [{ batch_id: 1, phase: "full_page", block_ids: ["right", "left", "bottom"], status: "success" }]
     );
+  });
+
+  await scenario("late consumer replays a completed in-flight page before persistence", async () => {
+    const storage = fakeStorage();
+    const releaseCompleteWrite = deferred();
+    let completeWriteHeld = false;
+    storage.beforeSet = async (values) => {
+      if (completeWriteHeld || !Object.values(values).some((row) => row?.schema_version === "page-v1" && row.state === "complete")) return;
+      completeWriteHeld = true;
+      await releaseCompleteWrite.promise;
+    };
+    const app = createBackgroundApp({ storage });
+    await app.ready();
+    const source = "https://x/late-replay.jpg";
+    const first = app.connect();
+    first.receive(app.startScope("late-replay-first", "visible", app.job("late-replay-first-job", source)));
+    await waitUntil(() => completeWriteHeld, "held complete-page persistence");
+
+    const late = app.connect();
+    late.receive(app.startScope("late-replay-second", "visible", app.job("late-replay-second-job", source)));
+    await app.waitFor("page_job_accepted", late);
+    try {
+      assert.deepStrictEqual(
+        late.sent.filter((event) => event.type === "translation").map((event) => event.block_id),
+        ["b1"]
+      );
+    } finally {
+      releaseCompleteWrite.resolve();
+    }
+    const done = await app.waitFor("scope_done", late);
+    assert.deepStrictEqual({ translated: done.translated, failed: done.failed, cache_hit: done.cache_hit }, { translated: 1, failed: 0, cache_hit: false });
   });
 
   await scenario("A continues after disconnect and exact return makes zero calls", async () => {
@@ -1031,7 +1063,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     assert.ok(back.sent.some((event) => event.type === "translation" && event.cache_hit));
   });
 
-  await scenario("partial page replays complete blocks and requests only missing IDs", async () => {
+  await scenario("partial page requests the complete ordered page without replaying cached blocks", async () => {
     const server = createFakeServer();
     server.holdTranslation("vi");
     const app = createBackgroundApp({ server });
