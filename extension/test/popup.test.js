@@ -74,6 +74,10 @@ async function flush() {
   await Promise.resolve();
 }
 
+const popupHtml = fs.readFileSync("extension/popup.html", "utf8");
+const sourceOptions = popupHtml.match(/<select id="srcLang">([\s\S]*?)<\/select>/)[1];
+assert.match(sourceOptions, /<option value="pt">/);
+
 (async () => {
   const direction = popup();
   direction.elements.readingDirection ||= { value: "" };

@@ -299,6 +299,7 @@ async def health():
             "recognizers": {
                 "ja": "acceptance-recognizer-ja-v1",
                 "es": "acceptance-recognizer-es-v1",
+                "pt": "acceptance-recognizer-pt-v1",
             },
             "translator_model": "acceptance-translator-v1",
             "prompt": "acceptance-prompt-v1",

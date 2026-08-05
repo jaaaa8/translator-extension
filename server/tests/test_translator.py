@@ -74,6 +74,14 @@ def test_prompt_contains_numbered_lines_and_langs(monkeypatch):
     assert "Spanish" in prompt and "English" in prompt
 
 
+def test_portuguese_prompt_uses_display_name(monkeypatch):
+    t, clients = make_with_clients(monkeypatch, [json.dumps(["olá"])])
+    t.translate(["olá"], "pt", "en")
+    prompt = clients[0].models.calls[0]["contents"]
+    assert "from Portuguese" in prompt
+    assert "from pt" not in prompt
+
+
 def test_generate_uses_exported_temperature(monkeypatch):
     monkeypatch.setattr(tr, "GENERATION_TEMPERATURE", 0.37)
     t, clients = make_with_clients(monkeypatch, [json.dumps(["hi"])])

@@ -84,10 +84,11 @@ def test_other_error_500(monkeypatch):
     assert r.status_code == 500
 
 
-def test_ocr_ok(monkeypatch):
+@pytest.mark.parametrize("src_lang", ["es", "pt"])
+def test_ocr_ok(monkeypatch, src_lang):
     monkeypatch.setattr(main, "_pipeline", FakePipeline())
     r = TestClient(main.app).post(
-        "/ocr", files={"image": ("p.png", PNG, "image/png")}, data={"src_lang": "es"}
+        "/ocr", files={"image": ("p.png", PNG, "image/png")}, data={"src_lang": src_lang}
     )
     assert r.status_code == 200
     assert r.json()["blocks"][0]["src_text"] == "hola"

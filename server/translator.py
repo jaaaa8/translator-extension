@@ -12,7 +12,13 @@ class TranslateError(Exception):
         self.error_kind = error_kind
 
 
-LANG_NAMES = {"ja": "Japanese", "es": "Spanish", "vi": "Vietnamese", "en": "English"}
+LANG_NAMES = {
+    "ja": "Japanese",
+    "es": "Spanish",
+    "pt": "Portuguese",
+    "vi": "Vietnamese",
+    "en": "English",
+}
 HTTP_TRANSLATE_ITEM_PROMPT_FIELDS = ("id", "text")
 GENERATION_TEMPERATURE = 0.2
 

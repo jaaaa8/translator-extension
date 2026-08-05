@@ -10,8 +10,6 @@ from pydantic import BaseModel
 from . import config
 from .translator import TranslateError, _normalize_items
 
-LANGS = ["ja", "es"]
-
 _pipeline = None
 
 
@@ -38,7 +36,7 @@ def health():
     return {
         "status": "ok",
         "device": config.DEVICE,
-        "langs": LANGS,
+        "langs": config.LANGS,
         "versions": config.PIPELINE_VERSIONS,
     }
 
@@ -67,7 +65,7 @@ def ocr(
     crop_right: float | None = Form(None),
     crop_bottom: float | None = Form(None),
 ):
-    if src_lang not in LANGS:
+    if src_lang not in config.LANGS:
         return JSONResponse(status_code=422, content={"error": f"src_lang không hỗ trợ: {src_lang}"})
     crop_or_error = _validated_crop(crop_left, crop_top, crop_right, crop_bottom)
     if isinstance(crop_or_error, JSONResponse):
@@ -92,7 +90,7 @@ async def ocr_stream(
     crop_right: float | None = Form(None),
     crop_bottom: float | None = Form(None),
 ):
-    if src_lang not in LANGS:
+    if src_lang not in config.LANGS:
         return JSONResponse(status_code=422, content={"error": f"src_lang không hỗ trợ: {src_lang}"})
     crop_or_error = _validated_crop(crop_left, crop_top, crop_right, crop_bottom)
     if isinstance(crop_or_error, JSONResponse):
@@ -163,7 +161,7 @@ class TranslateItemsBody(BaseModel):
 
 @app.post("/translate-items")
 def translate_items(body: TranslateItemsBody):
-    if body.src_lang not in LANGS:
+    if body.src_lang not in config.LANGS:
         return JSONResponse(
             status_code=422,
             content={"error": f"src_lang không hỗ trợ: {body.src_lang}"},
@@ -194,7 +192,7 @@ def translate(
     src_lang: str = Form(...),
     target_lang: str = Form("vi"),
 ):
-    if src_lang not in LANGS:
+    if src_lang not in config.LANGS:
         return JSONResponse(status_code=422, content={"error": f"src_lang không hỗ trợ: {src_lang}"})
     data = image.file.read()
     try:

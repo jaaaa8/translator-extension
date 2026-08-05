@@ -79,7 +79,7 @@ function fakePort(name = "translation") {
 function createFakeServer() {
   const versions = {
     detector: "d1", dedupe: "dd1", prep: "p1",
-    recognizers: { ja: "r-ja", es: "r-es" },
+    recognizers: { ja: "r-ja", es: "r-latin", pt: "r-latin" },
     translator_model: "g1", prompt: "pr1", policy: "po1", layout_order: "reading-order-v1", page_schema: "page-v1",
   };
   const counts = { health: 0, source: 0, ocr: 0, coldOcr: 0, warmOcr: 0, translate: 0, aborted: 0 };
@@ -1483,7 +1483,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
 
   const versions = {
     detector: "d1", dedupe: "dd1", prep: "p1",
-    recognizers: { ja: "r-ja", es: "r-es" },
+    recognizers: { ja: "r-ja", es: "r-latin", pt: "r-latin" },
     translator_model: "g1", prompt: "pr1", policy: "po1", layout_order: "reading-order-v1", page_schema: "page-v1",
   };
   const job = {
@@ -1498,6 +1498,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
   const vi = await context.buildKeys(job, versions);
   const en = await context.buildKeys({ ...job, dst_lang: "en" }, versions);
   const es = await context.buildKeys({ ...job, src_lang: "es" }, versions);
+  const pt = await context.buildKeys({ ...job, src_lang: "pt" }, versions);
   const ltr = await context.buildKeys({ ...job, reading_direction: "ltr" }, versions);
   const oldLayout = await context.buildKeys(job, { ...versions, layout_order: "reading-order-v0" });
   assert.strictEqual(vi.analysisKey, en.analysisKey);
@@ -1505,6 +1506,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
   assert.notStrictEqual(vi.pageArtifactKey, en.pageArtifactKey);
   assert.strictEqual(vi.analysisKey, es.analysisKey);
   assert.notStrictEqual(vi.ocrKey, es.ocrKey);
+  assert.notStrictEqual(es.ocrKey, pt.ocrKey);
   assert.strictEqual(vi.analysisKey, ltr.analysisKey);
   assert.strictEqual(vi.ocrKey, ltr.ocrKey);
   assert.notStrictEqual(vi.overlayKey, ltr.overlayKey);

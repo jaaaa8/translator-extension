@@ -82,7 +82,11 @@ def ndjson(response):
 def test_health_exposes_complete_fixed_versions_for_extension_keys():
     with client() as http:
         payload = http.get("/health").json()
+        assert "langs" not in payload
         assert version_shape(payload["versions"]) == version_shape(config.PIPELINE_VERSIONS)
+        assert set(payload["versions"]["recognizers"]) == set(
+            config.PIPELINE_VERSIONS["recognizers"]
+        )
         assert payload["versions"]["layout_order"] == "reading-order-v1"
         assert payload["versions"] == {
             "detector": "acceptance-detector-v1",
@@ -91,6 +95,7 @@ def test_health_exposes_complete_fixed_versions_for_extension_keys():
             "recognizers": {
                 "ja": "acceptance-recognizer-ja-v1",
                 "es": "acceptance-recognizer-es-v1",
+                "pt": "acceptance-recognizer-pt-v1",
             },
             "translator_model": "acceptance-translator-v1",
             "prompt": "acceptance-prompt-v1",
