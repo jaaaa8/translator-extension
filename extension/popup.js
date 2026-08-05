@@ -82,6 +82,7 @@ function translate(scope) {
     scope,
     srcLang: $("srcLang").value,
     dstLang: $("dstLang").value,
+    readingDirection: $("readingDirection").value,
   };
   $("result").textContent = "đang dịch…";
   chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {

@@ -504,6 +504,60 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     await waitUntil(() => app.storedJob(descriptor.job_id) === undefined, "legacy direction completion");
   });
 
+  await scenario("corrupt restored direction is removed without duplicating valid jobs", async () => {
+    function restoredLedger(jobId, readingDirection) {
+      const descriptor = {
+        job_id: jobId,
+        source_url: `https://x/${jobId}.jpg`,
+        crop: null,
+        natural_width: 100,
+        natural_height: 200,
+        priority: 0,
+        distance: 0,
+        src_lang: "ja",
+        dst_lang: "vi",
+        reading_direction: readingDirection,
+        scope: "visible",
+      };
+      return {
+        job_id: jobId,
+        request_id: `${jobId}-request`,
+        scope: "visible",
+        src_lang: "ja",
+        dst_lang: "vi",
+        descriptor,
+        state: "queued",
+        created_at: 1,
+      };
+    }
+
+    for (const initialOnline of [true, false]) {
+      const prefix = initialOnline ? "main" : "fallback";
+      const validIds = [`${prefix}-rtl`, `${prefix}-ltr`];
+      const corruptId = `${prefix}-vertical`;
+      const storage = fakeStorage(Object.fromEntries([
+        [validIds[0], "rtl"],
+        [corruptId, "vertical"],
+        [validIds[1], "ltr"],
+      ].map(([jobId, direction]) => [`mt:job:${jobId}`, restoredLedger(jobId, direction)])));
+      const server = createFakeServer();
+      server.setOnline(initialOnline);
+      const app = createBackgroundApp({ storage, server });
+
+      await app.ready();
+      await waitUntil(() => app.storedJob(corruptId) === undefined, `${prefix} corrupt job removal`);
+      if (!initialOnline) {
+        server.setOnline(true);
+        assert.strictEqual((await app.message({ type: "health" })).ok, true);
+      }
+      await waitUntil(
+        () => validIds.every((jobId) => app.storedJob(jobId) === undefined),
+        `${prefix} valid job completion`,
+      );
+      assert.strictEqual(server.counts.source, 2);
+    }
+  });
+
   await scenario("prewarm performs OCR only at prewarm priority without persistence", async () => {
     const app = createBackgroundApp();
     await app.ready();

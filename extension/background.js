@@ -383,7 +383,7 @@ const ready = (async () => {
     await resumeOfflineJobs();
     pumpTasks();
   } catch {
-    for (const job of jobs) if (job.scope === "visible") offlineJobs.push(offlineLedger(job));
+    for (const job of jobs) if (job.scope === "visible") restoreProducer(job);
   }
 })();
 
@@ -852,7 +852,7 @@ function releaseRequest(requestId, replacement = null) {
 }
 function disconnectPort(port) { ports.delete(port); for (const request of requests.values()) if (request.port === port) releaseRequest(request.requestId); }
 function offlineLedger(job) { job.descriptor.reading_direction = normalizeReadingDirection(job.descriptor.reading_direction); const request = createRequest(null, { request_id: job.request_id, scope: "visible", src_lang: job.src_lang, dst_lang: job.dst_lang, jobs: [job.descriptor] }); request.connected = false; requests.set(request.requestId, request); return { request, descriptor: job.descriptor, ledger: job }; }
-function restoreProducer(job) { offlineJobs.push(offlineLedger(job)); }
+function restoreProducer(job) { try { offlineJobs.push(offlineLedger(job)); } catch { void pageCache?.removeJob(job.job_id); } }
 async function resumeOfflineJobs() { const jobs = offlineJobs.splice(0); for (const row of jobs) { await attachDescriptor(row.request, row.descriptor, row.ledger); admitRequestJobs(row.request); } }
 
 if (chrome.runtime.onConnect && chrome.runtime.onConnect.addListener) {

@@ -33,7 +33,7 @@ chrome.storage.onChanged.addListener((changes) => {
 });
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "translatePage") {
-    translatePage(message.scope, message.srcLang, message.dstLang).then(sendResponse);
+    translatePage(message.scope, message.srcLang, message.dstLang, message.readingDirection).then(sendResponse);
     return true;
   }
   if (message.type === "prewarmPage") {
@@ -85,10 +85,10 @@ function snapshotJobs(scope, requestId, requestSrcLang, requestDstLang) {
   });
 }
 
-function translatePage(scope, requestSrcLang = srcLang, requestDstLang = dstLang) {
+function translatePage(scope, requestSrcLang = srcLang, requestDstLang = dstLang, requestDirection = readingDirection) {
   const requestId = crypto.randomUUID();
   const replacesRequestId = currentRequestId;
-  const requestReadingDirection = readingDirection;
+  const requestReadingDirection = uiDirection(requestDirection);
   if (replacesRequestId) cleanupRequest(replacesRequestId, { ok: false, error: "superseded" });
   currentRequestId = requestId;
   srcLang = requestSrcLang;

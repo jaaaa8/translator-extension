@@ -146,18 +146,20 @@ async function flush() {
   assert.strictEqual(ready.elements.cacheStatus.textContent, "Đang dịch nền: 2 · Đã cache: 8 · Lỗi: 1");
   ready.elements.srcLang.value = "es";
   ready.elements.dstLang.value = "en";
+  ready.elements.readingDirection.onchange({ target: { value: "ltr" } });
 
   ready.elements.translateVisible.onclick();
   ready.elements.srcLang.value = "ja";
   ready.elements.dstLang.value = "vi";
+  ready.elements.readingDirection.onchange({ target: { value: "rtl" } });
   ready.elements.translateLoaded.onclick();
   assert.strictEqual(ready.elements.translateVisible.disabled, false);
   assert.strictEqual(ready.elements.translateLoaded.disabled, false);
   ready.releaseTabs();
   const translations = ready.sent.filter((row) => row.message.type === "translatePage");
   assert.deepStrictEqual(translations, [
-    { id: 7, message: { type: "translatePage", scope: "visible", srcLang: "es", dstLang: "en" } },
-    { id: 7, message: { type: "translatePage", scope: "loaded", srcLang: "ja", dstLang: "vi" } },
+    { id: 7, message: { type: "translatePage", scope: "visible", srcLang: "es", dstLang: "en", readingDirection: "ltr" } },
+    { id: 7, message: { type: "translatePage", scope: "loaded", srcLang: "ja", dstLang: "vi", readingDirection: "rtl" } },
   ]);
   ready.replyTranslateAt(0, { ok: true, images: 1, blocks: 1, failed: 0 });
   assert.strictEqual(ready.elements.result.textContent, "đang dịch…");
