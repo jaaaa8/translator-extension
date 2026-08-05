@@ -21,7 +21,7 @@ Thiết kế chọn phương án nhỏ nhất hoàn chỉnh: một helper JavaSc
 
 - Không suy `reading_direction` từ site, `src_lang`, classifier hoặc vendor order.
 - Không thêm setting single/spread hoặc cho content script gửi `page_kind`.
-- Không đổi detector, dedupe hoặc OCR artifact theo hướng đọc.
+- Không đổi detector hoặc IoU dedupe threshold theo hướng đọc. Sửa normalization độc lập ở commit `c806f14` được ghi rõ tại mục 3.2.
 - Không chèn ordering vào `pipeline.py:ocr_image()` legacy; production đi qua `/ocr-stream -> _iter_ocr -> applyOcrBlock`.
 - Không giữ `ordered_microbatch`, preview pass hoặc trạng thái lai với `full_page`.
 - Không sửa mask, inpainting, text fitting hoặc overlay geometry của Spec C.
@@ -77,6 +77,17 @@ if (typeof importScripts === "function") {
 
 Trong `background-progressive.test.js`, `importScripts` là stub rỗng. Vì vậy mọi VM context chạy `background.js` và dùng ordering phải `vm.runInContext()` `reading-order.js` trước `background.js`, gồm context hiện ở quanh dòng 228 và context thứ hai quanh dòng 298-299. Mọi harness sibling thêm sau này cũng tuân cùng quy tắc.
 
+### 3.2 Clamp và geometry duy nhất của analysis artifact
+
+Commit `c806f14` gồm hai thay đổi normalization đi cùng một cache migration:
+
+1. Clamp bbox lấy giao thật với ảnh: tính raw right/bottom từ tọa độ detector trước khi clamp origin; region hoàn toàn ngoài ảnh bị loại thay vì bị đẩy vào mép ảnh thành region ma.
+2. Sau clamp và cộng crop offset, server loại exact duplicate trên toàn normalized bbox `[x, y, width, height]`; public reading-order helper cũng reject artifact còn duplicate geometry.
+
+`PIPELINE_VERSIONS["dedupe"] = "iou-0.5-area-clamp-exact-v3"` bao phủ cả clamp semantics và exact normalized-bbox dedupe. IoU dedupe hiện hữu vẫn chạy trước clamp với threshold `> 0.5`; không mở rộng nó sang near-duplicate sau clamp.
+
+Mọi bbox giữ lại đã unique nên `stable_block_id(analysis_key, bbox, 0)` cố ý dùng `ordinal=0`. Giữ tham số `ordinal` trong API hiện tại để tránh churn không liên quan ở `server/artifacts.py` và tests; chỉ dọn API nếu một task riêng chứng minh còn caller cần ordinal khác.
+
 ## 4. Setting `reading_direction`
 
 `chrome.storage.local.readingDirection` là setting phẳng toàn cục, chỉ nhận `rtl` hoặc `ltr`, mặc định `rtl`.
@@ -120,7 +131,9 @@ Trong một single page hoặc một nửa spread:
    - RTL: `(-x, y, width, height)`.
    - LTR: `(x, y, width, height)`.
 
-Ngưỡng `0.5` thuộc `layout_order`. Fixture thật chỉ cho cận trên; synthetic tall-bridge là gate chứng minh ngưỡng thấp như `0.25` nối sai. O(n²) được chấp nhận vì fixture lớn nhất hiện có 21 blocks; không thêm spatial index.
+Connected component có tính bắc cầu có chủ ý: một bridge chạm đúng ngưỡng `0.5` với hai hàng sẽ nhập cả hai hàng thành một band, rồi toàn band sort theo `bbox[0]`. Với bbox lồng hoặc lệch, RTL vẫn dùng mép trái `bbox[0]`, không đổi sang mép phải `x + width`; LTR dùng cùng mép trái với dấu thuận.
+
+Ngưỡng `0.5` thuộc `layout_order`. Fixture thật chỉ cho cận trên; synthetic tall-bridge là gate chứng minh ngưỡng thấp như `0.25` nối sai, còn synthetic two-row bridge khóa chaining tại đúng `0.5`. O(n²) được chấp nhận vì fixture lớn nhất hiện có 21 blocks; không thêm spatial index.
 
 ### 5.3 Spread và gutter
 
@@ -341,6 +354,11 @@ Giữ `producer.translationBatchTrace` và `page_metrics[].translation_batches` 
 
 `first_ocr` và `ocr_done` giữ nguyên nghĩa. `first_translation` và `first_overlay` chuyển về sau khi OCR toàn trang hoàn tất. Đây là latency trade-off có chủ ý để lấy page context, không được báo cáo như tối ưu first-overlay.
 
+### 11.1 Deferred review gates cho Task 6
+
+- Finding 4: khi Task 6 sửa orchestration, chuyển validation `reading_direction` cấp `start_scope` ra khỏi vòng lặp job và chốt taxonomy `scope_error`; Task 4 giữ nguyên taxonomy hiện tại để tránh đổi telemetry ngoài scope.
+- Finding 6: caller nối `orderPage()` trong Task 6 phải bắt lỗi duplicate geometry vào đường `failProducer`/`completeJob` có `error_code`, không để promise reject không được xử lý.
+
 ## 12. Acceptance offline
 
 ### 12.1 Reading-order comparator
@@ -365,6 +383,8 @@ Synthetic cases dùng ID có lexical order mâu thuẫn geometry và expected vi
 - panel-gap có gap không chứa tâm rộng hơn gap chứa tâm;
 - bbox phủ tâm và no-gap đi fallback `image_w/2`;
 - adversarial tall bridge: threshold `0.5` pass, negative control `0.25` fail.
+- two-row bridge chạm đúng `0.5` nhập cả hai hàng bằng connected-component chaining;
+- bbox lồng/lệch khóa RTL và LTR theo `bbox[0]`, với expected viết tay và lexical ID mâu thuẫn geometry.
 
 Ba fixture thật không biện minh cận thấp của `0.5`; tall-bridge là gate gánh yêu cầu này.
 
