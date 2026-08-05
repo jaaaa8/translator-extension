@@ -29,5 +29,25 @@
     },
     "test_ocr": "static_expectation_updated_not_run",
     "live_quality_rerun": "not_a_vertical_slice_gate"
+  },
+  "post_checkpoint_update": {
+    "status": "verified_after_offline_checkpoint",
+    "commit": "8a4b08d3d43c9d8510bf4bef6ed8e24f1ff59679",
+    "checkpoint_implementation_commit": "a37fbdec0dd2dd2d717a9fd754a07b98a475540b",
+    "closed_task_6_minors": [
+      "replay_complete_in_flight_page_for_late_consumer",
+      "rename_partial_hot_full_page_scenario"
+    ],
+    "observed_results": {
+      "python": "211 passed, 2 warnings in 22.29s",
+      "node": "10/10 test files exited 0",
+      "test_ocr": "explicitly_excluded_not_run"
+    },
+    "open_follow_up": {
+      "id": "partial_producer_cleanup_attach_race",
+      "status": "deferred_to_final_whole_branch_triage",
+      "impact": "late consumer can miss image_done and scope_done while terminal producer cleanup is pending",
+      "proposed_correction": "delete producer from map before awaiting removeProducerJobs in finishProducer and failProducer"
+    }
   }
 }
