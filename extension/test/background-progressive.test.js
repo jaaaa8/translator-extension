@@ -54,6 +54,7 @@ function fakeStorage(seed = {}) {
       Object.assign(rows, JSON.parse(JSON.stringify(values)));
     },
     async remove(keys) {
+      if (this.beforeRemove) await this.beforeRemove(keys);
       for (const key of Array.isArray(keys) ? keys : [keys]) delete rows[key];
     },
     async getBytesInUse() {
@@ -435,6 +436,62 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     }
     const done = await app.waitFor("scope_done", late);
     assert.deepStrictEqual({ translated: done.translated, failed: done.failed, cache_hit: done.cache_hit }, { translated: 1, failed: 0, cache_hit: false });
+  });
+
+  await scenario("late consumers during terminal job cleanup reschedule partial and failed producers", async () => {
+    for (const fixture of [
+      {
+        name: "partial",
+        source: "https://x/cleanup-partial.jpg",
+        rows: [
+          { type: "analysis_ready", image_w: 100, image_h: 200 },
+          { type: "ocr_block", block_id: "good", bbox: [1, 2, 3, 4], src_text: "good" },
+          { type: "ocr_block_error", block_id: "bad", code: "recognition_failed" },
+          { type: "image_done", recognized: 1, failed: 1 },
+        ],
+        expected: { translated: 1, failed: 1 },
+        lateExpected: { translated: 1, failed: 0 },
+        sourceCalls: 1,
+      },
+      {
+        name: "failed",
+        source: "https://x/cleanup-failed.jpg",
+        rows: [
+          { type: "analysis_ready" },
+          { type: "image_done", recognized: 0, failed: 0 },
+        ],
+        expected: { translated: 0, failed: 1 },
+        lateExpected: { translated: 0, failed: 1 },
+        sourceCalls: 1,
+      },
+    ]) {
+      const storage = fakeStorage();
+      const releaseRemove = deferred();
+      let removeHeld = false;
+      storage.beforeRemove = async () => {
+        removeHeld = true;
+        await releaseRemove.promise;
+      };
+      const server = createFakeServer();
+      server.setOcrRows(fixture.name === "partial" ? "cleanup-partial" : "cleanup-failed", fixture.rows);
+      const app = createBackgroundApp({ storage, server });
+      await app.ready();
+
+      const first = app.connect();
+      first.receive(app.startScope(`cleanup-${fixture.name}-first`, "visible", app.job(`cleanup-${fixture.name}-first-job`, fixture.source)));
+      const firstDone = await app.waitFor("scope_done", first);
+      assert.deepStrictEqual({ translated: firstDone.translated, failed: firstDone.failed }, fixture.expected);
+      await waitUntil(() => removeHeld, `${fixture.name} producer cleanup removal`);
+
+      const late = app.connect();
+      late.receive(app.startScope(`cleanup-${fixture.name}-late`, "visible", app.job(`cleanup-${fixture.name}-late-job`, fixture.source)));
+      await app.waitFor("page_job_accepted", late);
+      releaseRemove.resolve();
+      const done = await app.waitFor("scope_done", late);
+      assert.ok(late.sent.some((event) => event.type === "image_done"));
+      assert.deepStrictEqual({ translated: done.translated, failed: done.failed }, fixture.lateExpected);
+      assert.strictEqual(server.counts.source, fixture.sourceCalls);
+    }
   });
 
   await scenario("A continues after disconnect and exact return makes zero calls", async () => {

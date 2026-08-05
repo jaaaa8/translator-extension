@@ -832,9 +832,9 @@ async function finishProducer(producer, summary) {
   emit(producer, "image_done", { translated: summary.translated, failed });
   const metrics = producerMetrics(producer);
   for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, summary.translated, failed, false, metrics, producer.counters, producer, { pageKey: producer.pageKey, acceptedAt: producer.timings.accepted });
+  producers.delete(producer.pageKey);
   await removeProducerJobs(producer);
   releaseProducerStages(producer);
-  producers.delete(producer.pageKey);
 }
 async function failProducer(producer, error) {
   producer.page.last_error = String(error);
@@ -845,9 +845,9 @@ async function failProducer(producer, error) {
   const metrics = producerMetrics(producer);
   const errorCode = error?.errorCode || "request_failed";
   for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, 0, 1, false, metrics, producer.counters, producer, { pageKey: producer.pageKey, errorCode, acceptedAt: producer.timings.accepted });
+  producers.delete(producer.pageKey);
   await removeProducerJobs(producer);
   releaseProducerStages(producer);
-  producers.delete(producer.pageKey);
 }
 function removeQueuedTasks(producer) { for (const task of taskQueue) if (task.producer === producer) task.cancelled = () => true; }
 function demoteQueuedTasks(producer) {

@@ -80,10 +80,10 @@ assert.match(sourceOptions, /<option value="pt">/);
 
 (async () => {
   const direction = popup();
-  direction.elements.readingDirection ||= { value: "" };
-  direction.elements.currentLanguages ||= { textContent: "" };
+  assert.ok(direction.elements.readingDirection);
   direction.settings.resolve({ srcLang: "es", dstLang: "vi" });
   await flush();
+  assert.ok(direction.elements.currentLanguages);
   assert.strictEqual(direction.elements.readingDirection.value, "rtl");
   assert.match(direction.elements.currentLanguages.textContent, /RTL/);
   assert.deepStrictEqual(direction.writes, []);
