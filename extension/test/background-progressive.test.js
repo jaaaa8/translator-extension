@@ -85,6 +85,7 @@ function createFakeServer() {
   const counts = { health: 0, source: 0, ocr: 0, coldOcr: 0, warmOcr: 0, translate: 0, aborted: 0 };
   const translationBatches = [];
   const translationRequests = [];
+  const translationBodies = [];
   const sourceGates = new Map();
   const failedSources = new Set();
   const ocrRows = new Map();
@@ -169,6 +170,7 @@ function createFakeServer() {
       const body = JSON.parse(options.body);
       translationBatches.push(body.items.map((item) => item.id));
       translationRequests.push({ dst_lang: body.dst_lang, ids: body.items.map((item) => item.id) });
+      translationBodies.push(body);
       await waitForGate(translationGates.get(body.dst_lang), options.signal);
       if (translationResults.length) {
         const result = translationResults.shift();
@@ -186,6 +188,7 @@ function createFakeServer() {
     counts,
     translationBatches,
     translationRequests,
+    translationBodies,
     fetch,
     setResponseVersions(value) { responseVersions = value; },
     setOnline(value) { online = value; },
@@ -305,7 +308,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
   // acceptScope to only retain foreground work must make this fail.
   assert.strictEqual(typeof context.acceptScope, "function");
 
-  await scenario("start_scope defaults missing direction and rejects invalid direction before producer creation", async () => {
+  await scenario("start_scope defaults missing direction and rejects invalid direction once before producer creation", async () => {
     const server = createFakeServer();
     server.holdSource("default-direction");
     const app = createBackgroundApp({ server });
@@ -322,13 +325,84 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const beforeSource = server.counts.source;
     const invalid = app.connect();
     invalid.receive({
-      ...app.startScope("invalid-direction", "visible", app.job("invalid-direction-job", "https://x/invalid-direction.jpg")),
+      ...app.startScope("invalid-direction", "visible"),
       reading_direction: "vertical",
+      jobs: [
+        app.job("invalid-direction-a", "https://x/invalid-direction-a.jpg"),
+        app.job("invalid-direction-b", "https://x/invalid-direction-b.jpg"),
+      ],
     });
-    const error = await app.waitFor("job_error", invalid);
+    const error = await app.waitFor("scope_error", invalid);
+    assert.strictEqual(error.code, "invalid_request");
     assert.match(error.error, /invalid reading_direction/);
+    await flush();
+    assert.strictEqual(invalid.sent.filter((event) => event.type === "scope_error").length, 1);
+    assert.strictEqual(invalid.sent.some((event) => event.type === "job_error"), false);
+    assert.strictEqual(invalid.sent.some((event) => event.type === "scope_done"), false);
     assert.strictEqual(server.counts.source, beforeSource);
+    assert.strictEqual(app.storedJob("invalid-direction-a"), undefined);
+    assert.strictEqual(app.storedJob("invalid-direction-b"), undefined);
+    assert.strictEqual(app.debug().requests, 0);
     assert.strictEqual(app.debug().producers, 0);
+  });
+
+  await scenario("waits for image_done and translates one ordered full page", async () => {
+    const server = createFakeServer();
+    server.setOcrRows("full-page", [
+      { type: "analysis_ready", image_w: 300, image_h: 500 },
+      { type: "ocr_block", block_id: "left", bbox: [10, 10, 20, 20], src_text: "left" },
+      { type: "ocr_block", block_id: "bottom", bbox: [40, 80, 20, 20], src_text: "bottom" },
+      { type: "ocr_block", block_id: "right", bbox: [200, 10, 20, 20], src_text: "right" },
+      { type: "image_done", recognized: 3, failed: 0 },
+    ]);
+    server.holdOcrAfterFirst("full-page");
+    server.queueTranslationResult({ items: [
+      { id: "bottom", translation: "vi:bottom" },
+      { id: "left", translation: "vi:left" },
+      { id: "right", translation: "vi:right" },
+    ] });
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const port = app.connect();
+    port.receive(app.startScope(
+      "full-page",
+      "visible",
+      app.job("full-page-job", "https://x/full-page.jpg", { natural_width: 999, natural_height: 777 })
+    ));
+    await waitUntil(
+      () => vm.runInContext("[...producers.values()].some((producer) => producer.page.blocks.length === 1)", app.context),
+      "first held OCR block"
+    );
+    assert.strictEqual(server.translationBodies.length, 0);
+    assert.strictEqual(port.sent.some((event) => event.type === "translation"), false);
+
+    server.releaseOcr("full-page");
+    const done = await app.waitFor("scope_done", port);
+    assert.deepStrictEqual(server.translationBodies, [{
+      src_lang: "ja",
+      dst_lang: "vi",
+      items: [
+        { id: "right", text: "right", reading_order: 0, bbox: [200, 10, 20, 20] },
+        { id: "left", text: "left", reading_order: 1, bbox: [10, 10, 20, 20] },
+        { id: "bottom", text: "bottom", reading_order: 2, bbox: [40, 80, 20, 20] },
+      ],
+      page_width: 300,
+      page_height: 500,
+      reading_direction: "rtl",
+    }]);
+    assert.deepStrictEqual(
+      port.sent.filter((event) => event.type === "translation").map((event) => event.block_id),
+      ["right", "left", "bottom"]
+    );
+    assert.deepStrictEqual(
+      done.page_metrics[0].translation_batches.map((batch) => ({
+        batch_id: batch.batch_id,
+        phase: batch.phase,
+        block_ids: batch.block_ids,
+        status: batch.status,
+      })),
+      [{ batch_id: 1, phase: "full_page", block_ids: ["right", "left", "bottom"], status: "success" }]
+    );
   });
 
   await scenario("A continues after disconnect and exact return makes zero calls", async () => {
@@ -622,6 +696,8 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       { translated: viDone.translated, failed: viDone.failed },
       { translated: 0, failed: 0 }
     );
+    assert.deepStrictEqual(viDone.page_metrics[0].translation_batches, []);
+    assert.strictEqual(server.counts.translate, 0);
 
     const before = structuredClone(server.counts);
     await app.message({
@@ -637,7 +713,35 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       { translated: enDone.translated, failed: enDone.failed, cache_hit: enDone.cache_hit },
       { translated: 0, failed: 0, cache_hit: false }
     );
+    assert.deepStrictEqual(enDone.page_metrics[0].translation_batches, []);
     assert.deepStrictEqual(structuredClone(app.debug()), { activeTasks: 0, queued: 0, offline: 0, requests: 0, producers: 0 });
+  });
+
+  await scenario("all-hot full page emits in order without a request or trace", async () => {
+    const server = createFakeServer();
+    server.setOcrRows("all-hot", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "ocr_block", block_id: "left", bbox: [10, 10, 20, 20], src_text: "left" },
+      { type: "ocr_block", block_id: "right", bbox: [50, 10, 20, 20], src_text: "right" },
+      { type: "image_done", recognized: 2, failed: 0 },
+    ]);
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const source = "https://x/all-hot.jpg";
+    const seed = app.connect();
+    seed.receive(app.startScope("all-hot-seed", "loaded", app.job("all-hot-seed", source)));
+    await app.waitFor("scope_done", seed);
+    assert.strictEqual(server.counts.translate, 1);
+
+    const hot = app.connect();
+    hot.receive(app.startScope("all-hot", "loaded", app.job("all-hot-job", source)));
+    const done = await app.waitFor("scope_done", hot);
+    assert.strictEqual(server.counts.translate, 1);
+    assert.deepStrictEqual(done.page_metrics[0].translation_batches, []);
+    assert.deepStrictEqual(
+      hot.sent.filter((event) => event.type === "translation").map((event) => event.block_id),
+      ["right", "left"]
+    );
   });
 
   await scenario("detached queued manual work is demoted to background FIFO", async () => {
@@ -798,6 +902,16 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
 
   await scenario("exact replacement preserves an in-flight translation batch", async () => {
     const server = createFakeServer();
+    server.setOcrRows("exact-pending", [
+      { type: "analysis_ready", image_w: 200, image_h: 300 },
+      ...[1, 2, 3, 4].map((id) => ({
+        type: "ocr_block",
+        block_id: `b${id}`,
+        bbox: [id * 25, 10, 20, 20],
+        src_text: `text-${id}`,
+      })),
+      { type: "image_done", recognized: 4, failed: 0 },
+    ]);
     server.holdTranslation("vi");
     const app = createBackgroundApp({ server });
     await app.ready();
@@ -820,12 +934,15 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       () => port.sent.some((event) => event.type === "scope_done" && event.request_id === "pending-new"),
       "pending exact replacement completion"
     );
-    assert.strictEqual(server.counts.translate, 1);
+    assert.deepStrictEqual(server.translationBatches, [["b4", "b3", "b2", "b1"]]);
     assert.strictEqual(
       port.sent.some((event) => event.type === "translation" && event.request_id === "pending-old"),
       false
     );
-    assert.ok(port.sent.some((event) => event.type === "translation" && event.request_id === "pending-new"));
+    assert.deepStrictEqual(
+      port.sent.filter((event) => event.type === "translation" && event.request_id === "pending-new").map((event) => event.block_id),
+      ["b4", "b3", "b2", "b1"]
+    );
     assert.strictEqual(app.storedJob("pending-old-job"), undefined);
     assert.strictEqual(app.storedJob("pending-new-job"), undefined);
   });
@@ -915,7 +1032,9 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
   });
 
   await scenario("partial page replays complete blocks and requests only missing IDs", async () => {
-    const app = createBackgroundApp();
+    const server = createFakeServer();
+    server.holdTranslation("vi");
+    const app = createBackgroundApp({ server });
     await app.ready();
     const job = app.job("partial-job", "https://x/partial.jpg");
     const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
@@ -949,12 +1068,25 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     };
     const port = app.connect();
     port.receive(app.startScope("partial", "visible", job));
+    await waitUntil(() => server.translationBodies.length === 1, "partial full-page request");
+    assert.strictEqual(
+      port.sent.some((event) => event.type === "translation"),
+      false
+    );
+    assert.deepStrictEqual(
+      server.translationBodies[0].items,
+      [
+        { id: "b1", text: "one", reading_order: 0, bbox: [1, 2, 3, 4] },
+        { id: "b2", text: "two", reading_order: 1, bbox: [5, 6, 7, 8] },
+      ]
+    );
+    server.releaseTranslation("vi");
     const done = await app.waitFor("scope_done", port);
     assert.deepStrictEqual(
       port.sent.filter((event) => event.type === "translation").map((event) => event.block_id),
       ["b1", "b2"]
     );
-    assert.deepStrictEqual(app.server.translationBatches, [["b2"]]);
+    assert.deepStrictEqual(app.server.translationBatches, [["b1", "b2"]]);
     assert.deepStrictEqual(
       { source: app.server.counts.source, ocr: app.server.counts.ocr },
       { source: 0, ocr: 0 }
@@ -992,11 +1124,115 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     assert.strictEqual(app.page(keys.pageArtifactKey).state, "partial");
   });
 
+  await scenario("invalid decoded dimensions fail without natural-dimension fallback", async () => {
+    const server = createFakeServer();
+    server.setOcrRows("missing-dimensions", [
+      { type: "analysis_ready" },
+      { type: "ocr_block", block_id: "missing-b1", bbox: [1, 2, 3, 4], src_text: "missing" },
+      { type: "image_done", recognized: 1, failed: 0 },
+    ]);
+    server.setOcrRows("invalid-dimensions", [
+      { type: "analysis_ready", image_w: 0, image_h: 200 },
+      { type: "ocr_block", block_id: "invalid-b1", bbox: [1, 2, 3, 4], src_text: "invalid" },
+      { type: "image_done", recognized: 1, failed: 0 },
+    ]);
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    for (const page of ["missing-dimensions", "invalid-dimensions"]) {
+      const port = app.connect();
+      port.receive(app.startScope(
+        page,
+        "visible",
+        app.job(`${page}-job`, `https://x/${page}.jpg`, { natural_width: 999, natural_height: 777 })
+      ));
+      const done = await app.waitFor("scope_done", port);
+      assert.deepStrictEqual({ translated: done.translated, failed: done.failed }, { translated: 0, failed: 1 });
+      assert.strictEqual(done.page_metrics[0].error_code, "invalid_page_dimensions");
+      assert.strictEqual(port.sent.some((event) => event.type === "translation"), false);
+    }
+    assert.strictEqual(server.counts.translate, 0);
+  });
+
+  await scenario("duplicate geometry completes through reading-order error taxonomy", async () => {
+    const server = createFakeServer();
+    server.setOcrRows("duplicate-geometry", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "ocr_block", block_id: "duplicate-a", bbox: [1, 2, 3, 4], src_text: "one" },
+      { type: "ocr_block", block_id: "duplicate-b", bbox: [1, 2, 3, 4], src_text: "two" },
+      { type: "image_done", recognized: 2, failed: 0 },
+    ]);
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const port = app.connect();
+    port.receive(app.startScope(
+      "duplicate-geometry",
+      "visible",
+      app.job("duplicate-geometry-job", "https://x/duplicate-geometry.jpg")
+    ));
+    const done = await app.waitFor("scope_done", port);
+    assert.deepStrictEqual({ translated: done.translated, failed: done.failed }, { translated: 0, failed: 1 });
+    assert.strictEqual(done.page_metrics[0].error_code, "reading_order_failed");
+    assert.strictEqual(server.counts.translate, 0);
+    assert.deepStrictEqual(structuredClone(app.debug()), { activeTasks: 0, queued: 0, offline: 0, requests: 0, producers: 0 });
+  });
+
+  await scenario("warm OCR sibling supplies decoded dimensions before full-page request", async () => {
+    const server = createFakeServer();
+    server.holdTranslation("vi");
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const job = app.job("warm-sibling-job", "https://x/warm-sibling.jpg", { natural_width: 999, natural_height: 777 });
+    const target = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const sibling = await app.keysFor({ ...job, reading_direction: "rtl" }, "ja", "en");
+    const timestamp = Date.now();
+    app.storage.rows[`mt:page:${sibling.pageArtifactKey}`] = {
+      schema_version: "page-v1",
+      page_artifact_key: sibling.pageArtifactKey,
+      analysis_key: sibling.analysisKey,
+      ocr_key: sibling.ocrKey,
+      overlay_key: sibling.overlayKey,
+      source_url: job.source_url,
+      crop: "full",
+      natural_width: 999,
+      natural_height: 777,
+      src_lang: "ja",
+      dst_lang: "en",
+      versions: app.server.versions,
+      state: "partial",
+      analysis_known: false,
+      ocr_done: true,
+      image_w: 321,
+      image_h: 654,
+      blocks: [{ block_id: "warm-b1", bbox: [1, 2, 3, 4], src_text: "warm", trans_text: null, state: "ocr_complete" }],
+      created_at: timestamp,
+      updated_at: timestamp,
+      last_accessed_at: timestamp,
+      last_error: null,
+    };
+    const port = app.connect();
+    port.receive(app.startScope("warm-sibling", "visible", job));
+    await waitUntil(() => server.translationBodies.length === 1, "warm sibling translation request");
+    assert.deepStrictEqual(
+      { page_width: server.translationBodies[0].page_width, page_height: server.translationBodies[0].page_height },
+      { page_width: 321, page_height: 654 }
+    );
+    assert.deepStrictEqual(
+      { source: server.counts.source, ocr: server.counts.ocr },
+      { source: 0, ocr: 0 }
+    );
+    server.releaseTranslation("vi");
+    await app.waitFor("scope_done", port);
+    assert.deepStrictEqual(
+      { image_w: app.page(target.pageArtifactKey).image_w, image_h: app.page(target.pageArtifactKey).image_h },
+      { image_w: 321, image_h: 654 }
+    );
+  });
+
   await scenario("page metrics keep zero analysis timing and one network batch trace", async () => {
     const server = createFakeServer();
     server.setOcrRows("telemetry", [
       { type: "analysis_ready", image_w: 100, image_h: 200, analysis_ms: 0, analysis_cache_hit: false },
-      ...[1, 2, 3].map((id) => ({ type: "ocr_block", block_id: `b${id}`, bbox: [id, id, id + 1, id + 1], src_text: `text-${id}` })),
+      ...[1, 2, 3].map((id) => ({ type: "ocr_block", block_id: `b${id}`, bbox: [40 - id * 10, id, id + 1, id + 1], src_text: `text-${id}` })),
       { type: "image_done", recognized: 3, failed: 0 },
     ]);
     const app = createBackgroundApp({ server });
@@ -1124,51 +1360,96 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const port = app.connect();
     port.receive(app.startScope("batch-partial", "visible", job));
     const done = await app.waitFor("scope_done", port);
-    assert.deepStrictEqual(server.translationBatches, [["b1", "b2", "b3"], ["b4"]]);
+    assert.deepStrictEqual(server.translationBatches, [["b4", "b3", "b2", "b1"]]);
     assert.deepStrictEqual(
-      port.sent.filter((event) => event.type === "translation").map((event) => event.block_id),
-      ["b4"]
+      port.sent.filter((event) => event.type === "translation"),
+      []
     );
-    assert.deepStrictEqual({ translated: done.translated, failed: done.failed }, { translated: 1, failed: 3 });
+    assert.deepStrictEqual({ translated: done.translated, failed: done.failed }, { translated: 0, failed: 4 });
     assert.deepStrictEqual(
       done.page_metrics[0].translation_batches.map((batch) => ({ block_ids: batch.block_ids, status: batch.status, error_code: batch.error_code })),
       [
-        { block_ids: ["b1", "b2", "b3"], status: "failed", error_code: "translation_failed" },
-        { block_ids: ["b4"], status: "success", error_code: null },
+        { block_ids: ["b4", "b3", "b2", "b1"], status: "failed", error_code: "translation_failed" },
       ]
     );
     assert.strictEqual(app.page(keys.pageArtifactKey).state, "partial");
+
+    const later = app.connect();
+    later.receive(app.startScope(
+      "batch-later",
+      "visible",
+      app.job("batch-later-job", "https://x/batch-later.jpg")
+    ));
+    const laterDone = await app.waitFor("scope_done", later);
+    assert.deepStrictEqual(
+      { translated: laterDone.translated, failed: laterDone.failed },
+      { translated: 1, failed: 0 }
+    );
+    assert.deepStrictEqual(server.translationBatches, [
+      ["b4", "b3", "b2", "b1"],
+      ["b1"],
+    ]);
   });
 
   await scenario("translation IDs are exact and a later click can retry", async () => {
     const server = createFakeServer();
-    server.queueTranslationResult({ items: [{ id: "unexpected", translation: "wrong" }] });
+    const invalidReplies = [
+      [{ id: "b2", translation: "two" }],
+      [{ id: "b2", translation: "two" }, { id: "foreign", translation: "wrong" }],
+      [{ id: "b2", translation: "two" }, { id: "b2", translation: "duplicate" }],
+    ];
+    for (let index = 0; index < invalidReplies.length; index++) {
+      server.setOcrRows(`invalid-ids-${index}`, [
+        { type: "analysis_ready", image_w: 100, image_h: 200 },
+        { type: "ocr_block", block_id: "b1", bbox: [10, 10, 20, 20], src_text: `one-${index}` },
+        { type: "ocr_block", block_id: "b2", bbox: [50, 10, 20, 20], src_text: `two-${index}` },
+        { type: "image_done", recognized: 2, failed: 0 },
+      ]);
+    }
     const app = createBackgroundApp({ server });
     await app.ready();
-    const source = "https://x/invalid-ids.jpg";
-    const firstJob = app.job("invalid-first", source);
-    const keys = await app.keysFor({ ...firstJob, reading_direction: "rtl" });
-    const first = app.connect();
-    first.receive(app.startScope("invalid-first", "visible", firstJob));
-    const failed = await app.waitFor("scope_done", first);
-    assert.deepStrictEqual({ translated: failed.translated, failed: failed.failed }, { translated: 0, failed: 1 });
-    assert.deepStrictEqual(
-      failed.page_metrics[0].translation_batches.map((batch) => ({ status: batch.status, error_code: batch.error_code })),
-      [{ status: "invalid_response", error_code: "invalid_response" }]
-    );
-    assert.ok(first.sent.some((event) => event.type === "block_error" && event.stage === "translation"));
-    assert.strictEqual(app.page(keys.pageArtifactKey).state, "partial");
+    let retrySource;
+    let retryKeys;
+    for (let index = 0; index < invalidReplies.length; index++) {
+      const source = `https://x/invalid-ids-${index}.jpg`;
+      const job = app.job(`invalid-${index}`, source);
+      const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+      server.queueTranslationResult({ items: invalidReplies[index] });
+      const attempt = app.connect();
+      attempt.receive(app.startScope(`invalid-${index}`, "visible", job));
+      const failed = await app.waitFor("scope_done", attempt);
+      assert.deepStrictEqual({ translated: failed.translated, failed: failed.failed }, { translated: 0, failed: 2 });
+      assert.deepStrictEqual(
+        failed.page_metrics[0].translation_batches.map((batch) => ({ status: batch.status, error_code: batch.error_code })),
+        [{ status: "invalid_response", error_code: "invalid_response" }]
+      );
+      assert.strictEqual(attempt.sent.some((event) => event.type === "translation"), false);
+      assert.deepStrictEqual(app.page(keys.pageArtifactKey).blocks.map((block) => block.trans_text), [null, null]);
+      assert.strictEqual(vm.runInContext("hotTranslations.size", app.context), 0);
+      retrySource = source;
+      retryKeys = keys;
+    }
 
     const retry = app.connect();
-    retry.receive(app.startScope("invalid-retry", "visible", app.job("invalid-retry", source)));
+    retry.receive(app.startScope("invalid-retry", "visible", app.job("invalid-retry", retrySource)));
     const recovered = await app.waitFor("scope_done", retry);
-    assert.deepStrictEqual({ translated: recovered.translated, failed: recovered.failed }, { translated: 1, failed: 0 });
-    assert.deepStrictEqual(server.translationBatches, [["b1"], ["b1"]]);
-    assert.strictEqual(app.page(keys.pageArtifactKey).state, "complete");
+    assert.deepStrictEqual({ translated: recovered.translated, failed: recovered.failed }, { translated: 2, failed: 0 });
+    assert.deepStrictEqual(
+      retry.sent.filter((event) => event.type === "translation").map((event) => event.block_id),
+      ["b2", "b1"]
+    );
+    assert.deepStrictEqual(server.translationBatches, [
+      ["b2", "b1"],
+      ["b2", "b1"],
+      ["b2", "b1"],
+      ["b2", "b1"],
+    ]);
+    assert.strictEqual(app.page(retryKeys.pageArtifactKey).state, "complete");
   });
 
   await scenario("rate-limited translation keeps its own trace and page rows remain per job", async () => {
     const server = createFakeServer();
+    server.holdSource("good");
     server.queueTranslationResult({ response: { ok: false, status: 429, json: async () => ({ error: "gemini: quota", error_code: "rate_limited" }) } });
     const app = createBackgroundApp({ server });
     await app.ready();
@@ -1177,6 +1458,8 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       ...app.startScope("two-jobs", "visible"),
       jobs: [app.job("rate-job", "https://x/rate.jpg"), app.job("good-job", "https://x/good.jpg")],
     });
+    await waitUntil(() => server.counts.translate === 1, "rate-limited request before good source");
+    server.releaseSource("good");
     const done = await app.waitFor("scope_done", port);
     assert.deepStrictEqual(done.page_metrics.map((row) => row.job_id).sort(), ["good-job", "rate-job"]);
     const rate = done.page_metrics.find((row) => row.job_id === "rate-job");
@@ -1201,6 +1484,21 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       [{ status: "invalid_response", error_code: "invalid_response" }]
     );
     assert.strictEqual((await app.message({ type: "benchmarkSummary" })).counters.rate_limited, 0);
+  });
+
+  await scenario("server invalid_request keeps a failed trace with its error code", async () => {
+    const server = createFakeServer();
+    server.queueTranslationResult({ response: { ok: false, status: 422, json: async () => ({ error: "duplicate input id", error_code: "invalid_request" }) } });
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const port = app.connect();
+    port.receive(app.startScope("invalid-request", "visible", app.job("invalid-request-job", "https://x/invalid-request.jpg")));
+    const done = await app.waitFor("scope_done", port);
+    assert.deepStrictEqual(
+      done.page_metrics[0].translation_batches.map((batch) => ({ status: batch.status, error_code: batch.error_code })),
+      [{ status: "failed", error_code: "invalid_request" }]
+    );
+    assert.deepStrictEqual({ translated: done.translated, failed: done.failed }, { translated: 0, failed: 1 });
   });
 
   await scenario("non-rate-limited 502 keeps a failed trace without incrementing the rate-limit counter", async () => {
@@ -1312,6 +1610,16 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
 
   await scenario("stale cloud response warms cache without emitting to replacement", async () => {
     const server = createFakeServer();
+    server.setOcrRows("stale-cloud", [
+      { type: "analysis_ready", image_w: 200, image_h: 300 },
+      ...[1, 2, 3, 4].map((id) => ({
+        type: "ocr_block",
+        block_id: `b${id}`,
+        bbox: [id * 25, 10, 20, 20],
+        src_text: `text-${id}`,
+      })),
+      { type: "image_done", recognized: 4, failed: 0 },
+    ]);
     server.holdTranslation("vi");
     const app = createBackgroundApp({ server });
     await app.ready();
@@ -1331,14 +1639,16 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       () => port.sent.some((event) => event.type === "scope_done" && event.request_id === "stale-new"),
       "replacement translation"
     );
+    assert.strictEqual(vm.runInContext("hotTranslations.size", app.context), 4);
+    const stalePageBefore = structuredClone(app.page(oldKeys.pageArtifactKey));
     server.releaseTranslation("vi");
     await waitUntil(
-      () => vm.runInContext("hotTranslations.size", app.context) === 1,
+      () => vm.runInContext("hotTranslations.size", app.context) === 8,
       "stale response hot cache"
     );
     assert.strictEqual(app.page(newKeys.pageArtifactKey).ocr_done, true);
-    assert.strictEqual(app.page(oldKeys.pageArtifactKey).state, "partial");
-    assert.strictEqual(app.page(oldKeys.pageArtifactKey).blocks[0].trans_text, null);
+    assert.deepStrictEqual(app.page(oldKeys.pageArtifactKey), stalePageBefore);
+    assert.ok(app.page(oldKeys.pageArtifactKey).blocks.every((block) => block.trans_text === null));
     assert.strictEqual(
       port.sent.some((event) => event.type === "translation" && event.request_id === "stale-old"),
       false
@@ -1347,11 +1657,23 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       port.sent.some((event) => event.type === "translation" && event.request_id === "stale-new" && event.trans_text.startsWith("vi:")),
       false
     );
+    assert.strictEqual(
+      port.sent.some((event) => event.type === "image_done" && event.request_id === "stale-old"),
+      false
+    );
+    assert.strictEqual(
+      port.sent.some((event) => event.type === "scope_done" && event.request_id === "stale-old"),
+      false
+    );
     const callsBeforeReturn = server.counts.translate;
     const back = app.connect();
     back.receive(app.startScope("stale-back", "visible", app.job("stale-back-job", source)));
-    await app.waitFor("scope_done", back);
-    assert.ok(back.sent.some((event) => event.type === "translation" && event.trans_text));
+    const backDone = await app.waitFor("scope_done", back);
+    assert.deepStrictEqual(
+      back.sent.filter((event) => event.type === "translation").map((event) => event.block_id),
+      ["b4", "b3", "b2", "b1"]
+    );
+    assert.deepStrictEqual(backDone.page_metrics[0].translation_batches, []);
     assert.strictEqual(server.counts.translate, callsBeforeReturn);
   });
 

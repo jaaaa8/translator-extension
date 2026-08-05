@@ -410,7 +410,7 @@ function persist(producer) {
 function createProducer(descriptor, keys, page) {
   const createdAt = Date.now();
   const record = page || { schema_version: serverVersions.page_schema, page_artifact_key: keys.pageArtifactKey, analysis_key: keys.analysisKey, ocr_key: keys.ocrKey, overlay_key: keys.overlayKey, source_url: descriptor.source_url, crop: keys.crop, natural_width: descriptor.natural_width, natural_height: descriptor.natural_height, src_lang: descriptor.src_lang, dst_lang: descriptor.dst_lang, versions: serverVersions, state: "queued", analysis_known: false, ocr_done: false, image_w: null, image_h: null, blocks: [], created_at: createdAt, updated_at: createdAt, last_accessed_at: createdAt, last_error: null };
-  return { pageKey: keys.pageArtifactKey, analysisKey: keys.analysisKey, ocrKey: keys.ocrKey, descriptor, page: record, consumers: new Map(), jobIds: new Set(), persistUntilDone: false, prewarmOnly: descriptor.scope === "prewarm", state: "queued", pendingTranslations: new Map(), attemptedTranslationIds: new Set(), translationBatches: 0, translationBatchTrace: [], translationChain: Promise.resolve(), persistChain: Promise.resolve(), cancelled: false, retired: false, timings: { accepted: now() }, durations: { fetch_ms: null, analysis_ms: null }, analysisCacheHit: null, ocrSummary: null, counters: { translation_calls: 0, rate_limited: 0, stale_work: 0 } };
+  return { pageKey: keys.pageArtifactKey, analysisKey: keys.analysisKey, ocrKey: keys.ocrKey, descriptor, page: record, consumers: new Map(), jobIds: new Set(), persistUntilDone: false, prewarmOnly: descriptor.scope === "prewarm", state: "queued", translationBatchTrace: [], persistChain: Promise.resolve(), cancelled: false, retired: false, timings: { accepted: now() }, durations: { fetch_ms: null, analysis_ms: null }, analysisCacheHit: null, ocrSummary: null, counters: { translation_calls: 0, rate_limited: 0, stale_work: 0 } };
 }
 async function attachDescriptor(request, descriptor, ledger) {
   if (!serverVersions) { if (request.scope === "visible") await pageCache.putJob({ ...ledger, waiting_for_health: true }); offlineJobs.push({ request, descriptor, ledger }); return; }
@@ -424,8 +424,9 @@ async function attachDescriptor(request, descriptor, ledger) {
     );
     const sibling = await pageCache.findPage((p) => p.ocr_key === keys.ocrKey && p.ocr_done === true);
     page = createProducer(descriptor, keys).page;
-    page.analysis_known = !!analysis; page.ocr_done = sibling?.ocr_done === true;
-    if (analysis) { page.image_w = analysis.image_w; page.image_h = analysis.image_h; }
+    const geometry = analysis || sibling;
+    page.analysis_known = !!geometry; page.ocr_done = sibling?.ocr_done === true;
+    if (geometry) { page.image_w = geometry.image_w; page.image_h = geometry.image_h; }
     if (sibling) page.blocks = sibling.blocks.map(({ block_id, bbox, src_text }) => ({ block_id, bbox, src_text, trans_text: null, state: "ocr_complete" }));
     await pageCache.putPage(page);
   }
@@ -452,17 +453,24 @@ function accepted(request, descriptor, page, cacheHit) {
 }
 function replayPage(request, jobId, page, cacheHit) {
   if (page.image_w) request.port?.postMessage({ type: "progress", request_id: request.requestId, job_id: jobId, image_w: page.image_w, image_h: page.image_h });
-  for (const block of page.blocks) if (block.trans_text) request.port?.postMessage({ type: "translation", request_id: request.requestId, job_id: jobId, block_id: block.block_id, bbox: block.bbox, src_text: block.src_text, trans_text: block.trans_text, image_w: page.image_w, image_h: page.image_h, cache_hit: cacheHit });
+  if (cacheHit) for (const block of page.blocks) if (block.trans_text) request.port?.postMessage({ type: "translation", request_id: request.requestId, job_id: jobId, block_id: block.block_id, bbox: block.bbox, src_text: block.src_text, trans_text: block.trans_text, image_w: page.image_w, image_h: page.image_h, cache_hit: true });
   if (cacheHit) completeJob(request, jobId, page.blocks.length, 0, true, { recognized: page.blocks.length, failed: 0 }, null, null, { pageKey: page.page_artifact_key });
 }
 async function acceptScope(port, message) {
-  await ready; const request = createRequest(port, message); requests.set(request.requestId, request);
+  await ready;
+  let readingDirection;
+  try {
+    readingDirection = normalizeReadingDirection(message.reading_direction);
+  } catch (error) {
+    port?.postMessage({ type: "scope_error", request_id: message.request_id, code: "invalid_request", error: String(error) });
+    return;
+  }
+  const request = createRequest(port, message); requests.set(request.requestId, request);
   if (!message.jobs?.length) { if (message.replaces_request_id) releaseRequest(message.replaces_request_id, request); scopeDone(request); return; }
   if (!serverVersions) try { await refreshServerVersions(false); } catch {}
   for (const row of message.jobs) {
-    const descriptor = { ...row, src_lang: request.srcLang, dst_lang: request.dstLang, scope: request.scope };
+    const descriptor = { ...row, src_lang: request.srcLang, dst_lang: request.dstLang, scope: request.scope, reading_direction: readingDirection };
     try {
-      descriptor.reading_direction = normalizeReadingDirection(message.reading_direction);
       const ledger = { job_id: descriptor.job_id, request_id: request.requestId, scope: request.scope, src_lang: request.srcLang, dst_lang: request.dstLang, descriptor, state: "queued", created_at: Date.now() };
       if (request.scope === "visible") await pageCache?.putJob(ledger);
       await attachDescriptor(request, descriptor, ledger);
@@ -661,9 +669,8 @@ async function consumeOcr(producer) {
   })();
   return stage.promise;
 }
-function queueTranslation(producer, block) { if (producer.prewarmOnly || producer.retired || block.trans_text || producer.attemptedTranslationIds.has(block.block_id) || producer.pendingTranslations.has(block.block_id)) return; producer.pendingTranslations.set(block.block_id, block); const first = producer.translationBatches === 0, limit = first ? 3 : 8, delay = first ? 250 : 500; if (producer.pendingTranslations.size >= limit) void flushTranslations(producer); else if (!producer.translationTimer) producer.translationTimer = setTimeout(() => void flushTranslations(producer), delay); }
 function ocrBlockFromEvent(event) { return { block_id: event.block_id, bbox: event.bbox, src_text: event.src_text ?? event.text, trans_text: null, state: "ocr_complete" }; }
-async function applyOcrBlock(producer, event) { const block = ocrBlockFromEvent(event); mark(producer, "first_ocr"); if (!producer.page.blocks.some((b) => b.block_id === block.block_id)) producer.page.blocks.push(block); lruSet(hotOcr, producer.ocrKey, producer.page.blocks, 256); queueTranslation(producer, block); await persist(producer); }
+async function applyOcrBlock(producer, event) { const block = ocrBlockFromEvent(event); mark(producer, "first_ocr"); if (!producer.page.blocks.some((row) => row.block_id === block.block_id)) producer.page.blocks.push(block); await persist(producer); }
 async function translationKeyForBatch(producer, blocks, block) {
   const contextHash = await hashValue(blocks.map((block, reading_order) => ({
     reading_order,
@@ -693,74 +700,155 @@ function applyTranslation(producer, item) {
   emit(producer, "translation", { ...block, image_w: producer.page.image_w, image_h: producer.page.image_h });
 }
 function isRateLimited(error) { return error.status === 429 || error.errorCode === "rate_limited"; }
-async function flushTranslationBatch(producer) {
-  clearTimeout(producer.translationTimer);
-  producer.translationTimer = null;
-  const blocks = [...producer.pendingTranslations.values()];
-  producer.pendingTranslations.clear();
-  if (!blocks.length) return;
-  for (const block of blocks) producer.attemptedTranslationIds.add(block.block_id);
-  producer.translationBatches++;
+function translationItemsForBlocks(data, blocks) {
+  if (!Array.isArray(data?.items)) {
+    const error = new Error("translation items must be an array");
+    error.errorCode = "invalid_response";
+    throw error;
+  }
+  const expected = new Set(blocks.map((block) => block.block_id));
+  const rows = new Map();
+  for (const item of data.items) {
+    if (!item || typeof item.id !== "string" || !expected.has(item.id) || rows.has(item.id)) {
+      const error = new Error("translation id set mismatch");
+      error.errorCode = "invalid_response";
+      throw error;
+    }
+    rows.set(item.id, item);
+  }
+  if (rows.size !== blocks.length) {
+    const error = new Error("translation id set mismatch");
+    error.errorCode = "invalid_response";
+    throw error;
+  }
+  return blocks.map((block) => rows.get(block.block_id));
+}
+async function translateFullPage(producer, orderedBlocks) {
+  if (!orderedBlocks.length) return { translated: 0, failed: 0 };
   try {
-    const keyed = await Promise.all(blocks.map(async (block) => ({
+    const keyed = await Promise.all(orderedBlocks.map(async (block) => ({
       block,
-      key: await translationKeyForBatch(producer, blocks, block),
+      key: await translationKeyForBatch(producer, orderedBlocks, block),
     })));
+    if (producer.retired) return { translated: 0, failed: 0 };
     const cached = keyed.map(({ key }) => hotTranslations.get(key));
     if (cached.every(Boolean)) {
-      if (!producer.retired) for (const item of cached) applyTranslation(producer, item);
-      await persist(producer);
-      return;
+      for (const item of cached) applyTranslation(producer, item);
+      return { translated: orderedBlocks.length, failed: 0 };
     }
     producer.counters.translation_calls++;
     const started = now();
-    const trace = { batch_id: producer.translationBatches, phase: "microbatch", block_ids: blocks.map((block) => block.block_id), block_count: blocks.length, started_ms: Math.round(started - producer.timings.accepted), duration_ms: null, status: null, cache_hit: false, error_code: null };
+    const trace = { batch_id: 1, phase: "full_page", block_ids: orderedBlocks.map((block) => block.block_id), block_count: orderedBlocks.length, started_ms: Math.round(started - producer.timings.accepted), duration_ms: null, status: null, cache_hit: false, error_code: null };
     producer.translationBatchTrace.push(trace);
-    let data;
+    let translatedItems;
     try {
-      data = await postJson(`${SERVER}/translate-items`, {
+      const data = await postJson(`${SERVER}/translate-items`, {
         src_lang: producer.descriptor.src_lang,
         dst_lang: producer.descriptor.dst_lang,
-        items: blocks.map((block) => ({ id: block.block_id, text: block.src_text })),
+        items: orderedBlocks.map((block, reading_order) => ({
+          id: block.block_id,
+          text: block.src_text,
+          reading_order,
+          bbox: [...block.bbox],
+        })),
+        page_width: producer.page.image_w,
+        page_height: producer.page.image_h,
+        reading_direction: producer.descriptor.reading_direction,
       }, 300000);
-      const expected = new Set(blocks.map((block) => block.block_id));
-      const actual = new Set(data.items.map((item) => item.id));
-      if (actual.size !== data.items.length || actual.size !== expected.size || [...actual].some((id) => !expected.has(id))) { const error = new Error("translation id set mismatch"); error.errorCode = "invalid_response"; throw error; }
+      translatedItems = translationItemsForBlocks(data, orderedBlocks);
       trace.status = "success";
     } catch (error) {
       trace.status = isRateLimited(error) ? "rate_limited" : error.errorCode === "invalid_response" ? "invalid_response" : "failed";
-      trace.error_code = trace.status === "rate_limited" ? "rate_limited" : trace.status === "invalid_response" ? "invalid_response" : "translation_failed";
+      trace.error_code = error.errorCode || (trace.status === "rate_limited" ? "rate_limited" : trace.status === "invalid_response" ? "invalid_response" : "translation_failed");
       throw error;
     } finally {
       trace.duration_ms = Math.max(0, Math.round(now() - started));
     }
-    for (const item of data.items) {
-      const key = keyed.find(({ block }) => block.block_id === item.id).key;
-      lruSet(hotTranslations, key, item, 2048);
-      if (!producer.retired) applyTranslation(producer, item);
+    for (let index = 0; index < translatedItems.length; index++) {
+      lruSet(hotTranslations, keyed[index].key, translatedItems[index], 2048);
     }
+    if (producer.retired) return { translated: 0, failed: 0 };
+    for (const item of translatedItems) applyTranslation(producer, item);
+    return { translated: orderedBlocks.length, failed: 0 };
   } catch (error) {
     if (isRateLimited(error)) producer.counters.rate_limited++;
-    if (producer.retired) return;
+    if (producer.retired) return { translated: 0, failed: 0 };
     producer.page.last_error = String(error);
-    for (const block of blocks) {
-      block.state = "translation_failed";
+    for (const block of orderedBlocks) {
+      const stored = producer.page.blocks.find((row) => row.block_id === block.block_id);
+      if (stored) stored.state = "translation_failed";
       emit(producer, "block_error", { block_id: block.block_id, stage: "translation", code: "translation_failed" });
     }
+    return { translated: 0, failed: orderedBlocks.length };
   }
-  await persist(producer);
 }
-async function flushTranslations(producer) {
-  producer.translationChain = producer.translationChain.then(() => flushTranslationBatch(producer));
-  return producer.translationChain;
+async function runProducer(producer) {
+  mark(producer, "started");
+  producer.state = producer.page.state = "running";
+  try {
+    if (!producer.page.ocr_done) await consumeOcr(producer);
+    if (producer.retired) return;
+    if (producer.prewarmOnly) {
+      releaseProducerStages(producer);
+      producers.delete(producer.pageKey);
+      producer.jobIds.clear();
+      return;
+    }
+    if (!Number.isInteger(producer.page.image_w) || producer.page.image_w <= 0 ||
+        !Number.isInteger(producer.page.image_h) || producer.page.image_h <= 0) {
+      const error = new Error("invalid page dimensions");
+      error.errorCode = "invalid_page_dimensions";
+      throw error;
+    }
+    let ordered;
+    try {
+      ordered = MangaReadingOrder.orderPage({
+        blocks: producer.page.blocks,
+        image_w: producer.page.image_w,
+        image_h: producer.page.image_h,
+        reading_direction: producer.descriptor.reading_direction,
+      });
+    } catch (error) {
+      error.errorCode ||= "reading_order_failed";
+      throw error;
+    }
+    const summary = await translateFullPage(producer, ordered.blocks);
+    if (producer.retired) return;
+    await finishProducer(producer, summary);
+  } catch (error) {
+    if (!producer.retired) await failProducer(producer, error);
+  }
 }
-async function runProducer(producer) { mark(producer, "started"); producer.state = producer.page.state = "running"; try { if (!producer.page.ocr_done) await consumeOcr(producer); if (producer.retired) return; if (producer.prewarmOnly) { releaseProducerStages(producer); producers.delete(producer.pageKey); producer.jobIds.clear(); return; } for (const block of producer.page.blocks) queueTranslation(producer, block); await flushTranslations(producer); if (!producer.retired) await finishProducer(producer); } catch (error) { if (!producer.retired) await failProducer(producer, error); } }
 async function removeProducerJobs(producer) {
   await Promise.all([...producer.jobIds].map((jobId) => pageCache?.removeJob(jobId)));
   producer.jobIds.clear();
 }
-async function finishProducer(producer) { const failed = producer.page.blocks.filter((b) => !b.trans_text).length; producer.page.state = failed || producer.blockErrors ? "partial" : "complete"; await persist(producer); await producer.persistChain; emit(producer, "image_done", { translated: producer.page.blocks.length - failed, failed: failed + (producer.blockErrors || 0) }); const metrics = producerMetrics(producer); for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, producer.page.blocks.length - failed, failed + (producer.blockErrors || 0), false, metrics, producer.counters, producer, { pageKey: producer.pageKey, acceptedAt: producer.timings.accepted }); await removeProducerJobs(producer); releaseProducerStages(producer); producers.delete(producer.pageKey); }
-async function failProducer(producer, error) { producer.page.last_error = String(error); producer.page.state = producer.page.analysis_known || producer.page.blocks.length ? "partial" : "failed"; await persist(producer); emit(producer, "image_done", { translated: 0, failed: 1 }); const metrics = producerMetrics(producer); for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, 0, 1, false, metrics, producer.counters, producer, { pageKey: producer.pageKey, errorCode: "request_failed", acceptedAt: producer.timings.accepted }); await removeProducerJobs(producer); releaseProducerStages(producer); producers.delete(producer.pageKey); }
+async function finishProducer(producer, summary) {
+  const failed = summary.failed + (producer.blockErrors || 0);
+  producer.page.state = failed ? "partial" : "complete";
+  await persist(producer);
+  await producer.persistChain;
+  if (producer.retired) return;
+  emit(producer, "image_done", { translated: summary.translated, failed });
+  const metrics = producerMetrics(producer);
+  for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, summary.translated, failed, false, metrics, producer.counters, producer, { pageKey: producer.pageKey, acceptedAt: producer.timings.accepted });
+  await removeProducerJobs(producer);
+  releaseProducerStages(producer);
+  producers.delete(producer.pageKey);
+}
+async function failProducer(producer, error) {
+  producer.page.last_error = String(error);
+  producer.page.state = producer.page.analysis_known || producer.page.blocks.length ? "partial" : "failed";
+  await persist(producer);
+  if (producer.retired) return;
+  emit(producer, "image_done", { translated: 0, failed: 1 });
+  const metrics = producerMetrics(producer);
+  const errorCode = error?.errorCode || "request_failed";
+  for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, 0, 1, false, metrics, producer.counters, producer, { pageKey: producer.pageKey, errorCode, acceptedAt: producer.timings.accepted });
+  await removeProducerJobs(producer);
+  releaseProducerStages(producer);
+  producers.delete(producer.pageKey);
+}
 function removeQueuedTasks(producer) { for (const task of taskQueue) if (task.producer === producer) task.cancelled = () => true; }
 function demoteQueuedTasks(producer) {
   for (const task of taskQueue) if (task.producer === producer) task.tier = PRIORITY.background;
@@ -794,9 +882,6 @@ function retireProducer(producer) {
   producer.counters.stale_work++;
   producer.cancelled = true;
   producer.persistUntilDone = false;
-  clearTimeout(producer.translationTimer);
-  producer.translationTimer = null;
-  producer.pendingTranslations.clear();
   removeQueuedTasks(producer);
   releaseProducerStages(producer);
   if (producers.get(producer.pageKey) === producer) producers.delete(producer.pageKey);

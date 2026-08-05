@@ -19,7 +19,7 @@ LANG_NAMES = {
     "vi": "Vietnamese",
     "en": "English",
 }
-HTTP_TRANSLATE_ITEM_PROMPT_FIELDS = ("id", "text")
+HTTP_TRANSLATE_ITEM_PROMPT_FIELDS = ("id", "text", "reading_order", "bbox")
 GENERATION_TEMPERATURE = 0.2
 
 PROMPT = """You are translating comic/manga dialogue from {src} to {dst}.
@@ -31,12 +31,19 @@ order, no extra text.
 {lines}"""
 
 ITEM_PROMPT = """You are translating comic/manga dialogue from {src} to {dst}.
-Translate every item. Keep pronouns and politeness consistent inside this batch.
+All items belong to one page and are already sorted in reading order. Use the
+page context and neighboring bubbles to keep pronouns, politeness, terminology,
+and tone consistent. Do not reorder or omit items.
+
+Page context JSON:
+{page_context}
+
+Input items JSON:
+{items}
+
 Return ONLY a JSON array of objects with exactly these keys:
 {{"id":"the input id","translation":"translated text"}}.
-Return each input id exactly once; do not invent ids.
-
-{items}"""
+Return each input id exactly once; do not invent ids."""
 
 
 def _decode_items(raw, expected_ids):
@@ -87,7 +94,16 @@ class GeminiTranslator:
 
         return self._generate(prompt, decode)
 
-    def translate_items(self, items: list[dict], src: str, dst: str) -> list[dict]:
+    def translate_items(
+        self,
+        items: list[dict],
+        src: str,
+        dst: str,
+        *,
+        page_width: int,
+        page_height: int,
+        reading_direction: str,
+    ) -> list[dict]:
         if not items:
             return []
         ids = [str(item["id"]) for item in items]
@@ -97,9 +113,18 @@ class GeminiTranslator:
             {field: item[field] for field in HTTP_TRANSLATE_ITEM_PROMPT_FIELDS}
             for item in items
         ]
+        page_context = json.dumps(
+            {
+                "page_width": page_width,
+                "page_height": page_height,
+                "reading_direction": reading_direction,
+            },
+            ensure_ascii=False,
+        )
         prompt = ITEM_PROMPT.format(
             src=LANG_NAMES.get(src, src),
             dst=LANG_NAMES.get(dst, dst),
+            page_context=page_context,
             items=json.dumps(prompt_items, ensure_ascii=False),
         )
         return self._generate(prompt, lambda raw: _decode_items(raw, ids))

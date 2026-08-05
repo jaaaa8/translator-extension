@@ -18,8 +18,8 @@ PIPELINE_VERSIONS = {
         "pt": "paddleocr-latin-ppocrv6-v1",
     },
     "translator_model": GEMINI_MODEL,
-    "prompt": "comic-items-v1",
-    "policy": "microbatch-3-8-250-500-v1",
+    "prompt": "comic-page-items-v2",
+    "policy": "full-page-v1",
     "layout_order": "reading-order-v1",
     "page_schema": "page-v1",
 }

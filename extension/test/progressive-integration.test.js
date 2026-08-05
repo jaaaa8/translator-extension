@@ -47,9 +47,9 @@ function storageSession(seed = {}) {
   };
 }
 
-function ndjson(rows) {
+function ndjson(rows, onDone = () => {}) {
   const bytes = new TextEncoder().encode(rows.map((row) => JSON.stringify(row)).join("\n") + "\n");
-  return { ok: true, status: 200, body: { async *[Symbol.asyncIterator]() { yield bytes; } } };
+  return { ok: true, status: 200, body: { async *[Symbol.asyncIterator]() { yield bytes; onDone(); } } };
 }
 
 function createServer() {
@@ -58,8 +58,12 @@ function createServer() {
   const heldSource = new Map();
   const heldTranslation = new Map();
   const faults = { source: new Set(), ocr: new Set(), translation: new Set() };
+  const events = [];
+  const translationBodies = [];
   const server = {
     calls,
+    events,
+    translationBodies,
     clone: structuredClone,
     async fetch(url, options = {}) {
       if (url.endsWith("/health")) return { ok: true, json: async () => server.clone({ versions }) };
@@ -72,17 +76,31 @@ function createServer() {
           { type: "analysis_ready", image_w: 1000, image_h: 1600, analysis_ms: 7 },
           { type: "ocr_block_error", block_id: `${name}-bad`, stage: "ocr", code: "injected_ocr" },
           { type: "image_done" },
-        ]);
+        ], () => events.push(["image_done", name]));
         return ndjson([
           { type: "analysis_ready", image_w: 1000, image_h: 1600, analysis_ms: 7 },
           { type: "ocr_block", block_id: `${name}-b1`, bbox: [10, 20, 100, 40], src_text: name },
           { type: "image_done" },
-        ]);
+        ], () => events.push(["image_done", name]));
       }
       if (url.endsWith("/translate-items")) {
         calls.translate++;
         const body = JSON.parse(options.body);
         const translationName = body.items[0]?.text;
+        translationBodies.push(structuredClone(body));
+        assert.deepStrictEqual(Object.keys(body).sort(), [
+          "dst_lang", "items", "page_height", "page_width", "reading_direction", "src_lang",
+        ]);
+        assert.ok(body.items.every((item, readingOrder) =>
+          JSON.stringify(Object.keys(item).sort()) === JSON.stringify(["bbox", "id", "reading_order", "text"]) &&
+          item.reading_order === readingOrder && Array.isArray(item.bbox) && item.bbox.length === 4
+        ));
+        assert.deepStrictEqual(
+          { page_width: body.page_width, page_height: body.page_height, reading_direction: body.reading_direction },
+          { page_width: 1000, page_height: 1600, reading_direction: "rtl" }
+        );
+        assert.ok(events.some(([type, name]) => type === "image_done" && name === translationName));
+        events.push(["translate", translationName]);
         if (heldTranslation.has(translationName)) await heldTranslation.get(translationName).promise;
         if (body.items.some((item) => faults.translation.has(item.text))) {
           return { ok: false, status: 500, json: async () => server.clone({ error: "injected translation failure" }) };
@@ -215,6 +233,15 @@ function createIntegration({ server = createServer(), session = storageSession()
 (async () => {
   const app = createIntegration();
   const result = await app.click();
+  assert.deepStrictEqual(app.server.translationBodies[0], {
+    src_lang: "ja",
+    dst_lang: "vi",
+    items: [{ id: "A-b1", text: "A", reading_order: 0, bbox: [10, 20, 100, 40] }],
+    page_width: 1000,
+    page_height: 1600,
+    reading_direction: "rtl",
+  });
+  assert.deepStrictEqual(app.server.events.slice(0, 2), [["image_done", "A"], ["translate", "A"]]);
   const coldStart = app.trace.find(([side, event]) => side === "content" && event.type === "start_scope")[1];
   const coldRequestId = coldStart.request_id;
   assert.strictEqual(app.text(), "A translated");

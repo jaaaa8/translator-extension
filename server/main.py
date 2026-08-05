@@ -4,10 +4,15 @@ import json
 import time
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from . import config
+from .contracts import (
+    TranslateItemsBody,
+    translate_items_validation_error,
+)
 from .translator import TranslateError, _normalize_items
 
 _pipeline = None
@@ -29,6 +34,7 @@ async def lifespan(app):
 
 
 app = FastAPI(lifespan=lifespan)
+app.add_exception_handler(RequestValidationError, translate_items_validation_error)
 
 
 @app.get("/health")
@@ -148,17 +154,6 @@ def translate_texts(body: TranslateTextsBody):
         return JSONResponse(status_code=502, content={"error": f"gemini: {e}"})
 
 
-class TranslateItem(BaseModel):
-    id: str
-    text: str
-
-
-class TranslateItemsBody(BaseModel):
-    items: list[TranslateItem]
-    src_lang: str
-    dst_lang: str = "vi"
-
-
 @app.post("/translate-items")
 def translate_items(body: TranslateItemsBody):
     if body.src_lang not in config.LANGS:
@@ -167,11 +162,14 @@ def translate_items(body: TranslateItemsBody):
             content={"error": f"src_lang không hỗ trợ: {body.src_lang}"},
         )
     rows = [item.model_dump() for item in body.items]
-    if len({row["id"] for row in rows}) != len(rows):
-        return JSONResponse(status_code=422, content={"error": "duplicate input id"})
     try:
         translated = get_pipeline().translator.translate_items(
-            rows, body.src_lang, body.dst_lang
+            rows,
+            body.src_lang,
+            body.dst_lang,
+            page_width=body.page_width,
+            page_height=body.page_height,
+            reading_direction=body.reading_direction,
         )
         return {"items": _normalize_items(translated, [row["id"] for row in rows])}
     except TranslateError as error:

@@ -252,16 +252,22 @@ def test_translate_items_accepts_reordered_exact_ids(monkeypatch):
     ])
     translator = make(monkeypatch, [reply])
     assert translator.translate_items(
-        [{"id": "b1", "text": "one"}, {"id": "b2", "text": "two"}],
+        [
+            {"id": "b1", "text": "one", "reading_order": 0, "bbox": [10, 20, 30, 40]},
+            {"id": "b2", "text": "two", "reading_order": 1, "bbox": [50, 60, 70, 80]},
+        ],
         "en",
         "vi",
+        page_width=1107,
+        page_height=871,
+        reading_direction="rtl",
     ) == [
         {"id": "b1", "translation": "mot"},
         {"id": "b2", "translation": "hai"},
     ]
 
 
-def test_translate_items_strips_fields_outside_http_prompt_contract(monkeypatch):
+def test_translate_items_projects_exact_fields_and_page_context(monkeypatch):
     reply = json.dumps([{"id": "b1", "translation": "một"}])
     translator, clients = make_with_clients(monkeypatch, [reply])
 
@@ -271,20 +277,26 @@ def test_translate_items_strips_fields_outside_http_prompt_contract(monkeypatch)
                 "id": "b1",
                 "text": "one",
                 "reading_order": 0,
-                "bbox": [1, 2, 3, 4],
-                "kind": "dialogue",
+                "bbox": [10, 20, 30, 40],
+                "ignored": "dialogue",
             }
         ],
         "en",
         "vi",
+        page_width=1107,
+        page_height=871,
+        reading_direction="rtl",
     ) == [{"id": "b1", "translation": "một"}]
 
     prompt = clients[0].models.calls[0]["contents"]
+    assert '"page_width": 1107' in prompt
+    assert '"page_height": 871' in prompt
+    assert '"reading_direction": "rtl"' in prompt
     assert '"id": "b1"' in prompt
     assert '"text": "one"' in prompt
-    assert '"reading_order"' not in prompt
-    assert '"bbox"' not in prompt
-    assert '"kind"' not in prompt
+    assert '"reading_order": 0' in prompt
+    assert '"bbox": [10, 20, 30, 40]' in prompt
+    assert "ignored" not in prompt
 
 
 @pytest.mark.parametrize(
@@ -299,7 +311,13 @@ def test_translate_items_rejects_missing_foreign_or_duplicate_ids(monkeypatch, r
     translator = make(monkeypatch, [json.dumps(reply), json.dumps(reply)])
     with pytest.raises(tr.TranslateError):
         translator.translate_items(
-            [{"id": "b1", "text": "one"}, {"id": "b2", "text": "two"}],
+            [
+                {"id": "b1", "text": "one", "reading_order": 0, "bbox": [1, 2, 3, 4]},
+                {"id": "b2", "text": "two", "reading_order": 1, "bbox": [5, 6, 7, 8]},
+            ],
             "en",
             "vi",
+            page_width=100,
+            page_height=200,
+            reading_direction="ltr",
         )
