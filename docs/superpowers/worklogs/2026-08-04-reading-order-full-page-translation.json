@@ -45,9 +45,14 @@
     },
     "open_follow_up": {
       "id": "partial_producer_cleanup_attach_race",
-      "status": "deferred_to_final_whole_branch_triage",
+      "status": "resolved-after-final-review",
+      "resolved_commit": "3fc910d86c4a32b959b92dbd4a570a4cd969ceda",
       "impact": "late consumer can miss image_done and scope_done while terminal producer cleanup is pending",
-      "proposed_correction": "delete producer from map before awaiting removeProducerJobs in finishProducer and failProducer"
+      "resolution": "finishProducer and failProducer delete the terminal producer before awaited removeProducerJobs cleanup",
+      "verification": {
+        "focused_node": "background-progressive.test.js RED timeout, GREEN transport OK; popup.test.js OK",
+        "full_node": "10/10 sequential test files exited 0"
+      }
     }
   },
   "runtime_telemetry": {
