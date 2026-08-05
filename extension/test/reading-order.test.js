@@ -90,6 +90,33 @@ const bridge = [
 ];
 assert.deepStrictEqual(ids(orderPage({ blocks: bridge, image_w: 500, image_h: 800, reading_direction: "rtl" })), ["z-top", "m-bridge", "a-bottom"]);
 
+const chainedRows = [
+  { block_id: "z-top", bbox: [100, 0, 40, 40] },
+  { block_id: "a-bridge", bbox: [200, 20, 40, 40] },
+  { block_id: "m-bottom", bbox: [300, 40, 40, 40] },
+];
+assert.deepStrictEqual(
+  ids(orderPage({ blocks: chainedRows, image_w: 500, image_h: 800, reading_direction: "rtl" })),
+  ["m-bottom", "a-bridge", "z-top"],
+);
+assert.deepStrictEqual(
+  ids(orderPage({ blocks: chainedRows, image_w: 500, image_h: 800, reading_direction: "ltr" })),
+  ["z-top", "a-bridge", "m-bottom"],
+);
+
+const nestedOffset = [
+  { block_id: "z-outer", bbox: [100, 100, 300, 80] },
+  { block_id: "a-inner", bbox: [250, 120, 50, 30] },
+];
+assert.deepStrictEqual(
+  ids(orderPage({ blocks: nestedOffset, image_w: 500, image_h: 800, reading_direction: "rtl" })),
+  ["a-inner", "z-outer"],
+);
+assert.deepStrictEqual(
+  ids(orderPage({ blocks: nestedOffset, image_w: 500, image_h: 800, reading_direction: "ltr" })),
+  ["z-outer", "a-inner"],
+);
+
 const duplicateGeometry = [
   { block_id: "z-duplicate", bbox: [100, 100, 40, 40] },
   { block_id: "a-duplicate", bbox: [100, 100, 40, 40] },
@@ -132,5 +159,7 @@ console.log(`single rtl: ${ids(singleRtl).join(", ")}`);
 console.log(`single ltr: ${ids(singleLtr).join(", ")}`);
 console.log(`spread rtl: ${ids(spreadRtl).join(", ")} | gutter_x=${spreadRtl.gutter_x}`);
 console.log(`spread ltr: ${ids(spreadLtr).join(", ")}`);
+console.log(`chained rows rtl: ${ids(orderPage({ blocks: chainedRows, image_w: 500, image_h: 800, reading_direction: "rtl" })).join(", ")}`);
+console.log(`nested offset rtl: ${ids(orderPage({ blocks: nestedOffset, image_w: 500, image_h: 800, reading_direction: "rtl" })).join(", ")}`);
 console.log(`tall bridge low-threshold: ${ids(lowResult).join(", ")}`);
 console.log("reading-order.test.js OK");

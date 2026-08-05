@@ -155,6 +155,11 @@ class ClampDuplicateDetector:
         return regions((-10, 10, 20, 20), (0, 10, 10, 20))
 
 
+class OutsideDetector:
+    def detect(self, img):
+        return regions((-40, 10, 20, 20))
+
+
 def test_duplicate_regions_are_ocred_once():
     engine = CountingEngine()
     pipeline = Pipeline(
@@ -182,6 +187,18 @@ def test_regions_equal_after_clamp_are_ocred_once():
 
     assert (len(analysis.regions), engine.calls, len(blocks)) == (1, 1, 1)
     assert blocks[0]["bbox"] == [0, 10, 10, 20]
+
+
+def test_region_fully_outside_image_is_dropped():
+    pipeline = Pipeline(
+        detector=OutsideDetector(),
+        ocr=FakeOcr(),
+        translator=FakeTranslator(),
+    )
+
+    analysis = pipeline.analyze(encode_png(300, 200), None, "outside")
+
+    assert analysis.regions == ()
 
 
 class CountingEngine:
