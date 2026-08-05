@@ -197,6 +197,7 @@ function createFakeServer() {
     holdSource(pageName) { const gate = deferred(); sourceGates.set(pageName, gate); return gate; },
     releaseSource(pageName) { sourceGates.get(pageName)?.resolve(); sourceGates.delete(pageName); },
     failSource(pageName) { failedSources.add(pageName); },
+    allowSource(pageName) { failedSources.delete(pageName); },
     setOcrRows(pageName, rows) { ocrRows.set(pageName, rows); },
     holdOcrAfterFirst(pageName) { const gate = deferred(); ocrAfterFirstGates.set(pageName, gate); return gate; },
     releaseOcr(pageName) { ocrAfterFirstGates.get(pageName)?.resolve(); ocrAfterFirstGates.delete(pageName); },
@@ -438,7 +439,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     assert.deepStrictEqual({ translated: done.translated, failed: done.failed, cache_hit: done.cache_hit }, { translated: 1, failed: 0, cache_hit: false });
   });
 
-  await scenario("late consumers during terminal job cleanup reschedule partial and failed producers", async () => {
+  await scenario("late consumers during terminal cleanup retry without stale stages", async () => {
     for (const fixture of [
       {
         name: "partial",
@@ -464,6 +465,16 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
         lateExpected: { translated: 0, failed: 1 },
         sourceCalls: 1,
       },
+      {
+        name: "pre-ocr-failed",
+        source: "https://x/cleanup-pre-ocr-failed.jpg",
+        failSourceInitially: true,
+        expected: { translated: 0, failed: 1 },
+        lateExpected: { translated: 1, failed: 0 },
+        sourceCalls: 2,
+        ocrCalls: 1,
+        translationCalls: 1,
+      },
     ]) {
       const storage = fakeStorage();
       const releaseRemove = deferred();
@@ -473,7 +484,8 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
         await releaseRemove.promise;
       };
       const server = createFakeServer();
-      server.setOcrRows(fixture.name === "partial" ? "cleanup-partial" : "cleanup-failed", fixture.rows);
+      if (fixture.rows) server.setOcrRows(`cleanup-${fixture.name}`, fixture.rows);
+      if (fixture.failSourceInitially) server.failSource(`cleanup-${fixture.name}`);
       const app = createBackgroundApp({ storage, server });
       await app.ready();
 
@@ -481,6 +493,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       first.receive(app.startScope(`cleanup-${fixture.name}-first`, "visible", app.job(`cleanup-${fixture.name}-first-job`, fixture.source)));
       const firstDone = await app.waitFor("scope_done", first);
       assert.deepStrictEqual({ translated: firstDone.translated, failed: firstDone.failed }, fixture.expected);
+      if (fixture.failSourceInitially) server.allowSource(`cleanup-${fixture.name}`);
       await waitUntil(() => removeHeld, `${fixture.name} producer cleanup removal`);
 
       const late = app.connect();
@@ -491,6 +504,8 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       assert.ok(late.sent.some((event) => event.type === "image_done"));
       assert.deepStrictEqual({ translated: done.translated, failed: done.failed }, fixture.lateExpected);
       assert.strictEqual(server.counts.source, fixture.sourceCalls);
+      if (fixture.ocrCalls !== undefined) assert.strictEqual(server.counts.ocr, fixture.ocrCalls);
+      if (fixture.translationCalls !== undefined) assert.strictEqual(server.counts.translate, fixture.translationCalls);
     }
   });
 
