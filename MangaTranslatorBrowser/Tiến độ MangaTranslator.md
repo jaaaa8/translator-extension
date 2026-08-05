@@ -1261,6 +1261,7 @@ Phần đúng và khó: hợp đồng ba nhánh merge được xử lý đầy �
 - Frozen control Spec A và privacy scan sạch; không chạy live-quality hay `server/tests/test_ocr.py`.
 - Task 8 review và final-fix scoped re-review đều PASS; không còn finding Critical/Important mở.
 - Chưa gọi Spec B hoàn tất cho tới khi người dùng duyệt checkpoint cuối. Việc xóa `Welcome.md` vẫn được giữ nguyên và không nằm trong commit Spec B.
+
 ## 2026-08-05 — Spec B post-final review stale-stage follow-up
 
 - Review sau `9353618` phát hiện cửa sổ hẹp: producer đã bị xóa khỏi map nhưng OCR/analysis stage cũ chưa release trong lúc `removeProducerJobs()` đang await; request muộn sau lỗi trước `ocr_done` có thể bám vào promise đã reject và fail mà không retry.
@@ -1268,3 +1269,11 @@ Phần đúng và khó: hợp đồng ba nhánh merge được xử lý đầy �
 - Regression `pre-ocr-failed`: thứ tự cũ RED `{translated:0, failed:1}`; bản sửa GREEN `{translated:1, failed:0}`, tổng call `source=2`, `ocr=1`, `translate=1`.
 - Focused `background-progressive.test.js` và full Node suite `10/10` PASS; Terra medium re-review không còn finding Critical/Important/Minor. `server/tests/test_ocr.py` không chạy.
 - Worklog record commit: `32718b2`; Spec B vẫn chờ người dùng duyệt checkpoint cuối.
+
+## 2026-08-05 — Spec B closed
+
+- Người dùng duyệt checkpoint cuối: Spec B `reading-order-full-page-translation` hoàn tất, không còn finding mở; pull request đã được người dùng tạo và nhánh kế tiếp là `feat/v4`.
+- Final implementation: `1855a2700d35362619208579cca185aab14782ff`; pre-closure worklog: `32718b2c1291fd7a9db3ee331b1207acb639aac5`; verification HEAD trên `feat/v4`: `e0e948e58c3e00513e28f15fdb139eac5415dbe1`.
+- Fresh close gate: Python `211 passed, 2 warnings`; Node `10/10`; `server/tests/test_ocr.py` bị loại và không chạy.
+- Chấp nhận trade-off: Spec B ưu tiên reading order tất định, chất lượng context toàn trang và một translation request mỗi page; cold first-overlay latency là debt riêng, không phải claim tối ưu latency.
+- Các dòng HEAD/checkpoint cũ phía trên là snapshot lịch sử; mục này là trạng thái đóng hiện hành. Bước tiếp theo: brainstorm Spec C về overlay an toàn.

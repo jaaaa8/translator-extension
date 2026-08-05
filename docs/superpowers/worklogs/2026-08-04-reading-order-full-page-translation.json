@@ -1,6 +1,6 @@
 {
   "spec": "reading-order-full-page-translation",
-  "status": "baseline_verified",
+  "status": "complete",
   "control_baseline_path": "docs/superpowers/worklogs/2026-08-01-real-page-quality-baseline.json",
   "control_baseline_commit": "9b1d153df7bccbb8dce34eaa451e47d32ee70bab",
   "control_policy": "microbatch-3-8-250-500-v1",
@@ -70,8 +70,26 @@
     },
     "test_ocr": "explicitly_not_run"
   },
+  "completion": {
+    "status": "user_approved",
+    "approved_at": "2026-08-05",
+    "verification_head": "e0e948e58c3e00513e28f15fdb139eac5415dbe1",
+    "final_implementation_commit": "1855a2700d35362619208579cca185aab14782ff",
+    "pre_closure_worklog_commit": "32718b2c1291fd7a9db3ee331b1207acb639aac5",
+    "integration": "pull_request_created_by_user",
+    "open_findings": [],
+    "first_overlay_tradeoff": {
+      "status": "accepted",
+      "decision": "Spec B prioritizes deterministic reading order, full-page context quality, and one translation request per page; cold first-overlay latency remains explicit follow-up debt and is not claimed as an optimization."
+    },
+    "observed_results": {
+      "python": "211 passed, 2 warnings in 21.44s",
+      "node": "10/10 sequential test files exited 0",
+      "test_ocr": "explicitly_excluded_not_run"
+    }
+  },
   "runtime_telemetry": {
-    "status": "captured_pending_review",
+    "status": "reviewed_complete",
     "commit": "bec403b37253e4c5be18061b6baf971993a80b20",
     "device": "cuda",
     "frozen_control_diff": "exit 0, no output",
