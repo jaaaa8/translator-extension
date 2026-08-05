@@ -4,5 +4,30 @@
   "control_baseline_path": "docs/superpowers/worklogs/2026-08-01-real-page-quality-baseline.json",
   "control_baseline_commit": "9b1d153df7bccbb8dce34eaa451e47d32ee70bab",
   "control_policy": "microbatch-3-8-250-500-v1",
-  "control_policy_batch_count": 25
+  "control_policy_batch_count": 25,
+  "implementation_checkpoint": {
+    "status": "offline_gates_passed",
+    "implementation_commit": "a37fbdec0dd2dd2d717a9fd754a07b98a475540b",
+    "versions": {
+      "layout_order": "reading-order-v1",
+      "recognizers": {
+        "es": "paddleocr-latin-ppocrv6-v1",
+        "pt": "paddleocr-latin-ppocrv6-v1"
+      },
+      "prompt": "comic-page-items-v2",
+      "policy": "full-page-v1"
+    },
+    "control_policy_batch_count": 25,
+    "observed_results": {
+      "python": "211 passed, 2 warnings in 13.25s",
+      "node": "10/10 test files exited 0",
+      "real_page_quality": "98 passed in 1.99s",
+      "frozen_control_diff": "exit 0, no output",
+      "semantic_policy_batch_count": 25,
+      "obsolete_microbatch_matches": 0,
+      "static_test_ocr_expectation": "server/tests/test_ocr.py:23"
+    },
+    "test_ocr": "static_expectation_updated_not_run",
+    "live_quality_rerun": "not_a_vertical_slice_gate"
+  }
 }
