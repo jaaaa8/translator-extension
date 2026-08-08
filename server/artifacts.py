@@ -11,13 +11,28 @@ import numpy as np
 
 K = TypeVar("K")
 V = TypeVar("V")
+BBox = tuple[int, int, int, int]
+
+
+@dataclass(frozen=True)
+class PreparedFragment:
+    bbox: BBox
+    crop_rgb: np.ndarray
+    vertical: bool
 
 
 @dataclass(frozen=True)
 class PreparedRegion:
     block_id: str
-    bbox: tuple[int, int, int, int]
-    crop_rgb: np.ndarray
+    bbox: BBox
+    source_bbox: BBox
+    fragments: tuple[PreparedFragment, ...]
+    source_rgb: np.ndarray
+    raw_mask: np.ndarray
+    refined_mask: np.ndarray
+    container_mask: np.ndarray | None
+    vertical: bool
+    bounded: bool
 
 
 @dataclass(frozen=True)
@@ -26,6 +41,29 @@ class AnalysisArtifact:
     image_w: int
     image_h: int
     regions: tuple[PreparedRegion, ...]
+    byte_size: int
+
+
+@dataclass(frozen=True)
+class RenderBlockArtifact:
+    block_id: str
+    patch_id: str | None
+    patch_bbox: BBox | None
+    clean_region: BBox | None
+    fit_bbox: BBox | None
+    patch_mime: str | None
+    patch_png: bytes | None
+    reason: str | None
+
+
+@dataclass(frozen=True)
+class RenderArtifact:
+    schema_version: str
+    render_artifact_key: str
+    analysis_key: str
+    image_w: int
+    image_h: int
+    blocks: tuple[RenderBlockArtifact, ...]
     byte_size: int
 
 
@@ -70,12 +108,14 @@ class BoundedLru(Generic[K, V]):
             self._items.move_to_end(key)
             return row[0]
 
-    def put(self, key, value):
+    def put(self, key: K, value: V) -> list[K] | None:
+        size = self.size_of(value)
+        if self.max_bytes is not None and size > self.max_bytes:
+            return None
         with self._lock:
             if key in self._items:
                 _, old_size = self._items.pop(key)
                 self._bytes -= old_size
-            size = self.size_of(value)
             self._items[key] = (value, size)
             self._bytes += size
             evicted = []
