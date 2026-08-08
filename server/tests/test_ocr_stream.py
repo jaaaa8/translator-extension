@@ -32,6 +32,7 @@ class FakeStreamPipeline:
             "block_id": "b1",
             "bbox": [1, 2, 3, 4],
             "src_text": "hola",
+            "vertical": False,
         }
         yield {"type": "image_done", "ocr_key": ocr_key, "recognized": 1, "failed": 0}
 
@@ -58,6 +59,7 @@ def test_ocr_stream_cold_then_warm(monkeypatch):
     ]
     assert cold_events[0]["analysis_cache_hit"] is False
     assert isinstance(cold_events[0]["analysis_ms"], int) and cold_events[0]["analysis_ms"] >= 0
+    assert cold_events[1]["vertical"] is False
     warm = client.post(
         "/ocr-stream",
         data={"analysis_key": "a1", "ocr_key": "o2", "src_lang": "ja"},

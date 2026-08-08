@@ -1,28 +1,30 @@
 import time
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event, Lock, Thread
+from threading import Barrier, BrokenBarrierError, Event, Lock, Thread
 
 import cv2
 import numpy as np
 import pytest
 
-from server.detector import TextRegion
+from server.artifacts import AnalysisArtifact, PreparedFragment, PreparedRegion, stable_block_id
+from server.detector import DetectionResult, TextRegion
+from server.ocr import ENGINES, OcrRegistry
 from server.pipeline import Pipeline, _dedupe_regions, _prep_crop
 
 
 class FakeDetector:
     def detect(self, img):
-        return [
+        return detection_result(img, [
             TextRegion(bbox=(10, 10, 100, 50), vertical=False),
             TextRegion(bbox=(20, 100, 80, 40), vertical=True),  # OCR trả rỗng → loại
             TextRegion(bbox=(20, 500, 80, 40), vertical=False),  # ngoài biên ảnh → loại
-        ]
+        ])
 
 
 class EdgeDetector:
     def detect(self, img):
         h, w = img.shape[:2]
-        return [TextRegion(bbox=(w - 1, h - 1, 1, 1), vertical=False)]
+        return detection_result(img, [TextRegion(bbox=(w - 1, h - 1, 1, 1), vertical=False)])
 
 
 class FakeEngine:
@@ -58,7 +60,7 @@ class OverlapDetector:
         time.sleep(0.02)
         with self.lock:
             self.active -= 1
-        return [TextRegion(bbox=(0, 0, 20, 20), vertical=False)]
+        return detection_result(img, [TextRegion(bbox=(0, 0, 20, 20), vertical=False)])
 
 
 class OverlapEngine:
@@ -89,6 +91,11 @@ class SharedOcr:
 
 def encode_png(w, h):
     return cv2.imencode(".png", np.zeros((h, w, 3), np.uint8))[1].tobytes()
+
+
+def detection_result(image, regions, raw_mask=None):
+    raw_mask = np.zeros(image.shape[:2], np.uint8) if raw_mask is None else raw_mask
+    return DetectionResult(raw_mask, raw_mask.copy(), tuple(regions))
 
 
 def make_pipeline():
@@ -147,17 +154,17 @@ def test_dedupe_keeps_partially_overlapping_boxes():
 
 class DupeDetector:
     def detect(self, img):
-        return regions((10, 10, 100, 50), (10, 10, 101, 50))
+        return detection_result(img, regions((10, 10, 100, 50), (10, 10, 101, 50)))
 
 
 class ClampDuplicateDetector:
     def detect(self, img):
-        return regions((-10, 10, 20, 20), (0, 10, 10, 20))
+        return detection_result(img, regions((-10, 10, 20, 20), (0, 10, 10, 20)))
 
 
 class OutsideDetector:
     def detect(self, img):
-        return regions((-40, 10, 20, 20))
+        return detection_result(img, regions((-40, 10, 20, 20)))
 
 
 def test_duplicate_regions_are_ocred_once():
@@ -239,6 +246,78 @@ def test_ocr_image_converts_normalized_crop_with_floor_and_ceil():
     assert out["blocks"] == [{"bbox": [150, 100, 1, 1], "src_text": "hola"}]
 
 
+class LinkedFragmentsDetector:
+    def detect(self, image):
+        raw_mask = np.zeros(image.shape[:2], np.uint8)
+        raw_mask[10:20, 10:30] = 255
+        return detection_result(
+            image,
+            [
+                TextRegion((10, 10, 10, 10), False),
+                TextRegion((20, 10, 10, 10), False),
+            ],
+            raw_mask,
+        )
+
+
+def test_analyze_offsets_resolved_regions_and_converts_each_bgr_crop_to_rgb_once():
+    page = np.zeros((100, 100, 3), np.uint8)
+    page[35:45, 35:45] = (0, 0, 255)
+    page[35:45, 45:55] = (255, 0, 0)
+    data = cv2.imencode(".png", page)[1].tobytes()
+    pipeline = Pipeline(
+        detector=LinkedFragmentsDetector(), ocr=FakeOcr(), translator=FakeTranslator()
+    )
+
+    analysis = pipeline.analyze(data, (0.25, 0.25, 0.75, 0.75), "analysis-1")
+
+    assert len(analysis.regions) == 1
+    region = analysis.regions[0]
+    expected_union = (35, 35, 20, 10)
+    assert region.block_id == stable_block_id("analysis-1", expected_union, 0)
+    assert region.bbox == expected_union
+    assert region.source_bbox == expected_union
+    assert [fragment.bbox for fragment in region.fragments] == [(35, 35, 10, 10), (45, 35, 10, 10)]
+    assert region.source_rgb[0, 0].tolist() == [255, 0, 0]
+    assert region.fragments[0].crop_rgb[8, 8].tolist() == [255, 0, 0]
+    assert region.fragments[1].crop_rgb[8, 8].tolist() == [0, 0, 255]
+
+
+class MaskOwnershipDetector:
+    def __init__(self):
+        self.raw_mask = None
+        self.refined_mask = None
+
+    def detect(self, image):
+        self.raw_mask = np.zeros(image.shape[:2], np.uint8)
+        self.refined_mask = np.full(image.shape[:2], 127, np.uint8)
+        self.raw_mask[50:60, 50:60] = 255
+        return DetectionResult(
+            self.raw_mask,
+            self.refined_mask,
+            (TextRegion((50, 50, 10, 10), False),),
+        )
+
+
+def test_analysis_materializes_mask_crops_before_caching_them():
+    detector = MaskOwnershipDetector()
+    pipeline = Pipeline(detector=detector, ocr=FakeOcr(), translator=FakeTranslator())
+
+    analysis = pipeline.analyze(encode_png(200, 200), None, "mask-ownership")
+
+    region = analysis.regions[0]
+    assert not np.shares_memory(region.raw_mask, detector.raw_mask)
+    assert not np.shares_memory(region.refined_mask, detector.refined_mask)
+    expected_size = (
+        region.source_rgb.nbytes
+        + region.raw_mask.nbytes
+        + region.refined_mask.nbytes
+        + region.container_mask.nbytes
+        + sum(fragment.crop_rgb.nbytes for fragment in region.fragments)
+    )
+    assert analysis.byte_size == expected_size
+
+
 @pytest.mark.parametrize(
     "crop",
     [(-0.1, 0, 1, 1), (0, 0, 0, 1), (0.8, 0, 0.2, 1), (0, 0.8, 1, 0.2)],
@@ -267,7 +346,7 @@ class CountingDetector:
 
     def detect(self, image):
         self.calls += 1
-        return [TextRegion(bbox=(10, 10, 40, 20), vertical=False)]
+        return detection_result(image, [TextRegion(bbox=(10, 10, 40, 20), vertical=False)])
 
 
 class BlockingCountingDetector(CountingDetector):
@@ -280,24 +359,24 @@ class BlockingCountingDetector(CountingDetector):
         self.calls += 1
         self.entered.set()
         assert self.release.wait(1)
-        return [TextRegion(bbox=(10, 10, 40, 20), vertical=False)]
+        return detection_result(image, [TextRegion(bbox=(10, 10, 40, 20), vertical=False)])
 
 
 class ThreeRegionDetector:
     def detect(self, image):
-        return [
+        return detection_result(image, [
             TextRegion(bbox=(10, 10, 40, 20), vertical=False),
             TextRegion(bbox=(60, 10, 40, 20), vertical=False),
             TextRegion(bbox=(110, 10, 40, 20), vertical=False),
-        ]
+        ])
 
 
 class TwoRegionDetector:
     def detect(self, image):
-        return [
+        return detection_result(image, [
             TextRegion(bbox=(10, 10, 40, 20), vertical=False),
             TextRegion(bbox=(60, 10, 40, 20), vertical=False),
-        ]
+        ])
 
 
 class SequenceEngine:
@@ -311,6 +390,200 @@ class SequenceEngine:
         if isinstance(reply, Exception):
             raise reply
         return reply
+
+
+class TextByPixelEngine:
+    def __init__(self, replies):
+        self.replies = replies
+
+    def read(self, crop):
+        reply = self.replies[int(crop[0, 0, 0])]
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+def fragment(tag, bbox, vertical=True):
+    return PreparedFragment(bbox, np.full((10, 10, 3), tag, np.uint8), vertical)
+
+
+def cached_analysis(pipeline, key, region):
+    pipeline._analysis_cache.put(key, AnalysisArtifact(key, 100, 100, (region,), 1))
+
+
+def test_iter_ocr_joins_sorted_fragments_and_drops_duplicate_overlapping_text():
+    block_id = "block-1"
+    region = PreparedRegion(
+        block_id,
+        (10, 0, 20, 20),
+        (10, 0, 20, 20),
+        (
+            fragment(2, (10, 10, 10, 10)),
+            fragment(1, (20, 0, 10, 10)),
+            fragment(3, (10, 10, 10, 10)),
+        ),
+        np.zeros((20, 20, 3), np.uint8),
+        np.zeros((20, 20), np.uint8),
+        np.zeros((20, 20), np.uint8),
+        None,
+        True,
+        True,
+    )
+    pipeline = Pipeline(
+        detector=FakeDetector(),
+        ocr=SharedOcr(TextByPixelEngine({1: "\u53f3", 2: "\u5de6", 3: "\u5de6"})),
+        translator=FakeTranslator(),
+    )
+    cached_analysis(pipeline, "analysis-ocr", region)
+
+    events = list(pipeline.iter_ocr("analysis-ocr", "ja", "ocr-1"))
+    block = next(event for event in events if event["type"] == "ocr_block")
+
+    assert block == {
+        "type": "ocr_block",
+        "ocr_key": "ocr-1",
+        "block_id": block_id,
+        "bbox": [10, 0, 20, 20],
+        "src_text": "\u53f3\n\u5de6",
+        "vertical": True,
+    }
+
+
+def test_iter_ocr_dedupes_same_text_without_geometry_overlap():
+    region = PreparedRegion(
+        "block-same-text",
+        (0, 0, 30, 10),
+        (0, 0, 30, 10),
+        (fragment(1, (0, 0, 10, 10), False), fragment(2, (20, 0, 10, 10), False)),
+        np.zeros((10, 30, 3), np.uint8),
+        np.zeros((10, 30), np.uint8),
+        np.zeros((10, 30), np.uint8),
+        None,
+        False,
+        True,
+    )
+    pipeline = Pipeline(
+        detector=FakeDetector(),
+        ocr=SharedOcr(TextByPixelEngine({1: "hola", 2: "hola"})),
+        translator=FakeTranslator(),
+    )
+    cached_analysis(pipeline, "analysis-same-text", region)
+
+    events = list(pipeline.iter_ocr("analysis-same-text", "es", "ocr-same-text"))
+    block = next(event for event in events if event["type"] == "ocr_block")
+
+    assert block["src_text"] == "hola"
+
+
+def test_iter_ocr_dedupes_strong_geometry_overlap_with_different_text():
+    region = PreparedRegion(
+        "block-overlap",
+        (0, 0, 11, 10),
+        (0, 0, 11, 10),
+        (fragment(1, (0, 0, 10, 10), False), fragment(2, (1, 0, 10, 10), False)),
+        np.zeros((10, 11, 3), np.uint8),
+        np.zeros((10, 11), np.uint8),
+        np.zeros((10, 11), np.uint8),
+        None,
+        False,
+        True,
+    )
+    pipeline = Pipeline(
+        detector=FakeDetector(),
+        ocr=SharedOcr(TextByPixelEngine({1: "alpha", 2: "beta"})),
+        translator=FakeTranslator(),
+    )
+    cached_analysis(pipeline, "analysis-overlap", region)
+
+    events = list(pipeline.iter_ocr("analysis-overlap", "es", "ocr-overlap"))
+    block = next(event for event in events if event["type"] == "ocr_block")
+
+    assert block["src_text"] == "alpha"
+
+
+def test_iter_ocr_serializes_real_registry_lazy_engine_initialization(monkeypatch):
+    class RacingInitEngine:
+        calls = 0
+        active = 0
+        max_active = 0
+        state_lock = Lock()
+        constructor_barrier = Barrier(2)
+
+        def __init__(self, device):
+            with self.state_lock:
+                type(self).calls += 1
+                type(self).active += 1
+                type(self).max_active = max(type(self).max_active, type(self).active)
+            try:
+                self.constructor_barrier.wait(timeout=1)
+            except BrokenBarrierError:
+                pass
+            finally:
+                with self.state_lock:
+                    type(self).active -= 1
+
+        def read(self, crop):
+            return "hola"
+
+    monkeypatch.setitem(ENGINES, "es", RacingInitEngine)
+    registry = OcrRegistry(device="cpu")
+    region = PreparedRegion(
+        "block-init",
+        (0, 0, 10, 10),
+        (0, 0, 10, 10),
+        (fragment(1, (0, 0, 10, 10), False),),
+        np.zeros((10, 10, 3), np.uint8),
+        np.zeros((10, 10), np.uint8),
+        np.zeros((10, 10), np.uint8),
+        None,
+        False,
+        True,
+    )
+    analysis = AnalysisArtifact("analysis-init", 10, 10, (region,), 1)
+    pipeline = Pipeline(detector=FakeDetector(), ocr=registry, translator=FakeTranslator())
+    start = Barrier(2)
+
+    def recognize(ocr_key):
+        start.wait(timeout=1)
+        return list(
+            pipeline._iter_ocr(
+                analysis, "analysis-init", "es", ocr_key, lambda: False
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(recognize, ("ocr-init-1", "ocr-init-2")))
+
+    assert all(any(event["type"] == "ocr_block" for event in events) for events in results)
+    assert (RacingInitEngine.calls, RacingInitEngine.max_active) == (1, 1)
+
+
+def test_iter_ocr_emits_partial_block_and_retries_region_when_a_fragment_fails():
+    block_id = "block-error"
+    region = PreparedRegion(
+        block_id,
+        (0, 0, 20, 10),
+        (0, 0, 20, 10),
+        (fragment(1, (0, 0, 10, 10), False), fragment(2, (10, 0, 10, 10), False)),
+        np.zeros((10, 20, 3), np.uint8),
+        np.zeros((10, 20), np.uint8),
+        np.zeros((10, 20), np.uint8),
+        None,
+        False,
+        True,
+    )
+    pipeline = Pipeline(
+        detector=FakeDetector(),
+        ocr=SharedOcr(TextByPixelEngine({1: "hola", 2: RuntimeError("bad")})),
+        translator=FakeTranslator(),
+    )
+    cached_analysis(pipeline, "analysis-error", region)
+
+    events = list(pipeline.iter_ocr("analysis-error", "es", "ocr-error"))
+
+    assert any(event["type"] == "ocr_block_error" for event in events)
+    assert any(event.get("src_text") == "hola" for event in events)
+    assert block_id not in pipeline._ocr_cache.get("ocr-error").completed_ids
 
 
 class CancelAfterFirstEngine:
