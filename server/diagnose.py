@@ -15,7 +15,7 @@ def diagnose_image(img_bgr, detector, engine):
     h, w = img_bgr.shape[:2]
     annotated = img_bgr.copy()
     rows = []
-    for i, region in enumerate(detector.detect(img_bgr)):
+    for i, region in enumerate(detector.detect(img_bgr).regions):
         x, y, bw, bh = region.bbox
         crop_x1, crop_y1 = min(w, max(0, x)), min(h, max(0, y))
         crop_x2, crop_y2 = max(0, min(w, x + bw)), max(0, min(h, y + bh))

@@ -1,11 +1,13 @@
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
+import numpy as np
 import pytest
 
-from server.detector import Detector, MODEL
+from server.detector import DetectionResult, Detector, MODEL, TextRegion
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -17,7 +19,8 @@ def detector():
 
 def test_detects_text_region_ja(detector):
     img = cv2.imread(str(FIXTURES / "ja_page.png"))
-    regions = detector.detect(img)
+    result = detector.detect(img)
+    regions = result.regions
     assert len(regions) >= 1
     x, y, w, h = regions[0].bbox
     assert w > 0 and h > 0
@@ -27,7 +30,8 @@ def test_detects_text_region_ja(detector):
 
 def test_detects_text_region_es(detector):
     img = cv2.imread(str(FIXTURES / "es_page.png"))
-    regions = detector.detect(img)
+    result = detector.detect(img)
+    regions = result.regions
     assert len(regions) >= 1
 
 
@@ -48,3 +52,18 @@ def test_constructor_forwards_optional_detector_knobs(monkeypatch):
         "conf_thresh": 0.25,
         "input_size": 1536,
     }
+
+
+def test_detect_returns_masks_regions_and_vertical():
+    raw = np.zeros((20, 30), np.uint8)
+    refined = np.full((20, 30), 255, np.uint8)
+    block = SimpleNamespace(xyxy=(1, 2, 11, 12), vertical=True)
+    detector = Detector.__new__(Detector)
+    detector._model = lambda image: (raw, refined, [block])
+
+    result = detector.detect(np.zeros((20, 30, 3), np.uint8))
+
+    assert isinstance(result, DetectionResult)
+    assert result.raw_mask is raw
+    assert result.refined_mask is refined
+    assert result.regions == (TextRegion((1, 2, 10, 10), True),)

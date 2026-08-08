@@ -30,6 +30,13 @@ class TextRegion:
     vertical: bool
 
 
+@dataclass(frozen=True)
+class DetectionResult:
+    raw_mask: np.ndarray
+    refined_mask: np.ndarray
+    regions: tuple[TextRegion, ...]
+
+
 class Detector:
     def __init__(self, device: str = "cuda", conf_thresh: float | None = None, input_size: int | None = None):
         # ponytail: vendor dùng absolute import nội bộ nên phải chèn sys.path;
@@ -49,10 +56,10 @@ class Detector:
             print(f"[detector] CUDA init lỗi ({e}), fallback CPU")
             self._model = TextDetector(device="cpu", **kw)
 
-    def detect(self, image_bgr: np.ndarray) -> list[TextRegion]:
-        _, _, blk_list = self._model(image_bgr)
+    def detect(self, image_bgr: np.ndarray) -> DetectionResult:
+        raw_mask, refined_mask, blk_list = self._model(image_bgr)
         regions = []
         for blk in blk_list:
             x1, y1, x2, y2 = (int(v) for v in blk.xyxy)
             regions.append(TextRegion(bbox=(x1, y1, x2 - x1, y2 - y1), vertical=bool(blk.vertical)))
-        return regions
+        return DetectionResult(raw_mask, refined_mask, tuple(regions))
