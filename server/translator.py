@@ -6,10 +6,21 @@ from . import config
 
 
 class TranslateError(Exception):
-    pass
+    def __init__(self, message, *, code=None, error_kind=None):
+        super().__init__(message)
+        self.code = code
+        self.error_kind = error_kind
 
 
-LANG_NAMES = {"ja": "Japanese", "es": "Spanish", "vi": "Vietnamese", "en": "English"}
+LANG_NAMES = {
+    "ja": "Japanese",
+    "es": "Spanish",
+    "pt": "Portuguese",
+    "vi": "Vietnamese",
+    "en": "English",
+}
+HTTP_TRANSLATE_ITEM_PROMPT_FIELDS = ("id", "text", "reading_order", "bbox")
+GENERATION_TEMPERATURE = 0.2
 
 PROMPT = """You are translating comic/manga dialogue from {src} to {dst}.
 Translate each numbered line. Keep pronouns and politeness consistent across
@@ -20,12 +31,19 @@ order, no extra text.
 {lines}"""
 
 ITEM_PROMPT = """You are translating comic/manga dialogue from {src} to {dst}.
-Translate every item. Keep pronouns and politeness consistent inside this batch.
+All items belong to one page and are already sorted in reading order. Use the
+page context and neighboring bubbles to keep pronouns, politeness, terminology,
+and tone consistent. Do not reorder or omit items.
+
+Page context JSON:
+{page_context}
+
+Input items JSON:
+{items}
+
 Return ONLY a JSON array of objects with exactly these keys:
 {{"id":"the input id","translation":"translated text"}}.
-Return each input id exactly once; do not invent ids.
-
-{items}"""
+Return each input id exactly once; do not invent ids."""
 
 
 def _decode_items(raw, expected_ids):
@@ -76,21 +94,44 @@ class GeminiTranslator:
 
         return self._generate(prompt, decode)
 
-    def translate_items(self, items: list[dict], src: str, dst: str) -> list[dict]:
+    def translate_items(
+        self,
+        items: list[dict],
+        src: str,
+        dst: str,
+        *,
+        page_width: int,
+        page_height: int,
+        reading_direction: str,
+    ) -> list[dict]:
         if not items:
             return []
         ids = [str(item["id"]) for item in items]
         if len(ids) != len(set(ids)):
             raise TranslateError("duplicate input id")
+        prompt_items = [
+            {field: item[field] for field in HTTP_TRANSLATE_ITEM_PROMPT_FIELDS}
+            for item in items
+        ]
+        page_context = json.dumps(
+            {
+                "page_width": page_width,
+                "page_height": page_height,
+                "reading_direction": reading_direction,
+            },
+            ensure_ascii=False,
+        )
         prompt = ITEM_PROMPT.format(
             src=LANG_NAMES.get(src, src),
             dst=LANG_NAMES.get(dst, dst),
-            items=json.dumps(items, ensure_ascii=False),
+            page_context=page_context,
+            items=json.dumps(prompt_items, ensure_ascii=False),
         )
         return self._generate(prompt, lambda raw: _decode_items(raw, ids))
 
     def _generate(self, prompt, decode):
-        last_err = "unknown"
+        last_error = None
+        last_kind = "generation_error"
         client_index = self._active_client
         switched = False
         for attempt in range(2):  # 1 lần + 1 retry theo spec
@@ -98,18 +139,27 @@ class GeminiTranslator:
                 resp = self._clients[client_index].models.generate_content(
                     model=config.GEMINI_MODEL,
                     contents=prompt,
-                    config={"temperature": 0.2, "response_mime_type": "application/json"},
+                    config={
+                        "temperature": GENERATION_TEMPERATURE,
+                        "response_mime_type": "application/json",
+                    },
                 )
                 result = decode(resp.text)
                 if switched:
                     self._active_client = client_index
                 return result
-            except Exception as e:
-                last_err = str(e)
-                if getattr(e, "code", None) == 429:  # google.genai APIError.code
+            except Exception as error:
+                last_error = error
+                if getattr(error, "code", None) == 429:  # google.genai APIError.code
+                    last_kind = "rate_limited"
                     if attempt == 0 and len(self._clients) > 1:
                         client_index = 1 - client_index
                         switched = True
                         continue
                     break
-        raise TranslateError(last_err)
+                last_kind = "invalid_response" if isinstance(error, ValueError) else "generation_error"
+        raise TranslateError(
+            str(last_error),
+            code=getattr(last_error, "code", None),
+            error_kind=last_kind,
+        ) from last_error

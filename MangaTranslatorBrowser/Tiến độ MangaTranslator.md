@@ -261,8 +261,8 @@ Giữ thủ công (không auto-translate/auto-scroll). Dùng `bestSource()` củ
 
 ## Thread B — recall OCR hoàn tất ✅ (2026-07-28)
 
-- [x] Chọn ảnh full-res từ `srcset`.
-- [x] Pad + upscale crop trước OCR.
+- [x] Chọn ảnh full-res từ `srcset` thay vì phụ thuộc `currentSrc`.
+- [x] Pad + upscale crop trước OCR để giữ nét chữ nhỏ sát mép bóng.
 - [x] Decision gate: bỏ Task 4 vì detector đã bắt đủ bbox.
 - [x] Tự động: `pytest` **30 passed**; kiểm tra Node **pass**.
 - [x] Diagnostic: **13 block, 0 OCR rỗng** (trước: 13/4).
@@ -859,3 +859,421 @@ Liên quan: [[Tiến độ MangaTranslator#Cập nhật Task 9–10 — 2026-07-
 ### Chốt nhánh
 
 Bằng chứng benchmark commit `daf80e2` trên nhánh mới `feat/v3`, sau đó fast-forward vào `feat/v2`. Review lại toàn bộ delta `326273e..daf80e2` (20 commit chưa nằm trong lần review sạch trước) **không có finding Critical/Important**: `metadataEqual` trả false cho giá trị mảng nhưng `versions` từ `/health` chỉ gồm object/string nên so version vẫn đúng, và `return` sớm cho prewarm trong `attachDescriptor` không treo request vì prewarm không có port lẫn hợp đồng completion. Gate trên cây đã merge: Node **9/9**, pytest **85 passed** với 3 warning quen thuộc.
+
+
+---
+
+## Spec A — tạm dừng sau Task 2 (2026-08-01)
+
+> [!info] Trạng thái phiên
+> Phiên Subagent-Driven Development được dừng theo yêu cầu của người dùng sau khi Task 1 và Task 2 đã qua review. Task 3 mới chỉ được trích brief trong workspace SDD; chưa giao implementer và chưa có code Task 3.
+
+### Spec và implementation plan đã chốt
+
+- Spec đã duyệt: `docs/superpowers/specs/2026-08-01-telemetry-real-fixture-quality-gate-design.md`.
+- Implementation plan: `docs/superpowers/plans/2026-08-01-telemetry-real-fixture-quality-gate.md`.
+- Mốc trên `feat/v3`: `71cad75` hoàn tất spec handoff; `d258ccf` thêm plan 8 task/48 bước TDD.
+- Ranh giới giữ nguyên: Spec A chỉ xây telemetry, fixture, policy probe và quality gate. Reading order/page-context translation thuộc Spec B; lỗi overlay chồng, crop trắng che chữ và trạng thái partial thuộc Spec C.
+
+### Phần đã triển khai trong worktree hiện tại
+
+- Worktree: `D:\MangaTranslator\.worktrees\spec-a-telemetry-quality-gate`
+- Branch: `feat/spec-a-telemetry-quality-gate`
+- HEAD khi dừng: `1a36e2f`
+
+- [x] **Task 1 — server analysis telemetry**
+  - Commit `43c0016`.
+  - Thêm `Pipeline.analyze_with_status()`, giữ wrapper `analyze()`.
+  - `analysis_ready` phát `analysis_ms` và `analysis_cache_hit`; hit sau khi chờ `_ocr_lock` vẫn được phân loại đúng.
+  - Verification: Python **88 passed**, 3 warning dependency/tooling có sẵn.
+  - Task review: PASS, không có Critical/Important/Minor.
+
+- [x] **Task 2 — per-job metric row và Gemini call trace**
+  - Commit triển khai `3949937`; fix review `1a36e2f`.
+  - `scope_done.page_metrics` có đúng một row/job cho producer, warm page-cache hit và lỗi trước producer; aggregate cũ vẫn giữ.
+  - Trace tách khỏi counter `translationBatches`, nên microbatch 3/8 production không đổi.
+  - Fix round 1 xử lý ba finding Important: stage không chạy phải là `null` thay vì `0`; late consumer phải kế thừa shared-stage timing; HTTP 429 phải phân loại theo status thay vì body text.
+  - Verification: toàn bộ JS suite **9/9 file pass**; scoped re-review xác nhận **3/3 addressed**, không có breakage mới.
+
+- [x] **Task 3 — `first_overlay_ms` theo từng trang**
+  - ==Mục này đã sai khi ghi==: lúc viết worklog Task 3 chưa triển khai, nhưng worktree hiện ở HEAD `01d1dfe` với đủ commit và production diff. Xem [[Tiến độ MangaTranslator#Spec A — code review Task 1–3 (2026-08-02)]].
+
+### Trạng thái checkout/worktree
+
+- Checkout chính `D:\MangaTranslator` vẫn ở `feat/v3`, HEAD `d258ccf` trước khi ghi worklog này.
+- Worktree hiện tại sạch tại HEAD `1a36e2f`; các commit Task 1–2 chưa merge/cherry-pick về `feat/v3`.
+- Người dùng xác nhận các `.worktrees` cũ được nhắc trong lịch sử trước đã bị xóa. Kiểm tra lúc dừng cho thấy chỉ còn worktree hiện tại `spec-a-telemetry-quality-gate`; không được nhầm các đường dẫn worktree cũ trong mục 2026-07-30/31 là workspace còn hoạt động.
+- Không xóa worktree hiện tại trước khi tích hợp các commit `43c0016`, `3949937`, `1a36e2f`.
+
+### Điểm tiếp tục ở phiên sau
+
+1. Mở ledger ignored: `.superpowers/sdd/2026-08-01-telemetry-real-fixture-quality-gate/progress.md`; Task 1–2 đã complete.
+2. Bắt đầu Task 3 từ brief hiện có và giữ message contract `render_metric` theo `job_id`; producer không được chờ UI.
+3. Sau Task 3 mới tiếp tục fixture/ground truth, policy probe, evaluator và manual worklog theo plan.
+4. Chưa có claim về policy Gemini mới, chất lượng Portuguese production hoặc fix overlay; các gate đó vẫn pending.
+
+#mangatranslator/spec-a/telemetry-quality-gate
+
+---
+
+## Spec A — code review Task 1–3 (2026-08-02)
+
+> [!warning] Kết luận
+> **Task 1 PASS. Task 2 và Task 3 chưa nên coi là xong.** Task 2 có **1 finding Critical**: commit fix `1a36e2f` sửa phân loại 429 theo HTTP status, nhưng server không bao giờ trả 429 — nên mọi rate limit thật bị trace sai. Task 3 có **1 finding Important** về mốc đo `first_overlay_ms` lệch với mọi field còn lại trong cùng row. Không được merge về `feat/v3` trước khi xử lý hai mục này.
+
+### Phạm vi và cách kiểm chứng
+
+- Diff review: `d258ccf..01d1dfe` trên `feat/spec-a-telemetry-quality-gate` — `43c0016` (Task 1), `3949937` + `1a36e2f` (Task 2), `01d1dfe` (Task 3).
+- Chạy lại gate tại HEAD `01d1dfe`: pytest **88 passed** (3 warning dependency có sẵn), Node **9/9 file pass**. Số trong worklog trước là đúng.
+- Đối chiếu từng task với `docs/superpowers/plans/2026-08-01-telemetry-real-fixture-quality-gate.md`, gồm cả Global Constraints.
+
+### Task 1 — server analysis telemetry (`43c0016`) → PASS
+
+Đạt yêu cầu: `analyze_with_status()` trả `(artifact, cache_hit)`, wrapper `analyze()` vẫn có caller thật ở `server/pipeline.py:226` nên không phải code chết; hit sau khi chờ `_ocr_lock` được phân loại đúng và test dùng hai `Event` + `ThreadPoolExecutor` assert `detector.calls == 1` — đúng chỗ dễ sai nhất. Mojibake `server/main.py:160` đã sửa, không đụng error code.
+
+> [!bug] Minor 1 — `analysis_ms` cộng thêm nhiễu scheduling
+> `analysis_started = time.perf_counter()` nằm trong handler (`server/main.py:101`) nhưng `analysis_ms` được tính bên trong `stream()`, mà Starlette chỉ chạy generator khi bắt đầu gửi body. Warm hit vì thế không về ≈0 như kỳ vọng.
+> Fix: chuyển `analysis_started` thành dòng đầu tiên của `stream()`.
+
+### Task 2 — per-job metric row và Gemini trace (`3949937`, `1a36e2f`) → CẦN SỬA
+
+Phần đúng: `emptyPageMetrics()` + spread trong `completeJob()` là điểm chuẩn hoá duy nhất, không có schema class, không có row giả `0`; ràng buộc "stage không chạy = `null`" giữ nhất quán tới tận `createProducer` (`durations: { fetch_ms: null, analysis_ms: null }`); aggregate cũ không vỡ vì `scopeMetrics.value()` lọc non-finite; `page_artifact_key` là hash (`extension/background.js:110`) nên không rò URL.
+
+> [!danger] Critical — phân loại 429 sai trong production
+> `extension/background.js:701` sau fix dùng `error.status === 429`. Nhưng server **không bao giờ trả HTTP 429**: `server/translator.py:109` bắt `APIError.code == 429`, retry/đổi client, rồi `raise TranslateError(last_err)`; `server/main.py:180` map thành **HTTP 502** với body `"gemini: 429 RESOURCE_EXHAUSTED..."`.
+> Hệ quả: mọi rate limit thật bị ghi `status: "failed"`, `error_code: "translation_failed"` — đúng tín hiệu mà Spec A cần để chọn/bác policy dịch.
+> Test không bắt được vì fake server trả `{ ok: false, status: 429 }`, một response server thật không phát ra được.
+> Đồng thời `background.js:713` vẫn giữ `String(error).includes("429")` cho counter `producer.counters.rate_limited`, nên counter (đúng) và trace (sai) mâu thuẫn nhau trên cùng một lỗi. `1a36e2f` còn đổi body fixture `"429 quota"` → `"quota exceeded"`, làm counter không tăng trong chính kịch bản rate-limit mới thêm; không test nào assert `rate_limited > 0` nên regression này im lặng.
+> Fix root-cause một chỗ cho cả hai caller:
+> ```javascript
+> function isRateLimited(error) { return error.status === 429 || String(error).includes("429"); }
+> ```
+> Test đi kèm phải dùng response **502** body `"gemini: 429 RESOURCE_EXHAUSTED"`, giữ thêm ca 502-không-429 → `failed`.
+> Ghi chú: finding review vòng 1 ("phân loại theo status thay vì body text") đúng về nguyên tắc nhưng sai với codebase này.
+
+> [!warning] Important — `translation_batches` không phải "mỗi Gemini call"
+> Plan viết một trace row cho mỗi network Gemini call. Thực tế một trace = một call **extension → server**, trong khi server retry 2 lần và có thể đổi client (`server/translator.py:96-115`). `duration_ms` đã gộp retry, và số trace ≤ số Gemini call thật. Không phải bug code, nhưng evaluator sẽ đọc sai nếu spec giữ nguyên câu chữ. Sửa wording, hoặc để server phát số attempt.
+
+> [!bug] Minor 2–6
+> 2. `background.js:613` — `mark(producer, "first_ocr")` giờ thừa: producer tự nằm trong `stage.consumers` nên `applyOcrBlock` (`:643`) đã mark. Xoá được 1 dòng.
+> 3. `acceptScope` truyền `meta.pageKey = descriptor.page_artifact_key`, nhưng `content.js` không bao giờ gửi field này → luôn `null`. Ý định trong plan ("key nếu đã tạo") chưa đạt.
+> 4. `trace.cache_hit` là hằng `false` vì trace chỉ tạo trên nhánh network (đúng plan), nên field hiện vô nghĩa.
+> 5. `batch_id: producer.translationBatches` tăng trước cả nhánh cache-only → có lỗ hổng số thứ tự, `batch_id` ≠ index trong mảng trace.
+> 6. `failProducer` hardcode `error_code: "request_failed"` dù `producer.page.last_error` có nguyên nhân thật. Giữ hằng là an toàn về PII, nhưng nên map các mã stage đã biết (`ocr:<code>`).
+
+### Task 3 — `first_overlay_ms` theo từng trang (`01d1dfe`) → CẦN SỬA
+
+Phần đúng và khó: hợp đồng ba nhánh merge được xử lý đầy đủ — `content.js` giữ `firstOverlayByJob` và gửi `render_metric` kèm `job_id` đúng một lần/job; `background.js` chặn job lạ bằng `expectedJobIds`; row đã push trước khi overlay render (đường warm replay) được patch tại chỗ; metric đến sau `scopeDone()` patch bản sao đã sanitize trong `metricSamplesByRequest` chứ không tạo row mới. Aggregate scope dùng `Math.min` nên message lệch thứ tự không phá số cũ — test integration bắn `999999` cho request đã đóng và summary không đổi. `emit()` luôn kèm `job_id: consumer.jobId` nên guard bên content không bao giờ rơi vào key `undefined`.
+
+> [!warning] Important — `first_overlay_ms` lệch mốc so với mọi field cùng row
+> Global Constraint của plan: "`*_done_ms` và `first_*_ms` là elapsed từ lúc producer được accepted". Nhưng `content.js:147` đo từ `pending.startedAt` — thời điểm **scope** bắt đầu trong content script, không phải lúc producer của trang đó được accepted.
+> Với `MAX_CONCURRENT = 2`, trang thứ ba trở đi phải xếp hàng, nên `first_overlay_ms` bị cộng cả queue wait trong khi `first_translation_ms` cùng row thì không. Hiệu `first_overlay_ms - first_translation_ms` (đúng thứ cần đo cho độ trễ render) sẽ over-report đúng bằng thời gian chờ.
+> Row đã có `queue_wait_ms = started - accepted`, còn thiếu `accepted - scopeStart`. Fix rẻ nhất: thêm một field `accepted_offset_ms` (chênh trong cùng đồng hồ worker, tính tại `completeJob` từ `request.acceptedAt` và `producer.timings.accepted`) để evaluator chuẩn hoá. Cách còn lại là ghi rõ trong spec rằng field này có mốc khác và không so trực tiếp được với các `*_ms` khác.
+
+> [!bug] Minor 7 — khoảng trống test
+> Ca metric đến **sau `completeJob()` của job đó nhưng trước `scopeDone()` của scope** chỉ được phủ bởi dòng `if (row) row.first_overlay_ms = ...` mà không có test. Hai ca đã test là "trước mọi completeJob" và "sau scopeDone".
+
+### Sai lệch so với worklog 2026-08-01
+
+- Mục Task 3 trong [[Tiến độ MangaTranslator#Spec A — tạm dừng sau Task 2 (2026-08-01)]] ghi "chưa triển khai, không có commit" là **sai ở thời điểm đọc lại**: worktree đang ở `01d1dfe` với đủ diff production và test. Đã sửa checkbox tại chỗ.
+- Xác nhận đúng: cả 4 commit vẫn **chưa merge/cherry-pick** về `feat/v3`.
+- Xác nhận đúng: chỉ còn một worktree `spec-a-telemetry-quality-gate`.
+
+### Việc phải làm trước khi merge về `feat/v3`
+
+1. Sửa Critical 429 bằng `isRateLimited()` dùng chung cho cả trace lẫn counter, kèm test dựng response 502 đúng shape production.
+2. Chốt mốc `first_overlay_ms`: thêm `accepted_offset_ms` hoặc ghi rõ mốc khác trong spec.
+3. Gom các Minor 1–7 vào một commit dọn.
+4. Chạy lại pytest + Node, rồi mới tích hợp `43c0016`, `3949937`, `1a36e2f`, `01d1dfe`.
+
+#mangatranslator/spec-a/telemetry-quality-gate
+
+
+## Spec A — đóng review Task 1–3 (2026-08-02)
+
+- Task 3 giữ `first_overlay_ms` theo content scope start để tương thích lịch sử benchmark. Commit `0e9523f` thêm `accepted_offset_ms`; overlay quy về mốc producer xấp xỉ `first_overlay_ms - accepted_offset_ms`. Sai số còn lại là IPC + thời gian đánh thức service worker MV3. Giá trị âm hợp lệ khi producer dùng chung được accepted trước request đến sau.
+- Commit `688be55` giữ đúng aggregate `scope_done.metrics.first_overlay_ms` khi metric đến muộn; commit `0e9523f` phủ thêm nhánh metric đến sau `completeJob()` nhưng trước `scopeDone()`.
+- Task 2: commit `8a997a7` phân loại đúng Gemini 429 bị server bọc thành HTTP 502 và làm trace/counter dùng chung một rule. Wording đã làm rõ một `translation_batches` trace là một request extension → server; retry/failover Gemini có thể xảy ra bên trong.
+- Cleanup review: commit `6063322` loại scheduling noise khỏi `analysis_ms` và bỏ mark `first_ocr` trùng.
+- Fresh verification tại HEAD `6063322`: Python **89 passed**, toàn bộ **9/9** file test Node passed, `background.js`/`content.js` syntax passed, `git diff --check` passed, worktree clean.
+- Review gate Task 1–3 hiện sạch. Chưa merge vào `feat/v3`; Task 4–8 vẫn còn trong kế hoạch.
+
+## Spec A — Task 4 canonical real-page fixtures hoàn tất (2026-08-02)
+
+- Commit `c6d963b` thêm 6 PNG canonical, manifest reviewed 7/21/17 regions, validator/matcher stdlib và mở rộng `server.diagnose` với `--device`/`--manifest-candidate`.
+- Diagnostic CPU thật: PT 8 raw → 7 anchors; JA1 21/21 với vendor index 5 được đưa trước 3/4 và poster là `sign`; JA2 17/17 giữ thứ tự đã review. Cả 3 source và 3 failure reference đã được inspect trực tiếp.
+- Review fix round 1 `e27aa52`: khóa PNG IHDR dimensions, đúng 6 fixture, unique image/fixture/region ID, exact ground-truth labels/anchors và ngưỡng IoU strict `> 0.5`.
+- Review fix round 2 `62c93cf`: pin trực tiếp `reading_order` JA1 để mutation hoán đổi 3↔4 không lọt test. Re-review: overall clean.
+- Fresh verification tại HEAD `62c93cf`: server **102 passed** (3 warning baseline), focused fixture+diagnose **16 passed**, 6 SHA-256 exact, không còn `.tmp-real-pages`/`.diag.*`, `git diff --check` và worktree clean.
+- Task 4 hoàn tất; chưa merge vào `feat/v3`. Task 5 bắt đầu.
+
+## Spec A — re-review Task 1–3: sửa contract offset âm (2026-08-02)
+
+- Re-review người dùng xác nhận code Task 1–3 PASS; không còn Critical/Important trong code.
+- Finding tài liệu được xác nhận: luật duration không âm mâu thuẫn với `accepted_offset_ms = -10` hợp lệ của shared producer.
+- Commit `fc9b16e` sửa cả contract tổng quát và mô tả field: `accepted_offset_ms` là offset, không phải duration, và có thể âm khi request đến sau dùng producer đã được accepted trước.
+- Verification doc-only: review diff, search contract liên quan, `git diff --check` pass; worktree clean.
+- Ba Minor `trace.cache_hit`, khoảng trống `batch_id`, và taxonomy `failProducer` vẫn park/non-blocking theo review. Task 5 đã tạm dừng sạch trước khi có diff để chờ review theo gate mới.
+
+## 2026-08-02 — Spec A Task 4: sửa theo re-review (9cf369c)
+
+- Đã bổ sung term_groups cho JA1 theo schema canonical / accepted_source_forms / fixture_block_ids: マッコイ (b07, b20) và タツマキ (b05, b19). Validator khóa đúng field, canonical duy nhất, danh sách text hợp lệ, ít nhất 2 block khác nhau và mọi block phải tồn tại.
+- Đã sửa lỗi báo sai khi role không hợp lệ; tăng kiểm tra known_order_failures; thêm assertion semantic cho thứ tự JA1; test ảnh tracked không còn phụ thuộc CWD; ignore .tmp-real-pages.
+- Đã thêm allowlist phòng thủ cho HTTP translate_items: chỉ id và text đi vào prompt. Đây là boundary hiện tại, tách khỏi policy probe Task 5 dự kiến dùng id / text / reading_order / bbox.
+- Giữ nguyên duplicate semantics vì nó biểu diễn ambiguity trong graph ứng viên IoU; Task 6 có thể phân loại warning. Giữ nguyên CUDA_VISIBLE_DEVICES vì đây là quyền điều khiển thiết bị của operator.
+- Kiểm chứng: pytest toàn server 112 passed; 9/9 file test Node PASS; focused 37 passed; chạy từ thư mục server 19 passed; node --check và git diff --check PASS.
+- Trạng thái: Task 4 sẵn sàng để review lại. Task 5 vẫn pending, chưa triển khai tiếp.
+
+## 2026-08-02 — Spec A Task 5: deterministic policy probe (a7c16da, 8ff3bf5, b62d777)
+
+- Đã thêm prompt eval comic-page-eval-v1 với allowlist riêng id / text / reading_order / bbox; không serialize kind, URL hoặc API key. HTTP production vẫn giữ contract id / text và không bị Task 5 thay đổi.
+- Đã thêm ba arm batch_control, ordered_microbatch và full_page. Control bắt buộc exact baseline membership; ordered microbatch chỉ mượn dãy batch size trên expected reading order; full page dùng một batch đã sort.
+- Runner CLI thủ công dùng đúng một GeminiTranslator và gọi _generate để giữ retry/failover production. Core nhận fake callable nên test không cần GEMINI_API_KEY và không gọi network. Preview latency được parse nhưng từ chối rõ cho tới khi Task 6 có gate chọn full_page.
+- Capture giữ fixture SHA, prompt/policy version, baseline, attempt, batch membership, timing, response keyed theo fixture ID và taxonomy success / invalid_response / rate_limited / failed. Không chạy bù attempt lỗi.
+- Commit: a7c16da (runner), 8ff3bf5 (giữ taxonomy 429/invalid response), b62d777 (UTF-8 validation và baseline guard trước model).
+- Kiểm chứng fresh: focused 29 passed; toàn server 122 passed, 3 warning dependency baseline; CLI help PASS với GEMINI_API_KEY rỗng; diff check, mojibake scan, sensitive-data audit và worktree clean.
+- Baseline audit phát hiện flake cũ ở test JS Task 2: scenario hai job dùng một fake error queue chung nhưng hard-code lỗi phải thuộc rate-job; stress fail 2/20 vì job flush trước không deterministic. Đây là test-fixture ordering, không phải regression Task 5, nên chưa sửa trong ba commit này.
+- Trạng thái: Task 5 sẵn sàng để người dùng review. Task 6 vẫn pending, chưa bắt đầu.
+## 2026-08-02 — Spec A Task 5: đóng human re-review (72c5cbf)
+
+- Đã sửa đủ 3 Important: CLI tạo thư mục cha của `--out` trước khi chạy probe; `GENERATION_TEMPERATURE` là nguồn duy nhất cho cả translator và capture; metadata `{commit, device, model, temperature}` đi qua `run_quality_probe` nên capture hoàn chỉnh được test ở core, không còn vá hậu kỳ trong CLI.
+- Đã nhận thêm các Minor có lợi trực tiếp: `calls[].started` giờ tương đối từ đầu probe; response text `None` thành `invalid_response`; test không còn đọc `decode.__defaults__`.
+- Giữ nguyên missing-key traceback: đây là lỗi cấu hình runtime trước API call, không phải lỗi cú pháp CLI và không gây mất capture. Flake JS hàng đợi fake toàn cục vẫn tách riêng, không trộn vào Task 5.
+- TDD đã quan sát RED cho cả output parent, shared temperature, core metadata, relative start và response `None` trước khi GREEN.
+- Kiểm chứng fresh tại `72c5cbf`: focused 52 passed; toàn server 127 passed, 3 warning dependency baseline; chạy từ `server/` 33 passed; CLI help với key rỗng, `git diff --check` và mojibake scan đều PASS; worktree sạch.
+- Trạng thái: Task 5 đóng và chờ người dùng review. Task 6 vẫn pending, chưa bắt đầu.
+## 2026-08-02 — Spec A Task 6: offline quality gate (1fa3e15, 1546912, 34a591f)
+
+- Đã thêm `validate_capture()` làm trust boundary deterministic: khóa schema/version/hash, exact metadata `{commit, device, model, temperature}`, exact page × arm × 3 attempt theo thứ tự, exact call/batch membership, status/error taxonomy và response IDs chỉ từ các call thành công. JSON bool không được giả làm integer; ID sai kiểu bị từ chối bằng `ValueError` có kiểm soát.
+- `term_forms` là annotation thủ công explicit theo `canonical → fixture_block_id → target surface form`; conflict chỉ xét trong cùng response/attempt sau `strip().casefold()`. PT luôn bắt buộc RTL, ba mục context là `not_applicable`; response `None`/non-string được ghi `invalid_response` như đã bổ sung vào spec.
+- Đã thêm `evaluate_gate()` hoàn toàn offline với bốn decision `selected`, `blocked`, `no_context_headroom`, `inconclusive`; dùng `statistics.median`, safety gate trước context gate, và tie-break bằng tổng call rồi tổng latency của toàn bộ attempt kể cả attempt lỗi.
+- CLI hỗ trợ cả `run ...`, invocation legacy không subcommand, và `evaluate ...`; mode evaluate không import/khởi tạo Gemini và chạy được khi `GEMINI_API_KEY` rỗng. Test Task 5 cũng đã được siết để chứng minh thư mục output tồn tại trước khi core probe bắt đầu.
+- Review độc lập vòng đầu phát hiện lỗi đúng hai valid responses, call schema lỏng, PT RTL bypass, tie-break bỏ attempt lỗi và fixture term conflict chưa declarative; toàn bộ đã đóng ở `1546912`. Re-review vòng trust-boundary đóng thêm bool/int alias và ID không phải chuỗi ở `34a591f`; không còn Critical/Important.
+- Kiểm chứng fresh tại `34a591f`: focused 75 passed từ repo root và 75 passed từ `server/`; toàn server 169 passed, 3 warning dependency baseline; CLI help legacy/run/evaluate PASS với key rỗng; diff check, mojibake scan và worktree sạch.
+- Trạng thái: Task 6 đóng, dừng chờ người dùng review. Chưa chạy Gemini/network/real browser; Task 7 vẫn pending. Flake JS concurrency fixture giữ thành task riêng như đã thống nhất.
+
+## 2026-08-02 — Spec A Task 6: đóng human re-review (d7092a1, b35cc4f)
+
+- Critical `decode_eval_items()` được xác nhận và sửa ở nguồn: item translation `None`, số, chuỗi rỗng hoặc chỉ khoảng trắng đều thành `invalid_response`, không còn bị ép thành `None`/`42` hay làm hỏng toàn capture. Guard `validate_capture` vẫn giữ làm defence-in-depth cho artifact sửa tay.
+- Capture metadata giờ có đúng năm field `{captured_at, commit, device, model, temperature}`. `captured_at` phải là ISO-8601 UTC có timezone, CLI sinh một lần trước probe, evaluator echo nguyên giá trị và không tạo timestamp mới.
+- Mâu thuẫn worklog Task 7 được đóng bằng contract nhỏ hơn: CLI `evaluate` chỉ sinh artifact deterministic dùng nguyên làm section `manual_review`; Task 7 ráp `telemetry_validation`, raw `policy_probe` và `manual_review`, rồi tái lập/so sánh riêng section evaluator. Không thêm envelope hoặc telemetry input chưa được thiết kế.
+- Các Minor đã đóng: `--attempts` chỉ nhận `3`; baseline lỗi có prefix `capture không hợp lệ`; PT→RTL nằm ở manifest/capture boundary thay vì phụ thuộc manual scores; spec ghi rõ tie-break tính mọi attempt/call trên cả ba trang; blocked arm báo đủ các trang lỗi và mọi PT arm có `context_score: not_applicable`.
+- TDD RED đã tái hiện 4 translation xấu lọt decoder, timestamp contract hai chiều, attempts sai đi tới I/O, baseline mất taxonomy, PT-LTR lọt manifest, report dừng ở trang đầu và PT arm thiếu context key trước khi GREEN.
+- Kiểm chứng fresh: focused 87 passed từ repo root và 87 passed từ `server/`; full server 181 passed, 3 warning dependency baseline. Lần full đầu trong sandbox fail 2 OCR test vì không được đọc model cache/socket; chạy lại ngoài sandbox trên cùng HEAD pass 181/181.
+- Đính chính mục Task 6 trước: metadata bốn field và câu “không còn Critical/Important” đã bị review này thay thế; sau `d7092a1` + `b35cc4f` các finding trong review hiện đã đóng.
+- Trạng thái: Task 6 dừng chờ người dùng review lại. Task 7 chưa bắt đầu; chưa chạy Gemini/network/real-browser capture.
+
+## 2026-08-02 — Spec A Task 6: re-review PASS và đóng 2 Minor (356d6b9, 1b7308c)
+
+- Re-review tại `b35cc4f` kết luận PASS: Critical, hai Important và 5/5 Minor cũ đã đóng; Task 7 không còn blocker.
+- Accept Minor tài liệu: `manual_review` được sửa thành nguyên artifact `evaluate` với `{captured_at, decision, reason, pages, arms}` và đủ bốn decision; rubric từng attempt vẫn ở `captures/2026-08-01-manual-scores.json`.
+- Partially accept cách vá Minor evidence: bỏ nhánh skip để arm `inconclusive` vẫn ghi `critical_error`/safety quan sát được, nhưng giữ nguyên ưu tiên trạng thái `inconclusive` và thêm guard cho trang có 0 response hợp lệ để tránh `statistics.median([])`.
+- Hai test hồi quy đã RED đúng hai lỗi: mất `critical_error` khỏi `reasons`, và crash ở 0 valid response; sau fix đều GREEN. Focused fresh đạt 89 passed từ repo root và 89 passed từ `server/`.
+- Trong env resolver unpinned: 180 passed + 2 detector error do thiếu pkg_resources + 1 OCR failure do PaddleOCR API lệch. Trên venv dự án cùng HEAD 1b7308c: 183 passed, 3 warnings, 0 fail/0 error. Ba lỗi của env unpinned nằm ngoài diff Task 6.
+- Commit code/test `356d6b9`; commit spec `1b7308c`; worktree sạch. Task 6 đóng và dừng chờ review; Task 7 chưa bắt đầu.
+## 2026-08-03 — Spec A Task 7: real-page baseline + offline quality gate (277f9df)
+
+- Capture thủ công dùng đúng Chrome thật, extension đã cài và popup thật trên fixture server 8000 với production API 8910/CUDA. Môi trường, fixture hash, model và toàn bộ page_metrics đã được lưu trong worklog JSON.
+- JA1 cold: 21/21, analysis_cache_hit=false, batch 2+11+8, total page 14163 ms, first overlay 10509 ms; warm cache hit, first overlay 13 ms. JA2 cold: 17/17, batch 2+11+4, total page 12099 ms, first overlay 8954 ms; warm cache hit, first overlay 12 ms.
+- PT chỉ là diagnostic vì production_pt_supported=false và dùng recognizer src_lang=es: 7/7, batch 1+1+2+1+2. Translation live PT không tham gia quality score.
+- Hai run JA1 trước mẫu cold được chọn không bị giấu: run đầu chỉ dịch 3/21 do hai response Gemini decode/validation lỗi sau HTTP 200; run recovery có analysis cache hit nên không đủ điều kiện cold. Cả hai không được dùng làm baseline.
+- Policy probe chạy đúng một lần với 3 page × 3 arm × 3 attempt: 27 attempt, 55 call success, 20 call rate_limited, 16 response hợp lệ. Không chạy bù attempt lỗi; preview probe không chạy vì condition_not_met.
+- Rubric chấm đủ 16 response hợp lệ. Evaluator offline kết luận inconclusive vì JA1 batch_control chỉ có 1 response hợp lệ; không policy nào được chọn và không claim cải thiện chất lượng.
+- Ba artifact commit: docs/superpowers/worklogs/2026-08-01-real-page-quality-baseline.json, captures/2026-08-01-policy-probe.json và captures/2026-08-01-manual-scores.json. manual_review tái lập đúng từ capture + scores.
+- Kiểm chứng fresh: test_real_page_quality.py 89 passed; 27 attempt/16 score validate; decision tái lập inconclusive; diff check và sensitive-data scan sạch; scratch đã xóa; server tạm đã dừng.
+- Task 7 hoàn tất ở commit 277f9df và dừng chờ review. Task 8 chưa bắt đầu.
+## 2026-08-03 — Spec A Task 7: human rubric sign-off (7721576)
+
+- Reviewer jaa đã đọc phiếu source → translation và xác nhận toàn bộ 16 rubric row hợp lệ. manual-scores giờ ghi reviewer=jaa cho đúng 16/16 row; điểm, critical_error, term_forms và note không đổi.
+- Minor tài liệu đã sửa: điểm từng attempt, note và reviewer nằm ở captures/2026-08-01-manual-scores.json; section manual_review trong worklog giữ nguyên artifact evaluator.
+- Evaluator tái lập tuyệt đối cùng kết quả inconclusive vì JA1 batch_control chỉ có một response hợp lệ; không policy nào được chọn.
+- Kiểm chứng fresh: test_real_page_quality.py 89 passed; toàn server 183 passed, 3 warning baseline; diff check sạch; scratch human-review đã xóa.
+- Commit 7721576. Dừng chờ re-review Task 7; Task 8 chưa bắt đầu.
+
+## 2026-08-03 — Spec A Task 8: regression, audit và handoff
+
+- Nhánh cô lập feat/spec-a-telemetry-quality-gate hiện ở ca7d435 (fix: preserve translation error taxonomy); Task 8 gồm 2eda03d, eef60a1 và fix whole-branch review ca7d435. Chưa merge vào feat/v3.
+- work-flow.md đã ghi cách đọc scope_done.page_metrics, duration/elapsed/null, carve-out first_overlay_ms, các lệnh serve/capture/evaluate, quyết định quality hiện tại và cổng chuyển giao Spec B/C.
+- Whole-branch review phát hiện false positive: lỗi JSON có chuỗi char 429 có thể bị ghi nhầm rate_limited. ca7d435 giữ code/error_kind có cấu trúc qua translator → /translate-items → extension/probe; rate limit, invalid_response và generation_error không còn suy từ message. Scoped re-review: PASS.
+- Fresh automated verification tại ca7d435: pytest server/tests -q = 188 passed, 3 warning dependency; cả 9 file test JS PASS; node --check, CLI help, git diff --check và worktree cleanliness PASS.
+- Evidence thủ công đã có từ Task 7: telemetry real Chrome cold/warm đã chạy; detector/OCR transcript và reading order canonical đã được người đọc review; reviewer jaa đã xác nhận đủ 16 rubric rows hợp lệ. Automated PASS không thay thế các evidence này.
+- Quality decision vẫn inconclusive vì JA1 batch_control chỉ có 1 response hợp lệ. PT chỉ là diagnostic (production_pt_supported=false, recognizer es), không phải production proof. Spec B policy và Spec C overlay chưa triển khai.
+- Dừng tại đây để chờ review Task 8 của người dùng.
+
+### 2026-08-03 — Task 8 review fix (e90552a)
+
+- Accept Important: work-flow.md đã đổi regression evidence từ 183 thành 188 passed để khớp HEAD sau 5 test taxonomy mới.
+- Accept Minor: đã ghi contract lỗi máy đọc được của /translate-items: error_code rate_limited/invalid_response/generation_error; chỉ rate_limited dùng HTTP 429, hai loại còn lại dùng 502; consumer không suy taxonomy từ text error.
+- Không triển khai ghi chú giả định về subtype ValueError/rate_limited vì chưa có type hoặc caller như vậy.
+- Fresh verification: pytest server/tests -q = 188 passed, 3 warning dependency; 9/9 file JS PASS; git diff --check sạch. Chỉ work-flow.md thay đổi trong e90552a.
+- Nhánh/worktree vẫn chưa merge; dừng chờ re-review Task 8.
+
+## 2026-08-03 — Spec A paced quality-gate rerun: chọn `full_page`
+
+- Pacing code ở `665769a`; capture checkpoint ở `7f96193`. Capture metadata trỏ đúng code commit `665769a5d25cb4d9e9d6933fa8fec883165b4ba3`, gồm 27 attempt / 75 logical call / 74 gap, minimum gap `10.0000673s`; 74 call success, 1 `invalid_response`, không chạy bù.
+- Capture có 26 response hợp lệ. Reviewer `jaa` chấm đủ 26/26 rubric row; giữ nguyên hai lỗi thuật ngữ thật của JA1 `batch_control` (`Tatsumaki` bị dịch thành `lốc xoáy`) với `terms = 0`.
+- Review phát hiện spec cũ không biểu diễn được term-form conflict dù rubric cho phép điểm 0. Commit `a6f3a24` sửa guard nhỏ nhất: surface form xung đột chỉ hợp lệ khi `terms == 0`; conflict với `terms` 1/2 vẫn bị từ chối. TDD đã quan sát RED, sau sửa test term-surface đạt 3 passed.
+- Evaluator offline với nguyên điểm `jaa` trả `decision=selected`, `selected=full_page`, reason `candidate duy nhất đạt gate`. `ordered_microbatch` bị block; `full_page` pass.
+- Commit quyết định `4e002bd`; worklog mới: `docs/superpowers/worklogs/2026-08-03-real-page-quality-gate-rerun.json`. `telemetry_validation_reference` tái dùng section `telemetry_validation` của worklog 2026-08-01 tại commit `277f9dfe62fda44c47239d86b82ac44c78786f7f`; không chụp browser telemetry mới.
+- Fresh verification cuối Task 3: `pytest server/tests -q` = 196 passed, 3 warnings; score file khớp nguyên `points.json`, worklog khớp evaluator, sensitive-data scan 0 match và `git diff --check` sạch.
+- Trạng thái: Spec B được phép bắt đầu với policy `full_page` sau checkpoint review này. Spec C vẫn hoãn tới checkpoint tiếp theo; chưa triển khai production Spec B/C.
+
+## 2026-08-05 — Spec B Tasks 1–4: merge fixture, reading order và direction/cache
+
+- Spec B đã qua design/plan review; triển khai trên `feat/v3` theo checkpoint review từng task. Plan: `docs/superpowers/plans/2026-08-04-reading-order-full-page-translation.md` (`7313536`, amendment `9237454`). Task 5 chưa bắt đầu.
+- Task 1 PASS: merge Spec A bằng merge commit `9b1d153df7bccbb8dce34eaa451e47d32ee70bab`, parent Spec A `18bb9f875795ff2d8d80a5516e3b9ee5f1a74ffd`; fixture/control được đưa vào trước comparator và `full_page`.
+- Task 2 PASS: baseline cuối `193 passed`, Node `9/9`, evaluator `98 passed`, semantic policy batch count `25`. Race timing telemetry test-only được ổn định ở `0d47b5c`; control worklog ở `c35569a`, giữ `control_baseline_commit=9b1d153...`.
+- Task 3 PASS: `04e695e` thêm helper `extension/reading-order.js` và comparator Node gọi đúng helper production. Exact-match: `mangadex_pt` 7/7 (single), `s-manga_ja_1` 21/21 (spread, gutter 554.5), `s-manga_ja_2` 17/17 (spread, gutter 549.5); synthetic RTL/LTR, panel-gap, fallback, tall-bridge và mutation threshold đều xanh.
+- Task 3 follow-up PASS: `c806f14` đóng arrival-order ambiguity bằng hai lớp — server loại exact normalized bbox trùng sau clamp/trước OCR, còn `orderPage()` reject duplicate full bbox; bump dedupe version thành `iou-0.5-area-clamp-exact-v3`. Gate: Python `25 passed`, ba Node gate PASS.
+- Task 4 PASS: `1ee4b07` thêm UI `readingDirection` RTL/LTR (mặc định hiển thị RTL nhưng không persist lúc startup), snapshot theo request, và normalize đúng ba boundary `acceptScope`, `offlineLedger`, `prewarmJob`. `layout_order=reading-order-v1`; direction/layout không vào analysis/OCR key nhưng vào overlay/translation key; rollout purge page cache một lần, ledger sống sót.
+- Gate Task 4: năm Node gate PASS, Python `17 passed, 1 warning`, `git diff --check` PASS. Không chạy `server/tests/test_ocr.py`.
+- Deferred Minor không chặn: popup test mock `||=` có thể che việc xóa HTML ID; fake translation FIFO có race 429 trong harness, không phải regression production.
+- Checkpoint hiện tại: HEAD `1ee4b0708436fad0209e29dc2284c40999286281`; Tasks 1–4 hoàn tất và đã review. Bước kế tiếp là Task 5 (PT/shared Latin engine và version-shape), chưa triển khai.
+
+## 2026-08-05 — Đối chiếu plan ban đầu và bug trong Tasks 1–4
+
+### Amendment của plan trước khi triển khai (`7313536` → `9237454`)
+
+- **Task 3 — comparator fixture:** bản plan đầu duyệt toàn bộ `manifest.fixtures`, trong khi manifest có 3 `source_page` và 3 `failure_reference` không có `regions`, dimensions hay reading metadata. Cách cũ sẽ ném `TypeError` hoặc so với dữ liệu `undefined`. Amendment lọc `role === source_page` và assert đúng 3 trang trước khi exact-match.
+- **Task 4 — default direction:** siết rõ `rtl` lúc startup chỉ là default hiển thị/state; không được tự ghi `readingDirection` vào storage. Test thêm `first.writes == []` để giữ nguyên nguyên tắc “chỉ persist field người dùng đổi”.
+- **Task 4 — version-shape gate:** ghi rõ assertion shape cấp cao vốn đã PASS trước Task 4; red signal thật là thiếu `layout_order`. Việc kiểm sâu `recognizers` chỉ bắt đầu có ý nghĩa ở Task 5.
+- **Task 4 — migration cache có chủ ý:** đổi context từ `{blockId, srcText}` sang `{reading_order, block_id, src_text}` tạo namespace hot-translation cache mới; bump `layout_order` cũng purge coarse page cache một lần. Đây là migration cost đã duyệt, không phải regression.
+
+### Phát hiện khi thực thi và cách xử lý
+
+#### Task 1 — merge Spec A
+
+- **Lệch so với plan:** không có. Merge nguyên branch Spec A bằng merge commit hai parent `9b1d153`, đúng thứ tự fixture/control trước comparator và `full_page`.
+- **Bug:** không phát hiện conflict hay regression; các dirty/untracked file ngoài phạm vi được giữ nguyên.
+
+#### Task 2 — baseline/control
+
+- **Bug:** `progressive-integration.test.js` thỉnh thoảng đọc `cancel_latency_ms.p50` khi metric replacement cancellation chưa được ghi. Race xảy ra vì `acceptScope()` có `await`, producer chạy ở task queue khác, và request cũ có thể đã bị `scopeDone` xóa khỏi `requests` trước lúc `releaseRequest(oldRequestId)` chạy; tái hiện 17/50 vòng.
+- **Thay đổi so với plan:** thêm Task 2a test-only, commit `0d47b5c`; production code không đổi.
+- **Cách xử lý:** nâng `eventually()` để `await` được async predicate và chờ `replacement.summary().cancel_latency_ms.p50` hữu hạn trước khi cho held pipeline chạy tiếp. Sau đó mới đóng control worklog ở `c35569a`.
+- **Kết quả:** baseline ổn định: Python `193 passed`, Node `9/9`, evaluator `98 passed`, policy batch count `25`.
+
+#### Task 3 — reading order
+
+- **Bug contract/thuật toán:** hai block có bbox giống hệt làm mọi geometry sort key hòa nhau; `Array.sort` stable sẽ vô tình giữ arrival order, trái invariant “không dùng arrival/vendor/block ID”. Đây không chỉ là fake input: hai detector region khác nhau có thể trở thành cùng bbox sau clamp vào crop boundary; dedupe IoU trước clamp không bảo vệ được ca này, dẫn tới OCR hai lần và hai block cùng tọa độ.
+- **Thay đổi so với plan:** ngoài helper/comparator extension ở `04e695e`, thêm follow-up `c806f14` chạm `server/pipeline.py`, `server/tests/test_pipeline.py`, `server/config.py` và guard/test phía extension — các file server này chưa nằm trong map Task 3 ban đầu.
+- **Cách xử lý hai lớp:** server dedupe exact normalized bbox ngay sau clamp và trước tạo crop/OCR; `orderPage()` reject duplicate full bbox để chặn cache cũ, fake caller hoặc regression upstream. Test phủ cả hai hoán vị input và ca hai bbox cùng x/y nhưng khác size vẫn hợp lệ.
+- **Cache migration:** bump dedupe version từ `iou-0.5-area-bbox-v2` lên `iou-0.5-area-clamp-exact-v3`, tránh tái dùng artifact cũ có duplicate geometry.
+- **Kết quả:** Python focused `25 passed`; comparator exact-match cả 3 fixture và toàn bộ synthetic/mutation gate PASS.
+
+#### Task 4 — direction/version/cache
+
+- **Lệch so với final plan:** không có thay đổi production ngoài phạm vi đã duyệt; implementation `1ee4b07` đi đúng ba normalization boundary (`acceptScope`, `offlineLedger`, `prewarmJob`) và đúng phân tầng key.
+- **Bug mới:** không phát hiện production bug. Các RED ban đầu (control direction rỗng, descriptor thiếu field, thiếu `layout_order`) là TDD signal dự kiến, không phải regression.
+- **Kết quả:** năm Node gate PASS, Python `17 passed, 1 warning`, `git diff --check` PASS.
+
+### Minor còn mở, không được ghi nhầm là đã sửa
+
+- Popup harness dùng mock `||=` nên có thể che regression xóa `readingDirection` hoặc `currentLanguages` khỏi HTML. Reviewer xếp Minor; chưa sửa trong Tasks 1–4.
+- Fake translation FIFO có race 429 trong harness. Scoped review xác nhận không phải regression production; không thêm workaround vào production, để lại cho đợt cleanup test harness.
+- Không chạy `server/tests/test_ocr.py` trong bất kỳ gate nào vì file này load model thật và ảnh fixture; finding tĩnh liên quan file được xác nhận bằng đọc source.
+
+- Đính chính ký hiệu ở amendment Task 3: comparator lọc trường role có giá trị literal source_page; đây không phải tên biến JavaScript.
+
+## 2026-08-05 — Spec B review fix Tasks 3–4
+
+- Review sau checkpoint Tasks 1–4: Tasks 1, 2 và 4 giữ nguyên PASS; Task 3 cần bổ sung hồ sơ clamp và regression test. Không revert code.
+- **Finding Important về `c806f14`:** commit này thực tế gồm hai thay đổi độc lập: (1) clamp detector bbox thành giao thật với work image, nên bbox tràn mép có đúng width/height phần còn nằm trong ảnh và region hoàn toàn ngoài ảnh bị loại; (2) dedupe exact normalized bbox sau clamp trước crop/OCR. Version `iou-0.5-area-clamp-exact-v3` bao phủ cả hai về cache identity.
+- Commit `f84bc3b` thêm regression test detector bbox `(-40, 10, 20, 20)` phải cho `analysis.regions` rỗng. Mutation về clamp semantics cũ cho RED đúng nguyên nhân: sinh region ma `(0, 10, 20, 20)`; khôi phục code hiện tại cho GREEN.
+- Task 3 cũng khóa hai hành vi đã duyệt bằng expected viết tay: connected-components được phép chain khi bridge đạt ngưỡng `0.5` với hai hàng; RTL/LTR sort trong band theo `bbox[0]` (cạnh trái), kể cả bbox lồng/lệch. Không đổi thuật toán.
+- `stable_block_id` vẫn giữ tham số ordinal để tránh API churn ngoài scope; pipeline truyền `0` có chủ ý vì exact normalized bbox giờ unique.
+- Commit `a7dab1a` sửa hai Minor Task 4: row cache có `reading_direction` sai được cô lập/xóa theo từng job thay vì làm `ready` reject hoặc nhân đôi job hợp lệ; popup gửi direction explicit cùng `srcLang`/`dstLang`, content normalize và snapshot direction của chính action nên click ngay sau đổi hướng không phụ thuộc `storage.onChanged`.
+- Commit `73c3c73` cập nhật design spec với clamp semantics, cache version và các quyết định Task 3/4 trên.
+- Verification của implementer: toàn bộ 10 Node test scripts PASS; `server/tests/test_pipeline.py` + `test_artifacts.py` = `28 passed`; syntax và `git diff --check` PASS. Không chạy `server/tests/test_ocr.py`.
+- Independent reviewer Terra medium: **PASS** cho cả spec compliance và task quality; không còn Critical/Important/Minor chặn Task 5.
+- Deferred sang Task 6: normalize field cấp scope trước job loop và map lỗi `orderPage()` vào taxonomy job/producer thay vì unhandled rejection. Fake translation FIFO race vẫn là harness flake đã biết.
+- Checkpoint mới: HEAD `73c3c73`; Task 5 chưa bắt đầu.
+
+
+## 2026-08-05 — Spec B Task 5: Portuguese dùng chung Latin OCR
+
+- Commit `fec60ac64069380a7a163b20f4df976d167e2cbb` thêm `pt` vào public language contract, popup và translator; `config.LANGS` là nguồn production duy nhất.
+- ES/PT vẫn là hai alias và hai OCR cache identity riêng, nhưng dùng chung một instance `PaddleLatinEngine` cache theo class. Paddle được pin `lang=es`, `ocr_version=PP-OCRv6`; không tạo engine `lang=pt` thứ hai.
+- Recognizer versions: JA `manga-ocr-v1`; ES/PT cùng `paddleocr-latin-ppocrv6-v1`. Acceptance `/health` giữ shape riêng và có recognizer PT.
+- Verification: server `199 passed, 2 warnings` với `server/tests/test_ocr.py` bị loại tuyệt đối; full Node gate `2×10/10`; fake probe xác nhận shared instance, một init và exact Paddle kwargs; `git diff --check` sạch.
+- `server/tests/test_ocr.py` chỉ đổi expectation tĩnh `['ja', 'es', 'pt']`, không chạy model/fixture test này.
+- External review: **PASS**, một Minor không chặn deferred sang Task 6 — `server/acceptance_app.py` quảng cáo PT nhưng `/ocr` và `/translate-items` còn allowlist `{ja, es}` tại dòng hiện hành 350 và 406. Task 6 phải thêm `pt` vào đúng hai literal và giữ gate từ chối `fr`.
+- Dirty user files và deletion `Welcome.md` được giữ nguyên, không stage. Chưa push; Task 6 chưa bắt đầu.
+
+## 2026-08-05 — Spec B Task 6: strict contract và full-page vertical slice
+
+- Commit `a37fbdec0dd2dd2d717a9fd754a07b98a475540b` thay microbatch bằng một request dịch toàn trang sau `image_done`; policy/prompt được bump nguyên tử thành `full-page-v1` và `comic-page-items-v2`.
+- `server/contracts.py` là nguồn Pydantic contract dùng chung cho production/acceptance: exact fields, bbox 4 số không âm, dimensions dương, direction bắt buộc, ID unique và `reading_order` dense theo array. Lỗi `/translate-items` dùng `error_code=invalid_request`; route khác giữ FastAPI `detail`.
+- Background tạo ordered shallow-copy bằng `MangaReadingOrder.orderPage()`, dùng decoded `image_w/image_h`, gửi tối đa một request/producer. Zero/all-hot không request; partial-hot gửi lại toàn page; response ID được validate nguyên tử trước cache/render; stale success chỉ warm cache.
+- Đã xóa toàn bộ queue 3/8, timer 250/500 ms, pending/attempted IDs, numeric batch counter, translation chain và phase `microbatch`. Năm scenario được duyệt đã rewrite sang semantics full-page.
+- Deferred review đã đóng: invalid direction phát đúng một `scope_error`; duplicate geometry và invalid dimensions đi qua `failProducer/completeJob` với error code máy đọc được; acceptance `/ocr-stream` và `/translate-items` nhận PT, vẫn từ chối `fr`.
+- Fresh controller verification: server `211 passed, 2 warnings` với `server/tests/test_ocr.py` bị loại tuyệt đối; Node `2×10/10`; deletion/static tripwire PASS; control baseline không đổi; staging rỗng.
+- Independent reviewer Terra medium: **Spec Compliance PASS**, **Task Quality Approved**, không có Critical/Important/Minor. Task 7 full offline/quality checkpoint chưa bắt đầu; chưa gọi vertical slice là đóng.
+
+### 2026-08-05 — External review Task 6
+
+- Verdict giữ **PASS**; không có Critical/Important. Hai Minor dưới đây chưa sửa và phải còn trong final whole-branch triage.
+- Minor 1: `replayPage()` chỉ replay translation khi `cacheHit`. Trong cửa sổ producer đã set `page.state=complete` nhưng chưa persist, consumer mới có thể gắn vào producer, nhận `image_done` thành công nhưng không nhận translation event. Correction đề xuất: replay khi `cacheHit || page.state === complete`; thêm regression test giữ completion persistence. Partial-hot vẫn không replay.
+- Minor 2: scenario `partial page replays complete blocks and requests only missing IDs` đã đổi assertion sang full-page nhưng chưa đổi tên. Rename thành `partial page requests the complete ordered page without replaying cached blocks`.
+- Không sửa production/test và không tạo commit ở checkpoint review này. Task 7 chưa bắt đầu.
+
+## 2026-08-05 — Spec B Task 7: full offline checkpoint
+
+- Commit checkpoint `18aa2f8ef435d91b92494495119583e9cfda05a2` chỉ cập nhật worklog Spec B; implementation được khóa tại `a37fbdec0dd2dd2d717a9fd754a07b98a475540b`.
+- Full server gate: `211 passed, 2 warnings`; lệnh có explicit `--ignore=server/tests/test_ocr.py`. File test OCR model thật không được chạy.
+- Full Node suite tuần tự: `10/10`; comparator reading-order exact-match đủ 3 source fixture và synthetic gates. Evaluator offline: `98 passed`; semantic policy batch count: `25`.
+- Frozen control tại `9b1d153...` không đổi; versions chốt `reading-order-v1`, ES/PT `paddleocr-latin-ppocrv6-v1`, `comic-page-items-v2`, `full-page-v1`; obsolete microbatch match = 0.
+- Independent reviewer Terra medium: PASS, không có Critical/Important/Minor cho Task 7. Đây chỉ là offline vertical-slice checkpoint; chưa tuyên bố runtime telemetry hoặc live quality hoàn tất.
+- Hai Minor Task 6 vẫn deferred: race replay cho consumer gắn vào producer đã complete trước persist, và tên scenario partial-page đã lỗi thời. Không sửa lén trong Task 7.
+- Không push; dirty files của user và deletion `Welcome.md` giữ nguyên. Dừng trước Task 8 để chờ review.
+
+
+## 2026-08-05 — Spec B post-checkpoint fix `8a4b08d`
+
+- Commit `8a4b08d3d43c9d8510bf4bef6ed8e24f1ff59679` đóng hai Minor Task 6: consumer đến sau khi producer đã `complete` nhưng còn chờ persist được replay translation; scenario partial-hot được đổi tên đúng semantics full-page.
+- Worklog Task 7 vẫn pin checkpoint implementation tại `a37fbdec0dd2dd2d717a9fd754a07b98a475540b`; `8a4b08d` là production fix phát sinh sau checkpoint, không viết lại lịch sử evidence.
+- Fresh verification tại HEAD `8a4b08d`: server `211 passed, 2 warnings` với explicit `--ignore=server/tests/test_ocr.py`; Node `10/10`. Không chạy model/fixture test `server/tests/test_ocr.py`.
+- Follow-up mở cho final whole-branch triage: consumer có thể gắn vào terminal producer `partial` sau vòng `completeJob()` nhưng trước `producers.delete()`, rồi không nhận `image_done`/`scope_done`. Correction đề xuất là xóa producer khỏi map trước khi await `removeProducerJobs()` trong cả `finishProducer()` và `failProducer()`; chưa sửa production trong lượt cập nhật hồ sơ này.
+
+
+## 2026-08-05 — Spec B Task 8 runtime + final whole-branch review
+
+- Runtime được capture trên `feat/v3` từ build `bec403b`; worklog telemetry: `b46b716`, amendment evidence: `78bcf2f`.
+- JA1 RTL network: 21 block, `ocr_done=38 ms`, `first_overlay=23782 ms`, đúng một batch `full_page`.
+- JA1 translation-memory hot: 21 block, `first_overlay=26 ms`, `translation_batches=[]`, `translation_calls=0`; đây không phải page-artifact cache hit.
+- JA2 RTL post-reset: 17 block, `ocr_done=35 ms`, `first_overlay=3314 ms`, đúng một batch `full_page`. Popup prewarm được quan sát nên không gọi đây là model-cold.
+- LTR manual: popup/content/background/request đều mang `reading_direction=ltr`, kích thước 1105×868, 17 item.
+- PT public: OCR/request mang `src_lang=pt`, RTL, kích thước 500×782, 7 item; `ocr_done=5095 ms`, `first_overlay=48725 ms`.
+- Shared Latin observation có giới hạn: cùng PID server, Paddle creation markers `0 → 4` khi PT và vẫn `4` sau ES prewarm; chỉ kết luận ES không tạo sequence thứ hai trong cùng process, không suy marker thành proof unique instance.
+- Trade-off được xác nhận: mọi network `full_page` chỉ có translation/overlay sau `ocr_done`; đây là đánh đổi context toàn trang, không phải claim tối ưu latency.
+
+### Final review fix
+
+- Final whole-branch review phát hiện race merge-blocking: late consumer có thể gắn vào terminal `partial` producer trong cửa sổ awaited cleanup và mất `image_done`/`scope_done`.
+- Commit `3fc910d` xóa producer khỏi map trước `await removeProducerJobs()` ở cả `finishProducer()` và `failProducer()`; regression giữ đúng cleanup window bao phủ `partial` và `failed`.
+- Popup harness Minor cũng đóng: bỏ fallback mock cho `readingDirection`/`currentLanguages`.
+- Regression RED: timeout chờ `scope_done`; mutation đưa delete trở lại sau await tái tạo lỗi. GREEN: focused background/popup và full Node suite `10/10`.
+- Commit `9353618` đóng follow-up trong worklog và pin đúng SHA production `3fc910d`; net diff không còn artifact `.superpowers/sdd`.
+
+### Trạng thái checkpoint
+
+- HEAD hiện tại: `935361855cc34d10ca0abd6d8e3becf9d0fa2f7a`.
+- Frozen control Spec A và privacy scan sạch; không chạy live-quality hay `server/tests/test_ocr.py`.
+- Task 8 review và final-fix scoped re-review đều PASS; không còn finding Critical/Important mở.
+- Chưa gọi Spec B hoàn tất cho tới khi người dùng duyệt checkpoint cuối. Việc xóa `Welcome.md` vẫn được giữ nguyên và không nằm trong commit Spec B.
+
+## 2026-08-05 — Spec B post-final review stale-stage follow-up
+
+- Review sau `9353618` phát hiện cửa sổ hẹp: producer đã bị xóa khỏi map nhưng OCR/analysis stage cũ chưa release trong lúc `removeProducerJobs()` đang await; request muộn sau lỗi trước `ocr_done` có thể bám vào promise đã reject và fail mà không retry.
+- Commit `1855a2700d35362619208579cca185aab14782ff` đổi cả `finishProducer()` và `failProducer()` sang thứ tự đồng bộ `releaseProducerStages()` → `producers.delete()` → `await removeProducerJobs()`.
+- Regression `pre-ocr-failed`: thứ tự cũ RED `{translated:0, failed:1}`; bản sửa GREEN `{translated:1, failed:0}`, tổng call `source=2`, `ocr=1`, `translate=1`.
+- Focused `background-progressive.test.js` và full Node suite `10/10` PASS; Terra medium re-review không còn finding Critical/Important/Minor. `server/tests/test_ocr.py` không chạy.
+- Worklog record commit: `32718b2`; Spec B vẫn chờ người dùng duyệt checkpoint cuối.
+
+## 2026-08-05 — Spec B closed
+
+- Người dùng duyệt checkpoint cuối: Spec B `reading-order-full-page-translation` hoàn tất, không còn finding mở; pull request đã được người dùng tạo và nhánh kế tiếp là `feat/v4`.
+- Final implementation: `1855a2700d35362619208579cca185aab14782ff`; pre-closure worklog: `32718b2c1291fd7a9db3ee331b1207acb639aac5`; verification HEAD trên `feat/v4`: `e0e948e58c3e00513e28f15fdb139eac5415dbe1`.
+- Fresh close gate: Python `211 passed, 2 warnings`; Node `10/10`; `server/tests/test_ocr.py` bị loại và không chạy.
+- Chấp nhận trade-off: Spec B ưu tiên reading order tất định, chất lượng context toàn trang và một translation request mỗi page; cold first-overlay latency là debt riêng, không phải claim tối ưu latency.
+- Các dòng HEAD/checkpoint cũ phía trên là snapshot lịch sử; mục này là trạng thái đóng hiện hành. Bước tiếp theo: brainstorm Spec C về overlay an toàn.

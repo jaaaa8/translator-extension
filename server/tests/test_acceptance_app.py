@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from server import config
 from server.acceptance_app import (
     AcceptanceConfig,
     AcceptanceState,
@@ -16,6 +17,12 @@ from server.acceptance_app import (
     state,
     wait_gate,
 )
+
+
+def version_shape(value):
+    if isinstance(value, dict):
+        return {key: version_shape(child) for key, child in sorted(value.items())}
+    return str
 
 
 def client() -> TestClient:
@@ -68,23 +75,47 @@ def ocr_form(page: str, analysis: str, ocr: str):
     }
 
 
+def translate_body(items=None, **overrides):
+    body = {
+        "items": items or [
+            {"id": "A-1", "text": "A:block-1", "reading_order": 0, "bbox": [1, 2, 3, 4]}
+        ],
+        "src_lang": "es",
+        "dst_lang": "vi",
+        "page_width": 800,
+        "page_height": 1200,
+        "reading_direction": "rtl",
+    }
+    body.update(overrides)
+    return body
+
+
 def ndjson(response):
     return [json.loads(line) for line in response.text.splitlines() if line.strip()]
 
 
 def test_health_exposes_complete_fixed_versions_for_extension_keys():
     with client() as http:
-        assert http.get("/health").json()["versions"] == {
+        payload = http.get("/health").json()
+        assert "langs" not in payload
+        assert version_shape(payload["versions"]) == version_shape(config.PIPELINE_VERSIONS)
+        assert set(payload["versions"]["recognizers"]) == set(
+            config.PIPELINE_VERSIONS["recognizers"]
+        )
+        assert payload["versions"]["layout_order"] == "reading-order-v1"
+        assert payload["versions"] == {
             "detector": "acceptance-detector-v1",
             "dedupe": "acceptance-dedupe-v1",
             "prep": "acceptance-prep-v1",
             "recognizers": {
                 "ja": "acceptance-recognizer-ja-v1",
                 "es": "acceptance-recognizer-es-v1",
+                "pt": "acceptance-recognizer-pt-v1",
             },
             "translator_model": "acceptance-translator-v1",
             "prompt": "acceptance-prompt-v1",
             "policy": "acceptance-policy-v1",
+            "layout_order": "reading-order-v1",
             "page_schema": "acceptance-page-v1",
         }
 
@@ -346,21 +377,15 @@ def test_translation_batch_fault_is_consumed_once_and_ids_stay_exact():
             "fail": {"translation_batch": ["D"]},
             "blocks": {"D": 4},
         })
-        first = http.post("/translate-items", json={
-            "src_lang": "ja",
-            "dst_lang": "vi",
-            "items": [
-                {"id": "D-1", "text": "D:block-1"},
-                {"id": "D-2", "text": "D:block-2"},
-                {"id": "D-3", "text": "D:block-3"},
-            ],
-        })
+        first = http.post("/translate-items", json=translate_body([
+            {"id": "D-1", "text": "D:block-1", "reading_order": 0, "bbox": [1, 2, 3, 4]},
+            {"id": "D-2", "text": "D:block-2", "reading_order": 1, "bbox": [5, 6, 7, 8]},
+            {"id": "D-3", "text": "D:block-3", "reading_order": 2, "bbox": [9, 10, 11, 12]},
+        ], src_lang="ja"))
         assert first.status_code == 502
-        second = http.post("/translate-items", json={
-            "src_lang": "ja",
-            "dst_lang": "vi",
-            "items": [{"id": "D-4", "text": "D:block-4"}],
-        })
+        second = http.post("/translate-items", json=translate_body([
+            {"id": "D-4", "text": "D:block-4", "reading_order": 0, "bbox": [13, 14, 15, 16]},
+        ], src_lang="ja"))
         assert second.status_code == 200
         assert second.json() == {
             "items": [{"id": "D-4", "translation": "vi:D:block-4"}]
@@ -375,14 +400,10 @@ def test_translation_holds_then_returns_each_input_id_once():
             "fail": {},
             "blocks": {"C": 2},
         })
-        body = {
-            "src_lang": "es",
-            "dst_lang": "vi",
-            "items": [
-                {"id": "C-1", "text": "C:block-1"},
-                {"id": "C-2", "text": "C:block-2"},
-            ],
-        }
+        body = translate_body([
+            {"id": "C-1", "text": "C:block-1", "reading_order": 0, "bbox": [1, 2, 3, 4]},
+            {"id": "C-2", "text": "C:block-2", "reading_order": 1, "bbox": [5, 6, 7, 8]},
+        ])
         with ThreadPoolExecutor(max_workers=1) as pool:
             pending = pool.submit(http.post, "/translate-items", json=body)
             assert wait_for_event(
@@ -399,27 +420,62 @@ def test_translation_holds_then_returns_each_input_id_once():
 def test_translation_rejects_unsupported_duplicate_and_mixed_page_inputs():
     with client() as http:
         post_json(http, "/__acceptance/reset")
-        unsupported = http.post("/translate-items", json={
-            "src_lang": "fr",
-            "items": [{"id": "A-1", "text": "A:block-1"}],
-        })
+        unsupported = http.post(
+            "/translate-items", json=translate_body(src_lang="fr")
+        )
         assert unsupported.status_code == 422
-        duplicate = http.post("/translate-items", json={
-            "src_lang": "ja",
-            "items": [
-                {"id": "A-1", "text": "A:block-1"},
-                {"id": "A-1", "text": "A:block-2"},
-            ],
-        })
+        duplicate = http.post("/translate-items", json=translate_body([
+            {"id": "A-1", "text": "A:block-1", "reading_order": 0, "bbox": [1, 2, 3, 4]},
+            {"id": "A-1", "text": "A:block-2", "reading_order": 1, "bbox": [5, 6, 7, 8]},
+        ], src_lang="ja"))
         assert duplicate.status_code == 422
-        mixed = http.post("/translate-items", json={
-            "src_lang": "ja",
-            "items": [
-                {"id": "A-1", "text": "A:block-1"},
-                {"id": "B-1", "text": "B:block-1"},
-            ],
-        })
+        assert duplicate.json() == {
+            "error": "duplicate input id",
+            "error_code": "invalid_request",
+        }
+        mixed = http.post("/translate-items", json=translate_body([
+            {"id": "A-1", "text": "A:block-1", "reading_order": 0, "bbox": [1, 2, 3, 4]},
+            {"id": "B-1", "text": "B:block-1", "reading_order": 1, "bbox": [5, 6, 7, 8]},
+        ], src_lang="ja"))
         assert mixed.status_code == 422
+
+
+def test_acceptance_ocr_and_translation_allow_pt_but_reject_fr():
+    with client() as http:
+        post_json(http, "/__acceptance/reset")
+        pt_ocr = ocr_form("A", "analysis-pt", "ocr-pt")
+        pt_ocr["data"]["src_lang"] = "pt"
+        assert http.post("/ocr-stream", **pt_ocr).status_code == 200
+
+        fr_ocr = ocr_form("A", "analysis-fr", "ocr-fr")
+        fr_ocr["data"]["src_lang"] = "fr"
+        assert http.post("/ocr-stream", **fr_ocr).status_code == 422
+        assert http.post(
+            "/translate-items", json=translate_body(src_lang="pt")
+        ).status_code == 200
+        assert http.post(
+            "/translate-items", json=translate_body(src_lang="fr")
+        ).status_code == 422
+
+
+def test_translate_items_maps_shared_contract_errors_only_on_exact_path():
+    invalid_bodies = [
+        translate_body(extra=True),
+        translate_body([
+            {"id": "A-1", "text": "A:block-1", "reading_order": 0, "bbox": [1, 2, 3, 4]},
+            {"id": "A-2", "text": "A:block-2", "reading_order": 2, "bbox": [5, 6, 7, 8]},
+        ]),
+    ]
+    with client() as http:
+        for body in invalid_bodies:
+            response = http.post("/translate-items", json=body)
+            assert response.status_code == 422
+            assert set(response.json()) == {"error", "error_code"}
+            assert response.json()["error_code"] == "invalid_request"
+
+        other = http.post("/__acceptance/reset", json={"unexpected": True})
+        assert other.status_code == 422
+        assert set(other.json()) == {"detail"}
 
 
 def test_fixture_declares_all_acceptance_modes_and_panel_controls():

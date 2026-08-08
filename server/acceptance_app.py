@@ -8,8 +8,11 @@ from hashlib import sha256
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from .contracts import TranslateItemsBody, translate_items_validation_error
 
 PAGES = frozenset("ABCD")
 STAGES = frozenset({"source", "ocr", "translation"})
@@ -72,17 +75,6 @@ class AcceptanceConfig(BaseModel):
         if any(value < 1 or value > 16 for value in self.blocks.values()):
             raise ValueError("block count must be between 1 and 16")
         return self
-
-
-class TranslateItem(BaseModel):
-    id: str
-    text: str
-
-
-class TranslateItemsBody(BaseModel):
-    items: list[TranslateItem]
-    src_lang: str
-    dst_lang: str = "vi"
 
 
 def page_png(page: str) -> bytes:
@@ -259,6 +251,7 @@ async def control_request(request: Request) -> None:
 
 
 app = FastAPI()
+app.add_exception_handler(RequestValidationError, translate_items_validation_error)
 state = AcceptanceState()
 control_dependencies = [Depends(control_request)]
 
@@ -299,10 +292,12 @@ async def health():
             "recognizers": {
                 "ja": "acceptance-recognizer-ja-v1",
                 "es": "acceptance-recognizer-es-v1",
+                "pt": "acceptance-recognizer-pt-v1",
             },
             "translator_model": "acceptance-translator-v1",
             "prompt": "acceptance-prompt-v1",
             "policy": "acceptance-policy-v1",
+            "layout_order": "reading-order-v1",
             "page_schema": "acceptance-page-v1",
         },
     }
@@ -345,7 +340,7 @@ async def ocr_stream(
     src_lang: str = Form(...),
     image: UploadFile | None = File(None),
 ):
-    if src_lang not in {"ja", "es"}:
+    if src_lang not in {"ja", "es", "pt"}:
         return JSONResponse(status_code=422, content={"error": "unsupported src_lang"})
     if image is None:
         page = await state.analysis_page(analysis_key)
@@ -401,10 +396,8 @@ async def ocr_stream(
 
 @app.post("/translate-items")
 async def translate_items(body: TranslateItemsBody, request: Request):
-    if body.src_lang not in {"ja", "es"}:
+    if body.src_lang not in {"ja", "es", "pt"}:
         return JSONResponse(status_code=422, content={"error": "unsupported src_lang"})
-    if len({item.id for item in body.items}) != len(body.items):
-        return JSONResponse(status_code=422, content={"error": "duplicate input id"})
     pages = {item.text.split(":", 1)[0] for item in body.items}
     if len(pages) != 1 or not pages <= PAGES:
         return JSONResponse(status_code=422, content={"error": "mixed or unknown page"})

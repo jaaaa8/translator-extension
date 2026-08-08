@@ -150,6 +150,16 @@ class DupeDetector:
         return regions((10, 10, 100, 50), (10, 10, 101, 50))
 
 
+class ClampDuplicateDetector:
+    def detect(self, img):
+        return regions((-10, 10, 20, 20), (0, 10, 10, 20))
+
+
+class OutsideDetector:
+    def detect(self, img):
+        return regions((-40, 10, 20, 20))
+
+
 def test_duplicate_regions_are_ocred_once():
     engine = CountingEngine()
     pipeline = Pipeline(
@@ -161,6 +171,34 @@ def test_duplicate_regions_are_ocred_once():
     out = pipeline.ocr_image(encode_png(300, 200), "es")
     assert engine.calls == 1
     assert out["blocks"] == [{"bbox": [10, 10, 101, 50], "src_text": "hola"}]
+
+
+def test_regions_equal_after_clamp_are_ocred_once():
+    engine = CountingEngine()
+    pipeline = Pipeline(
+        detector=ClampDuplicateDetector(),
+        ocr=SharedOcr(engine),
+        translator=FakeTranslator(),
+    )
+
+    analysis = pipeline.analyze(encode_png(300, 200), None, "clamp-dedupe")
+    events = list(pipeline.iter_ocr("clamp-dedupe", "es", "clamp-dedupe-ocr"))
+    blocks = [event for event in events if event["type"] == "ocr_block"]
+
+    assert (len(analysis.regions), engine.calls, len(blocks)) == (1, 1, 1)
+    assert blocks[0]["bbox"] == [0, 10, 10, 20]
+
+
+def test_region_fully_outside_image_is_dropped():
+    pipeline = Pipeline(
+        detector=OutsideDetector(),
+        ocr=FakeOcr(),
+        translator=FakeTranslator(),
+    )
+
+    analysis = pipeline.analyze(encode_png(300, 200), None, "outside")
+
+    assert analysis.regions == ()
 
 
 class CountingEngine:
@@ -232,6 +270,19 @@ class CountingDetector:
         return [TextRegion(bbox=(10, 10, 40, 20), vertical=False)]
 
 
+class BlockingCountingDetector(CountingDetector):
+    def __init__(self):
+        super().__init__()
+        self.entered = Event()
+        self.release = Event()
+
+    def detect(self, image):
+        self.calls += 1
+        self.entered.set()
+        assert self.release.wait(1)
+        return [TextRegion(bbox=(10, 10, 40, 20), vertical=False)]
+
+
 class ThreeRegionDetector:
     def detect(self, image):
         return [
@@ -279,6 +330,35 @@ def test_analysis_is_reused_across_recognizers():
     data = encode_png(300, 200)
     pipeline.analyze(data, None, "a1")
     pipeline.analyze(data, None, "a1")
+    assert detector.calls == 1
+
+
+def test_analyze_with_status_reports_direct_cache_hit():
+    pipeline = make_pipeline()
+    image_bytes = encode_png(300, 200)
+
+    _, first_hit = pipeline.analyze_with_status(image_bytes, None, "same")
+    _, second_hit = pipeline.analyze_with_status(image_bytes, None, "same")
+
+    assert (first_hit, second_hit) == (False, True)
+
+
+def test_analyze_with_status_reports_hit_after_waiting_for_lock():
+    detector = BlockingCountingDetector()
+    pipeline = Pipeline(detector=detector, ocr=FakeOcr(), translator=FakeTranslator())
+    image_bytes = encode_png(300, 200)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(pipeline.analyze_with_status, image_bytes, None, "same")
+        assert detector.entered.wait(1)
+        second = pool.submit(pipeline.analyze_with_status, image_bytes, None, "same")
+        detector.release.set()
+        cold_artifact, cold_hit = first.result(timeout=2)
+        waited_artifact, waited_hit = second.result(timeout=2)
+
+    assert cold_hit is False
+    assert waited_hit is True
+    assert waited_artifact is cold_artifact
     assert detector.calls == 1
 
 

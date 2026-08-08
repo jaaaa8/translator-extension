@@ -1,15 +1,19 @@
 from contextlib import asynccontextmanager
 import asyncio
 import json
+import time
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from . import config
+from .contracts import (
+    TranslateItemsBody,
+    translate_items_validation_error,
+)
 from .translator import TranslateError, _normalize_items
-
-LANGS = ["ja", "es"]
 
 _pipeline = None
 
@@ -30,6 +34,7 @@ async def lifespan(app):
 
 
 app = FastAPI(lifespan=lifespan)
+app.add_exception_handler(RequestValidationError, translate_items_validation_error)
 
 
 @app.get("/health")
@@ -37,7 +42,7 @@ def health():
     return {
         "status": "ok",
         "device": config.DEVICE,
-        "langs": LANGS,
+        "langs": config.LANGS,
         "versions": config.PIPELINE_VERSIONS,
     }
 
@@ -66,7 +71,7 @@ def ocr(
     crop_right: float | None = Form(None),
     crop_bottom: float | None = Form(None),
 ):
-    if src_lang not in LANGS:
+    if src_lang not in config.LANGS:
         return JSONResponse(status_code=422, content={"error": f"src_lang không hỗ trợ: {src_lang}"})
     crop_or_error = _validated_crop(crop_left, crop_top, crop_right, crop_bottom)
     if isinstance(crop_or_error, JSONResponse):
@@ -91,7 +96,7 @@ async def ocr_stream(
     crop_right: float | None = Form(None),
     crop_bottom: float | None = Form(None),
 ):
-    if src_lang not in LANGS:
+    if src_lang not in config.LANGS:
         return JSONResponse(status_code=422, content={"error": f"src_lang không hỗ trợ: {src_lang}"})
     crop_or_error = _validated_crop(crop_left, crop_top, crop_right, crop_bottom)
     if isinstance(crop_or_error, JSONResponse):
@@ -103,16 +108,24 @@ async def ocr_stream(
         return JSONResponse(status_code=409, content={"error": "analysis_missing"})
 
     async def stream():
+        analysis_started = time.perf_counter()
         try:
             analysis = cached_analysis
             if analysis is None:
-                analysis = await asyncio.to_thread(pipeline.analyze, data, crop_or_error, analysis_key)
+                analysis, analysis_cache_hit = await asyncio.to_thread(
+                    pipeline.analyze_with_status, data, crop_or_error, analysis_key
+                )
+            else:
+                analysis_cache_hit = True
+            analysis_ms = max(0, round((time.perf_counter() - analysis_started) * 1000))
             yield _ndjson({
                 "type": "analysis_ready",
                 "analysis_key": analysis_key,
                 "image_w": analysis.image_w,
                 "image_h": analysis.image_h,
                 "regions": len(analysis.regions),
+                "analysis_ms": analysis_ms,
+                "analysis_cache_hit": analysis_cache_hit,
             })
             iterator = pipeline._iter_ocr(analysis, analysis_key, src_lang, ocr_key, lambda: False)
             while not await request.is_disconnected():
@@ -141,34 +154,34 @@ def translate_texts(body: TranslateTextsBody):
         return JSONResponse(status_code=502, content={"error": f"gemini: {e}"})
 
 
-class TranslateItem(BaseModel):
-    id: str
-    text: str
-
-
-class TranslateItemsBody(BaseModel):
-    items: list[TranslateItem]
-    src_lang: str
-    dst_lang: str = "vi"
-
-
 @app.post("/translate-items")
 def translate_items(body: TranslateItemsBody):
-    if body.src_lang not in LANGS:
+    if body.src_lang not in config.LANGS:
         return JSONResponse(
             status_code=422,
-            content={"error": f"src_lang khÃ´ng há»— trá»£: {body.src_lang}"},
+            content={"error": f"src_lang không hỗ trợ: {body.src_lang}"},
         )
     rows = [item.model_dump() for item in body.items]
-    if len({row["id"] for row in rows}) != len(rows):
-        return JSONResponse(status_code=422, content={"error": "duplicate input id"})
     try:
         translated = get_pipeline().translator.translate_items(
-            rows, body.src_lang, body.dst_lang
+            rows,
+            body.src_lang,
+            body.dst_lang,
+            page_width=body.page_width,
+            page_height=body.page_height,
+            reading_direction=body.reading_direction,
         )
         return {"items": _normalize_items(translated, [row["id"] for row in rows])}
-    except (TranslateError, ValueError) as error:
-        return JSONResponse(status_code=502, content={"error": f"gemini: {error}"})
+    except TranslateError as error:
+        return JSONResponse(
+            status_code=429 if error.code == 429 else 502,
+            content={"error": f"gemini: {error}", "error_code": error.error_kind or "generation_error"},
+        )
+    except ValueError as error:
+        return JSONResponse(
+            status_code=502,
+            content={"error": f"gemini: {error}", "error_code": "invalid_response"},
+        )
 
 
 @app.post("/translate")
@@ -177,7 +190,7 @@ def translate(
     src_lang: str = Form(...),
     target_lang: str = Form("vi"),
 ):
-    if src_lang not in LANGS:
+    if src_lang not in config.LANGS:
         return JSONResponse(status_code=422, content={"error": f"src_lang không hỗ trợ: {src_lang}"})
     data = image.file.read()
     try:

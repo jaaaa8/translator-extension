@@ -1,0 +1,427 @@
+{
+  "telemetry_validation": {
+    "capture_date_local": "2026-08-03",
+    "commit": "1b7308ced8e7225701b6717cec2780106f9b104f",
+    "browser_workflow": "real Chrome tab + installed extension + real popup",
+    "environment": {
+      "os": "Microsoft Windows 11 Pro 10.0.26200",
+      "cpu": "11th Gen Intel Core i5-11400H @ 2.70GHz",
+      "gpu": "NVIDIA GeForce RTX 3050 Laptop GPU",
+      "gpu_driver": "581.95",
+      "device": "cuda"
+    },
+    "versions": {
+      "detector": "comic-text-detector-v1",
+      "dedupe": "iou-0.5-area-bbox-v2",
+      "preprocessing": "upscale48-border8-v1",
+      "recognizer_ja": "manga-ocr-v1",
+      "recognizer_latin": "paddleocr-es-v1",
+      "translator_model": "gemini-flash-lite-latest",
+      "prompt": "comic-items-v1",
+      "policy": "microbatch-3-8-250-500-v1",
+      "page_schema": "page-v1"
+    },
+    "fixture_sha256": {
+      "mangadex_pt": "8c25aea5e76a9264d83698ee4953b4e037593a49c05b2517de4ebd14a1d84c60",
+      "s-manga_ja_1": "267ac9ea29bdf0bfbb3686e2806a77b0c52d1178f2810c426ba357b277976023",
+      "s-manga_ja_2": "7d6867a5c37db97d1f6ce32d5e5fd082d3bf3ac8e9f6914a2497b51f1fd0b9b0"
+    },
+    "baseline": {
+      "mangadex_pt": [
+        ["b06"],
+        ["b03"],
+        ["b01", "b02"],
+        ["b05"],
+        ["b07", "b04"]
+      ],
+      "s-manga_ja_1": [
+        ["b20", "b05"],
+        ["b11", "b21", "b14", "b06", "b15", "b10", "b01", "b13", "b04", "b07", "b16"],
+        ["b17", "b12", "b19", "b18", "b08", "b09", "b02", "b03"]
+      ],
+      "s-manga_ja_2": [
+        ["b08", "b06"],
+        ["b01", "b02", "b16", "b03", "b17", "b15", "b09", "b12", "b14", "b11", "b13"],
+        ["b10", "b07", "b05", "b04"]
+      ]
+    },
+    "baseline_mapping": "translation_batches[].block_ids từ run browser đã chọn được ghép một-một với bbox fixture; không suy dựng từ timer hay reading_order",
+    "browser_captures": {
+      "s-manga_ja_1": {
+        "cold": {
+          "popup_result": {"images": 1, "blocks": 21, "failed": 0},
+          "sample": {
+            "queue_wait_ms": 1,
+            "fetch_ms": 0,
+            "analysis_ms": 1135,
+            "first_ocr_ms": 8767,
+            "ocr_done_ms": 11147,
+            "first_translation_ms": 10501,
+            "final_translation_ms": 14158,
+            "first_overlay_ms": 10509,
+            "total_ms": 14166,
+            "cancel_latency_ms": null,
+            "page_metrics": [
+              {
+                "job_id": "93365202-8990-4633-a6d8-2a42eb44820a",
+                "page_artifact_key": "4c9f210df95c997b8f00bc557939e416b01d2dcbef51b7f6eb84e5ccece0ecc5",
+                "cache_hit": false,
+                "error_code": null,
+                "queue_wait_ms": 1,
+                "fetch_ms": null,
+                "analysis_ms": 1135,
+                "analysis_cache_hit": false,
+                "first_ocr_ms": 8767,
+                "ocr_done_ms": 11147,
+                "first_translation_ms": 10501,
+                "final_translation_ms": 14158,
+                "first_overlay_ms": 10509,
+                "accepted_offset_ms": 3,
+                "total_ms": 14163,
+                "recognized": 21,
+                "failed": 0,
+                "translation_batches": [
+                  {
+                    "batch_id": 1,
+                    "phase": "microbatch",
+                    "block_ids": ["a305a2fd42de7d37e1ac0b63", "87c118b18175f7032f776d38"],
+                    "block_count": 2,
+                    "started_ms": 9019,
+                    "duration_ms": 1482,
+                    "status": "success",
+                    "cache_hit": false,
+                    "error_code": null
+                  },
+                  {
+                    "batch_id": 2,
+                    "phase": "microbatch",
+                    "block_ids": ["29c55dd920ce41af8188fa22", "a643946859176e086017cc0b", "ccc7adcaf8d1c44d336f63ce", "10d7ef86780a4e463bdd137a", "20c3fdf782f77d2529cadafd", "9840fff59a4f3580b5ac4487", "08f12136217e2b890065356d", "72a493893bbf98c76471a022", "8f333b2a6e4bb1c78f899f4c", "47bd8c3a5b2ef0b2cc51dd21", "7833a92a84d21fec7fa1e76d"],
+                    "block_count": 11,
+                    "started_ms": 10504,
+                    "duration_ms": 2131,
+                    "status": "success",
+                    "cache_hit": false,
+                    "error_code": null
+                  },
+                  {
+                    "batch_id": 3,
+                    "phase": "microbatch",
+                    "block_ids": ["6efaa03613358aad572638ee", "1eb4875012c5509490345b85", "261d2707c92a7894a330ac92", "02e781f32ae323cbc481b365", "232b78d0bd7fd4f2e3c43a69", "2340fa4fa9c128266972c7f0", "c2ca37d56caf37609744ab16", "e8c3118f5c3008506ff95695"],
+                    "block_count": 8,
+                    "started_ms": 12638,
+                    "duration_ms": 1520,
+                    "status": "success",
+                    "cache_hit": false,
+                    "error_code": null
+                  }
+                ]
+              }
+            ],
+            "counter_records": [{"translation_calls": 3, "rate_limited": 0, "stale_work": 0}]
+          }
+        },
+        "warm": {
+          "popup_result": "Khôi phục từ cache",
+          "page_status": {"background": 0, "cached": 1, "failed": 0},
+          "sample": {
+            "queue_wait_ms": null,
+            "fetch_ms": 0,
+            "analysis_ms": 0,
+            "first_ocr_ms": null,
+            "ocr_done_ms": null,
+            "first_translation_ms": null,
+            "final_translation_ms": null,
+            "first_overlay_ms": 13,
+            "total_ms": 3,
+            "cancel_latency_ms": null,
+            "page_metrics": [
+              {
+                "job_id": "c87512cd-c97e-4bfa-99d4-5895242bc719",
+                "page_artifact_key": "4c9f210df95c997b8f00bc557939e416b01d2dcbef51b7f6eb84e5ccece0ecc5",
+                "cache_hit": true,
+                "error_code": null,
+                "queue_wait_ms": null,
+                "fetch_ms": null,
+                "analysis_ms": null,
+                "analysis_cache_hit": null,
+                "first_ocr_ms": null,
+                "ocr_done_ms": null,
+                "first_translation_ms": null,
+                "final_translation_ms": null,
+                "first_overlay_ms": 13,
+                "accepted_offset_ms": null,
+                "total_ms": null,
+                "recognized": 21,
+                "failed": 0,
+                "translation_batches": []
+              }
+            ],
+            "counter_records": []
+          }
+        }
+      },
+      "s-manga_ja_2": {
+        "cold": {
+          "popup_result": {"images": 1, "blocks": 17, "failed": 0},
+          "page_status": {"background": 0, "cached": 1, "failed": 0},
+          "sample": {
+            "queue_wait_ms": 1,
+            "fetch_ms": 0,
+            "analysis_ms": 861,
+            "first_ocr_ms": 7419,
+            "ocr_done_ms": 9127,
+            "first_translation_ms": 8914,
+            "final_translation_ms": 12096,
+            "first_overlay_ms": 8954,
+            "total_ms": 12103,
+            "cancel_latency_ms": null,
+            "page_metrics": [
+              {
+                "job_id": "e7d69c37-eaad-422d-bb19-ae8cec6d924a",
+                "page_artifact_key": "24c42bf0d40e6c65c5d3210ce8186ae27674094c4288648f1eb3a4c5e9aec7c7",
+                "cache_hit": false,
+                "error_code": null,
+                "queue_wait_ms": 1,
+                "fetch_ms": null,
+                "analysis_ms": 861,
+                "analysis_cache_hit": false,
+                "first_ocr_ms": 7419,
+                "ocr_done_ms": 9127,
+                "first_translation_ms": 8914,
+                "final_translation_ms": 12096,
+                "first_overlay_ms": 8954,
+                "accepted_offset_ms": 3,
+                "total_ms": 12099,
+                "recognized": 17,
+                "failed": 0,
+                "translation_batches": [
+                  {
+                    "batch_id": 1,
+                    "phase": "microbatch",
+                    "block_ids": ["29f7281088b9620b73ff8901", "b3cc6fca144c0e57d9262247"],
+                    "block_count": 2,
+                    "started_ms": 7680,
+                    "duration_ms": 1234,
+                    "status": "success",
+                    "cache_hit": false,
+                    "error_code": null
+                  },
+                  {
+                    "batch_id": 2,
+                    "phase": "microbatch",
+                    "block_ids": ["2a774b1fee5049a8392e43f9", "684f041ded16ee7198ad4126", "c3ff23f2a44010424d98eea9", "cee380bbe65b382428434eb4", "f281d9bac2e3374f5e6f649d", "081f6ec0ad93303978a3d5d8", "151e3cd1e8e753946eddc044", "9f582932bc0a0df4dec6ff15", "c7a92a90a232f658001ec41b", "5f7d89f1956cc41d53fd87c2", "4434fee91d8d74f347d3e803"],
+                    "block_count": 11,
+                    "started_ms": 8916,
+                    "duration_ms": 2055,
+                    "status": "success",
+                    "cache_hit": false,
+                    "error_code": null
+                  },
+                  {
+                    "batch_id": 3,
+                    "phase": "microbatch",
+                    "block_ids": ["54c01a61220007494e19a85a", "119f9bcc4c3df2ffd837e9e7", "008c3f713fb313c96240fe62", "663c038829afd4fd2252ed1f"],
+                    "block_count": 4,
+                    "started_ms": 10973,
+                    "duration_ms": 1123,
+                    "status": "success",
+                    "cache_hit": false,
+                    "error_code": null
+                  }
+                ]
+              }
+            ],
+            "counter_records": [{"translation_calls": 3, "rate_limited": 0, "stale_work": 0}]
+          }
+        },
+        "warm": {
+          "popup_result": "Khôi phục từ cache",
+          "page_status": {"background": 0, "cached": 1, "failed": 0},
+          "sample": {
+            "queue_wait_ms": null,
+            "fetch_ms": 0,
+            "analysis_ms": 0,
+            "first_ocr_ms": null,
+            "ocr_done_ms": null,
+            "first_translation_ms": null,
+            "final_translation_ms": null,
+            "first_overlay_ms": 12,
+            "total_ms": 3,
+            "cancel_latency_ms": null,
+            "page_metrics": [
+              {
+                "job_id": "6d5d1325-3176-455d-9261-72f76c6ac5c3",
+                "page_artifact_key": "24c42bf0d40e6c65c5d3210ce8186ae27674094c4288648f1eb3a4c5e9aec7c7",
+                "cache_hit": true,
+                "error_code": null,
+                "queue_wait_ms": null,
+                "fetch_ms": null,
+                "analysis_ms": null,
+                "analysis_cache_hit": null,
+                "first_ocr_ms": null,
+                "ocr_done_ms": null,
+                "first_translation_ms": null,
+                "final_translation_ms": null,
+                "first_overlay_ms": 12,
+                "accepted_offset_ms": null,
+                "total_ms": null,
+                "recognized": 17,
+                "failed": 0,
+                "translation_batches": []
+              }
+            ],
+            "counter_records": []
+          }
+        }
+      },
+      "mangadex_pt": {
+        "capture_kind": "diagnostic",
+        "production_pt_supported": false,
+        "recognizer_src_lang": "es",
+        "popup_result": {"images": 1, "blocks": 7, "failed": 0},
+        "page_status": {"background": 0, "cached": 1, "failed": 0},
+        "sample": {
+          "queue_wait_ms": 19689,
+          "fetch_ms": 0,
+          "analysis_ms": 780,
+          "first_ocr_ms": 11654,
+          "ocr_done_ms": 19855,
+          "first_translation_ms": 13828,
+          "final_translation_ms": 21006,
+          "first_overlay_ms": 13838,
+          "total_ms": 21013,
+          "cancel_latency_ms": null,
+          "page_metrics": [
+            {
+              "job_id": "906a2706-810a-4119-9dd5-782e0816f979",
+              "page_artifact_key": "b18db6b0488913e6b56d219971fada89cb9111532a580cd3110c68b9fc790e01",
+              "cache_hit": false,
+              "error_code": null,
+              "queue_wait_ms": 19689,
+              "fetch_ms": null,
+              "analysis_ms": 780,
+              "analysis_cache_hit": false,
+              "first_ocr_ms": 11654,
+              "ocr_done_ms": 19855,
+              "first_translation_ms": 13828,
+              "final_translation_ms": 21006,
+              "first_overlay_ms": 13838,
+              "accepted_offset_ms": 3,
+              "total_ms": 21010,
+              "recognized": 7,
+              "failed": 0,
+              "translation_batches": [
+                {"batch_id": 1, "phase": "microbatch", "block_ids": ["253a5c3b1595163c83eaaf32"], "block_count": 1, "started_ms": 11910, "duration_ms": 1918, "status": "success", "cache_hit": false, "error_code": null},
+                {"batch_id": 2, "phase": "microbatch", "block_ids": ["b9141fb9f4ce048aae36e565"], "block_count": 1, "started_ms": 14354, "duration_ms": 2711, "status": "success", "cache_hit": false, "error_code": null},
+                {"batch_id": 3, "phase": "microbatch", "block_ids": ["af1874c12bc97c19536bf377", "d883f0086949a22a849022bc"], "block_count": 2, "started_ms": 17067, "duration_ms": 1294, "status": "success", "cache_hit": false, "error_code": null},
+                {"batch_id": 4, "phase": "microbatch", "block_ids": ["dd8c90a53735cdd8e2f8f799"], "block_count": 1, "started_ms": 18864, "duration_ms": 1308, "status": "success", "cache_hit": false, "error_code": null},
+                {"batch_id": 5, "phase": "microbatch", "block_ids": ["8519f900501e2efd02d62f83", "3c81db2b6dc5e665c4d0d361"], "block_count": 2, "started_ms": 20176, "duration_ms": 830, "status": "success", "cache_hit": false, "error_code": null}
+              ]
+            }
+          ],
+          "counter_records": [{"translation_calls": 5, "rate_limited": 0, "stale_work": 0}]
+        }
+      }
+    },
+    "observations": [
+      "Warm replay giữ null cho các stage không chạy và chỉ đo first_overlay_ms ở content scope.",
+      "Popup prewarm dùng shared fetch nên page row cold có fetch_ms null trong khi aggregate sample có fetch_ms 0.",
+      "PT chỉ là diagnostic scheduling với recognizer Latin hiện tại; translation live không tham gia quality score."
+    ]
+  },
+  "policy_probe": {
+    "capture_file": "server/tests/fixtures/real_pages/captures/2026-08-01-policy-probe.json",
+    "schema_version": 1,
+    "prompt_version": "comic-page-eval-v1",
+    "policy_version": "real-page-policy-v1",
+    "metadata": {
+      "captured_at": "2026-08-02T17:26:47.972115+00:00",
+      "commit": "1b7308ced8e7225701b6717cec2780106f9b104f",
+      "device": "Windows-11-10.0.26200-SP0",
+      "model": "gemini-flash-lite-latest",
+      "temperature": 0.2
+    },
+    "attempts": 27,
+    "calls": {"success": 55, "rate_limited": 20},
+    "valid_responses": {
+      "total": 16,
+      "mangadex_pt": {"batch_control": 3, "ordered_microbatch": 3, "full_page": 2},
+      "s-manga_ja_1": {"batch_control": 1, "ordered_microbatch": 0, "full_page": 0},
+      "s-manga_ja_2": {"batch_control": 3, "ordered_microbatch": 2, "full_page": 2}
+    },
+    "rerun_failed_attempts": false,
+    "preview_probe": {"status": "not_run", "reason": "condition_not_met"}
+  },
+  "manual_review": {
+    "captured_at": "2026-08-02T17:26:47.972115+00:00",
+    "decision": "inconclusive",
+    "reason": "batch_control không đủ response hợp lệ",
+    "pages": {
+      "mangadex_pt": {
+        "arms": {
+          "batch_control": {
+            "valid_responses": 3,
+            "context_score": "not_applicable",
+            "length_metrics": {"translated_chars": 850, "source_chars": 861, "length_ratio": 0.9872241579558653, "chars_per_kpx": 7.228444353734555, "warning_only": true}
+          },
+          "ordered_microbatch": {
+            "valid_responses": 3,
+            "context_score": "not_applicable",
+            "length_metrics": {"translated_chars": 868, "source_chars": 861, "length_ratio": 1.008130081300813, "chars_per_kpx": 7.38151729299011, "warning_only": true}
+          },
+          "full_page": {
+            "valid_responses": 2,
+            "context_score": "not_applicable",
+            "length_metrics": {"translated_chars": 602, "source_chars": 574, "length_ratio": 1.048780487804878, "chars_per_kpx": 7.679159119320356, "warning_only": true}
+          }
+        },
+        "context_score": "not_applicable"
+      },
+      "s-manga_ja_1": {
+        "arms": {
+          "batch_control": {
+            "valid_responses": 1,
+            "context_score": 5,
+            "length_metrics": {"translated_chars": 974, "source_chars": 309, "length_ratio": 3.1521035598705502, "chars_per_kpx": 5.542846086431978, "warning_only": true}
+          },
+          "ordered_microbatch": {
+            "valid_responses": 0,
+            "context_score": null,
+            "length_metrics": {"translated_chars": 0, "source_chars": 0, "length_ratio": null, "chars_per_kpx": null, "warning_only": true}
+          },
+          "full_page": {
+            "valid_responses": 0,
+            "context_score": null,
+            "length_metrics": {"translated_chars": 0, "source_chars": 0, "length_ratio": null, "chars_per_kpx": null, "warning_only": true}
+          }
+        },
+        "context_score": 5
+      },
+      "s-manga_ja_2": {
+        "arms": {
+          "batch_control": {
+            "valid_responses": 3,
+            "context_score": 6,
+            "length_metrics": {"translated_chars": 1724, "source_chars": 624, "length_ratio": 2.7628205128205128, "chars_per_kpx": 4.080975646706814, "warning_only": true}
+          },
+          "ordered_microbatch": {
+            "valid_responses": 2,
+            "context_score": 6.0,
+            "length_metrics": {"translated_chars": 1178, "source_chars": 416, "length_ratio": 2.831730769230769, "chars_per_kpx": 4.182763322349733, "warning_only": true}
+          },
+          "full_page": {
+            "valid_responses": 2,
+            "context_score": 5.5,
+            "length_metrics": {"translated_chars": 1217, "source_chars": 416, "length_ratio": 2.925480769230769, "chars_per_kpx": 4.321241904329053, "warning_only": true}
+          }
+        },
+        "context_score": 6
+      }
+    },
+    "arms": {
+      "batch_control": {"status": "inconclusive", "reasons": ["s-manga_ja_1: dưới hai response hợp lệ"]},
+      "ordered_microbatch": {"status": "inconclusive", "reasons": ["s-manga_ja_1: dưới hai response hợp lệ", "mangadex_pt: critical_error", "mangadex_pt: safety median 0"]},
+      "full_page": {"status": "inconclusive", "reasons": ["s-manga_ja_1: dưới hai response hợp lệ"]}
+    }
+  }
+}

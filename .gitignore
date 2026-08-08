@@ -17,6 +17,7 @@ graphify-out/
 
 # Log va thu muc tam khi chay benchmark/acceptance
 .tmp-task10-browser/
+.tmp-real-pages/
 log.txt
 
 # UI state cua Obsidian (config con lai van track)

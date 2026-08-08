@@ -74,6 +74,23 @@ def test_prompt_contains_numbered_lines_and_langs(monkeypatch):
     assert "Spanish" in prompt and "English" in prompt
 
 
+def test_portuguese_prompt_uses_display_name(monkeypatch):
+    t, clients = make_with_clients(monkeypatch, [json.dumps(["olá"])])
+    t.translate(["olá"], "pt", "en")
+    prompt = clients[0].models.calls[0]["contents"]
+    assert "from Portuguese" in prompt
+    assert "from pt" not in prompt
+
+
+def test_generate_uses_exported_temperature(monkeypatch):
+    monkeypatch.setattr(tr, "GENERATION_TEMPERATURE", 0.37)
+    t, clients = make_with_clients(monkeypatch, [json.dumps(["hi"])])
+
+    t.translate(["hola"], "es", "en")
+
+    assert clients[0].models.calls[0]["config"]["temperature"] == 0.37
+
+
 def test_retry_on_length_mismatch(monkeypatch):
     t, clients = make_with_clients(
         monkeypatch,
@@ -154,6 +171,28 @@ def test_decode_error_mentioning_429_does_not_use_secondary(monkeypatch):
     assert [len(client.models.calls) for client in clients] == [2, 0]
 
 
+def test_two_decoder_errors_with_429_message_preserve_invalid_response_kind(monkeypatch):
+    malformed = '{"a": ' + " " * 422 + "X"
+    t, clients = make_with_clients(monkeypatch, [malformed, malformed])
+
+    with pytest.raises(tr.TranslateError) as raised:
+        t.translate(["x"], "ja", "vi")
+
+    assert raised.value.error_kind == "invalid_response"
+    assert raised.value.code is None
+    assert [len(client.models.calls) for client in clients] == [2]
+
+
+def test_sdk_429_preserves_rate_limited_kind(monkeypatch):
+    t = make(monkeypatch, [QuotaError("quota")])
+
+    with pytest.raises(tr.TranslateError) as raised:
+        t.translate(["x"], "ja", "vi")
+
+    assert raised.value.error_kind == "rate_limited"
+    assert raised.value.code == 429
+
+
 def test_promoted_secondary_429_fails_back_and_promotes_primary(monkeypatch):
     t, clients = make_with_clients(
         monkeypatch,
@@ -213,13 +252,51 @@ def test_translate_items_accepts_reordered_exact_ids(monkeypatch):
     ])
     translator = make(monkeypatch, [reply])
     assert translator.translate_items(
-        [{"id": "b1", "text": "one"}, {"id": "b2", "text": "two"}],
+        [
+            {"id": "b1", "text": "one", "reading_order": 0, "bbox": [10, 20, 30, 40]},
+            {"id": "b2", "text": "two", "reading_order": 1, "bbox": [50, 60, 70, 80]},
+        ],
         "en",
         "vi",
+        page_width=1107,
+        page_height=871,
+        reading_direction="rtl",
     ) == [
         {"id": "b1", "translation": "mot"},
         {"id": "b2", "translation": "hai"},
     ]
+
+
+def test_translate_items_projects_exact_fields_and_page_context(monkeypatch):
+    reply = json.dumps([{"id": "b1", "translation": "một"}])
+    translator, clients = make_with_clients(monkeypatch, [reply])
+
+    assert translator.translate_items(
+        [
+            {
+                "id": "b1",
+                "text": "one",
+                "reading_order": 0,
+                "bbox": [10, 20, 30, 40],
+                "ignored": "dialogue",
+            }
+        ],
+        "en",
+        "vi",
+        page_width=1107,
+        page_height=871,
+        reading_direction="rtl",
+    ) == [{"id": "b1", "translation": "một"}]
+
+    prompt = clients[0].models.calls[0]["contents"]
+    assert '"page_width": 1107' in prompt
+    assert '"page_height": 871' in prompt
+    assert '"reading_direction": "rtl"' in prompt
+    assert '"id": "b1"' in prompt
+    assert '"text": "one"' in prompt
+    assert '"reading_order": 0' in prompt
+    assert '"bbox": [10, 20, 30, 40]' in prompt
+    assert "ignored" not in prompt
 
 
 @pytest.mark.parametrize(
@@ -234,7 +311,13 @@ def test_translate_items_rejects_missing_foreign_or_duplicate_ids(monkeypatch, r
     translator = make(monkeypatch, [json.dumps(reply), json.dumps(reply)])
     with pytest.raises(tr.TranslateError):
         translator.translate_items(
-            [{"id": "b1", "text": "one"}, {"id": "b2", "text": "two"}],
+            [
+                {"id": "b1", "text": "one", "reading_order": 0, "bbox": [1, 2, 3, 4]},
+                {"id": "b2", "text": "two", "reading_order": 1, "bbox": [5, 6, 7, 8]},
+            ],
             "en",
             "vi",
+            page_width=100,
+            page_height=200,
+            reading_direction="ltr",
         )

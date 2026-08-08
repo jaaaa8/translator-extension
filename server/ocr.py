@@ -20,6 +20,7 @@ class PaddleLatinEngine:
         # Tắt các model phụ (chỉnh hướng trang/dòng) — crop bóng thoại luôn thẳng
         self._ocr = PaddleOCR(
             lang="es",
+            ocr_version="PP-OCRv6",
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=False,
@@ -35,7 +36,7 @@ class PaddleLatinEngine:
         return " ".join(texts)
 
 
-ENGINES = {"ja": MangaOcrEngine, "es": PaddleLatinEngine}
+ENGINES = {"ja": MangaOcrEngine, "es": PaddleLatinEngine, "pt": PaddleLatinEngine}
 
 
 class OcrRegistry:
@@ -48,6 +49,7 @@ class OcrRegistry:
         return list(ENGINES)
 
     def get(self, lang: str):
-        if lang not in self._cache:
-            self._cache[lang] = ENGINES[lang](self._device)
-        return self._cache[lang]
+        engine_type = ENGINES[lang]
+        if engine_type not in self._cache:
+            self._cache[engine_type] = engine_type(self._device)
+        return self._cache[engine_type]

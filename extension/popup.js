@@ -5,6 +5,14 @@ let healthLoaded = false;
 let serverHealthy = false;
 let initialPrewarmed = false;
 
+function uiDirection(value) {
+  return value === "ltr" ? "ltr" : "rtl";
+}
+
+function refreshCurrentLanguages() {
+  $("currentLanguages").textContent = `${$("srcLang").value.toUpperCase()} → ${$("dstLang").value.toUpperCase()} · ${$("readingDirection").value.toUpperCase()}`;
+}
+
 function prewarmPage(requestSrcLang) {
   chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
     if (!tab) return;
@@ -18,11 +26,13 @@ function prewarmInitialPage() {
   prewarmPage(srcLang);
 }
 
-chrome.storage.local.get(["enabled", "srcLang", "dstLang"]).then((v) => {
+chrome.storage.local.get(["enabled", "srcLang", "dstLang", "readingDirection"]).then((v) => {
   $("enabled").checked = v.enabled !== false;
   srcLang = v.srcLang || "ja";
   $("srcLang").value = srcLang;
   $("dstLang").value = v.dstLang || "vi";
+  $("readingDirection").value = uiDirection(v.readingDirection);
+  refreshCurrentLanguages();
   settingsLoaded = true;
   prewarmInitialPage();
 });
@@ -31,9 +41,19 @@ $("enabled").onchange = (e) => chrome.storage.local.set({ enabled: e.target.chec
 $("srcLang").onchange = (e) => {
   srcLang = e.target.value;
   chrome.storage.local.set({ srcLang });
+  refreshCurrentLanguages();
   if (serverHealthy) prewarmPage(srcLang);
 };
-$("dstLang").onchange = (e) => chrome.storage.local.set({ dstLang: e.target.value });
+$("dstLang").onchange = (e) => {
+  chrome.storage.local.set({ dstLang: e.target.value });
+  refreshCurrentLanguages();
+};
+$("readingDirection").onchange = (e) => {
+  const readingDirection = uiDirection(e.target.value);
+  $("readingDirection").value = readingDirection;
+  chrome.storage.local.set({ readingDirection });
+  refreshCurrentLanguages();
+};
 
 chrome.runtime.sendMessage({ type: "health" }).then((res) => {
   const ok = res && res.ok;
@@ -62,6 +82,7 @@ function translate(scope) {
     scope,
     srcLang: $("srcLang").value,
     dstLang: $("dstLang").value,
+    readingDirection: $("readingDirection").value,
   };
   $("result").textContent = "đang dịch…";
   chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {

@@ -144,7 +144,7 @@ function storedDescriptor(descriptor) {
   if (descriptor === undefined) return undefined;
   if (!descriptor || Object.getPrototypeOf(descriptor) !== Object.prototype) throw new TypeError("descriptor must be metadata");
   const value = {};
-  copyStrings(value, descriptor, ["job_id", "request_id", "src_lang", "dst_lang", "scope", "page_artifact_key"]);
+  copyStrings(value, descriptor, ["job_id", "request_id", "src_lang", "dst_lang", "scope", "page_artifact_key", "reading_direction"]);
   if (descriptor.source_url !== undefined) value.source_url = storedUrl(descriptor.source_url);
   copyNumbers(value, descriptor, ["natural_width", "natural_height", "priority", "distance"]);
   value.crop = storedCrop(descriptor.crop ?? "full");

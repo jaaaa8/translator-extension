@@ -2,6 +2,7 @@ const MIN_SIZE = 400;
 let enabled = true;
 let srcLang = "ja";
 let dstLang = "vi";
+let readingDirection = "rtl";
 let currentRequestId = null;
 let port = null;
 let pruneFrame = 0;
@@ -11,14 +12,20 @@ const jobBindings = new Map();
 const pendingScopes = new Map();
 const activeScopeMessages = new Map();
 
-chrome.storage.local.get(["enabled", "srcLang", "dstLang"]).then((value) => {
+function uiDirection(value) {
+  return value === "ltr" ? "ltr" : "rtl";
+}
+
+chrome.storage.local.get(["enabled", "srcLang", "dstLang", "readingDirection"]).then((value) => {
   enabled = value.enabled !== false;
   srcLang = value.srcLang || "ja";
   dstLang = value.dstLang || "vi";
+  readingDirection = uiDirection(value.readingDirection);
 });
 chrome.storage.onChanged.addListener((changes) => {
   if (changes.srcLang) srcLang = changes.srcLang.newValue;
   if (changes.dstLang) dstLang = changes.dstLang.newValue;
+  if (changes.readingDirection) readingDirection = uiDirection(changes.readingDirection.newValue);
   if (changes.enabled) {
     enabled = changes.enabled.newValue;
     for (const { container } of overlays.values()) container.style.display = enabled ? "" : "none";
@@ -26,7 +33,7 @@ chrome.storage.onChanged.addListener((changes) => {
 });
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "translatePage") {
-    translatePage(message.scope, message.srcLang, message.dstLang).then(sendResponse);
+    translatePage(message.scope, message.srcLang, message.dstLang, message.readingDirection).then(sendResponse);
     return true;
   }
   if (message.type === "prewarmPage") {
@@ -78,9 +85,10 @@ function snapshotJobs(scope, requestId, requestSrcLang, requestDstLang) {
   });
 }
 
-function translatePage(scope, requestSrcLang = srcLang, requestDstLang = dstLang) {
+function translatePage(scope, requestSrcLang = srcLang, requestDstLang = dstLang, requestDirection = readingDirection) {
   const requestId = crypto.randomUUID();
   const replacesRequestId = currentRequestId;
+  const requestReadingDirection = uiDirection(requestDirection);
   if (replacesRequestId) cleanupRequest(replacesRequestId, { ok: false, error: "superseded" });
   currentRequestId = requestId;
   srcLang = requestSrcLang;
@@ -88,8 +96,8 @@ function translatePage(scope, requestSrcLang = srcLang, requestDstLang = dstLang
   let jobs;
   try { jobs = snapshotJobs(scope, requestId, srcLang, dstLang); }
   catch (error) { return Promise.resolve({ ok: false, error: error.message || String(error) }); }
-  const done = new Promise((resolve) => pendingScopes.set(requestId, { resolve, startedAt: performance.now(), firstOverlayMs: null }));
-  const message = { type: "start_scope", request_id: requestId, replaces_request_id: replacesRequestId, scope, src_lang: srcLang, dst_lang: dstLang, jobs };
+  const done = new Promise((resolve) => pendingScopes.set(requestId, { resolve, startedAt: performance.now(), firstOverlayMs: null, firstOverlayByJob: new Map() }));
+  const message = { type: "start_scope", request_id: requestId, replaces_request_id: replacesRequestId, scope, src_lang: srcLang, dst_lang: dstLang, reading_direction: requestReadingDirection, jobs };
   activeScopeMessages.set(requestId, message);
   translationPort().postMessage(message);
   return done;
@@ -110,7 +118,10 @@ function handleEvent(event) {
   if (event.type === "scope_done") {
     const pending = pendingScopes.get(event.request_id);
     if (!pending) return;
-    cleanupRequest(event.request_id, { ok: true, images: event.images, blocks: event.translated, failed: event.failed, cacheHit: event.cache_hit === true, first_overlay_ms: pending.firstOverlayMs, metrics: event.metrics });
+    const pageMetrics = (event.page_metrics || []).map((row) => pending.firstOverlayByJob.has(row.job_id)
+      ? { ...row, first_overlay_ms: pending.firstOverlayByJob.get(row.job_id) } : row);
+    const metrics = pending.firstOverlayMs == null ? event.metrics : { ...(event.metrics || {}), first_overlay_ms: Number.isFinite(event.metrics?.first_overlay_ms) ? Math.min(event.metrics.first_overlay_ms, pending.firstOverlayMs) : pending.firstOverlayMs };
+    cleanupRequest(event.request_id, { ok: true, images: event.images, blocks: event.translated, failed: event.failed, cacheHit: event.cache_hit === true, first_overlay_ms: pending.firstOverlayMs, metrics, page_metrics: pageMetrics });
   }
 }
 
@@ -141,7 +152,12 @@ function upsertOverlayBlock(img, binding, event) {
   block.element.textContent = event.trans_text;
   position(img);
   const pending = pendingScopes.get(binding.requestId);
-  if (pending && pending.firstOverlayMs == null) { pending.firstOverlayMs = Math.round(performance.now() - pending.startedAt); translationPort().postMessage({ type: "render_metric", request_id: binding.requestId, first_overlay_ms: pending.firstOverlayMs }); }
+  if (pending && !pending.firstOverlayByJob.has(event.job_id)) {
+    const firstOverlayMs = Math.round(performance.now() - pending.startedAt);
+    pending.firstOverlayByJob.set(event.job_id, firstOverlayMs);
+    if (pending.firstOverlayMs == null || firstOverlayMs < pending.firstOverlayMs) pending.firstOverlayMs = firstOverlayMs;
+    translationPort().postMessage({ type: "render_metric", request_id: binding.requestId, job_id: event.job_id, first_overlay_ms: firstOverlayMs });
+  }
 }
 
 function removeOverlay(img) { const overlay = overlays.get(img); if (!overlay) return; overlay.resizeObserver.disconnect(); overlay.container.remove(); overlays.delete(img); }

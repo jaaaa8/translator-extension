@@ -74,7 +74,22 @@ async function flush() {
   await Promise.resolve();
 }
 
+const popupHtml = fs.readFileSync("extension/popup.html", "utf8");
+const sourceOptions = popupHtml.match(/<select id="srcLang">([\s\S]*?)<\/select>/)[1];
+assert.match(sourceOptions, /<option value="pt">/);
+
 (async () => {
+  const direction = popup();
+  assert.ok(direction.elements.readingDirection);
+  direction.settings.resolve({ srcLang: "es", dstLang: "vi" });
+  await flush();
+  assert.ok(direction.elements.currentLanguages);
+  assert.strictEqual(direction.elements.readingDirection.value, "rtl");
+  assert.match(direction.elements.currentLanguages.textContent, /RTL/);
+  assert.deepStrictEqual(direction.writes, []);
+  direction.elements.readingDirection.onchange({ target: { value: "ltr" } });
+  assert.deepStrictEqual({ ...direction.writes.at(-1) }, { readingDirection: "ltr" });
+
   const first = popup();
   first.settings.resolve({ srcLang: "es", dstLang: "vi" });
   await flush();
@@ -135,18 +150,20 @@ async function flush() {
   assert.strictEqual(ready.elements.cacheStatus.textContent, "Đang dịch nền: 2 · Đã cache: 8 · Lỗi: 1");
   ready.elements.srcLang.value = "es";
   ready.elements.dstLang.value = "en";
+  ready.elements.readingDirection.onchange({ target: { value: "ltr" } });
 
   ready.elements.translateVisible.onclick();
   ready.elements.srcLang.value = "ja";
   ready.elements.dstLang.value = "vi";
+  ready.elements.readingDirection.onchange({ target: { value: "rtl" } });
   ready.elements.translateLoaded.onclick();
   assert.strictEqual(ready.elements.translateVisible.disabled, false);
   assert.strictEqual(ready.elements.translateLoaded.disabled, false);
   ready.releaseTabs();
   const translations = ready.sent.filter((row) => row.message.type === "translatePage");
   assert.deepStrictEqual(translations, [
-    { id: 7, message: { type: "translatePage", scope: "visible", srcLang: "es", dstLang: "en" } },
-    { id: 7, message: { type: "translatePage", scope: "loaded", srcLang: "ja", dstLang: "vi" } },
+    { id: 7, message: { type: "translatePage", scope: "visible", srcLang: "es", dstLang: "en", readingDirection: "ltr" } },
+    { id: 7, message: { type: "translatePage", scope: "loaded", srcLang: "ja", dstLang: "vi", readingDirection: "rtl" } },
   ]);
   ready.replyTranslateAt(0, { ok: true, images: 1, blocks: 1, failed: 0 });
   assert.strictEqual(ready.elements.result.textContent, "đang dịch…");

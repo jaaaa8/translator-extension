@@ -20,7 +20,7 @@ def crop_bubble(name):
 
 
 def test_registry_langs(registry):
-    assert registry.langs == ["ja", "es"]
+    assert registry.langs == ["ja", "es", "pt"]
 
 
 def test_manga_ocr_reads_japanese(registry):

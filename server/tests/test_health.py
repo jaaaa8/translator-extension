@@ -10,6 +10,8 @@ def test_health():
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "ok"
-    assert body["langs"] == ["ja", "es"]
+    assert body["langs"] == ["ja", "es", "pt"]
     assert "device" in body
     assert body["versions"] == config.PIPELINE_VERSIONS
+    assert all(lang in body["versions"]["recognizers"] for lang in body["langs"])
+    assert body["versions"]["recognizers"]["es"] == body["versions"]["recognizers"]["pt"]

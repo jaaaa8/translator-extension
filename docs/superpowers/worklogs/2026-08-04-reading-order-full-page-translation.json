@@ -1,0 +1,161 @@
+{
+  "spec": "reading-order-full-page-translation",
+  "status": "complete",
+  "control_baseline_path": "docs/superpowers/worklogs/2026-08-01-real-page-quality-baseline.json",
+  "control_baseline_commit": "9b1d153df7bccbb8dce34eaa451e47d32ee70bab",
+  "control_policy": "microbatch-3-8-250-500-v1",
+  "control_policy_batch_count": 25,
+  "implementation_checkpoint": {
+    "status": "offline_gates_passed",
+    "implementation_commit": "a37fbdec0dd2dd2d717a9fd754a07b98a475540b",
+    "versions": {
+      "layout_order": "reading-order-v1",
+      "recognizers": {
+        "es": "paddleocr-latin-ppocrv6-v1",
+        "pt": "paddleocr-latin-ppocrv6-v1"
+      },
+      "prompt": "comic-page-items-v2",
+      "policy": "full-page-v1"
+    },
+    "control_policy_batch_count": 25,
+    "observed_results": {
+      "python": "211 passed, 2 warnings in 13.25s",
+      "node": "10/10 test files exited 0",
+      "real_page_quality": "98 passed in 1.99s",
+      "frozen_control_diff": "exit 0, no output",
+      "semantic_policy_batch_count": 25,
+      "obsolete_microbatch_matches": 0,
+      "static_test_ocr_expectation": "server/tests/test_ocr.py:23"
+    },
+    "test_ocr": "static_expectation_updated_not_run",
+    "live_quality_rerun": "not_a_vertical_slice_gate"
+  },
+  "post_checkpoint_update": {
+    "status": "verified_after_offline_checkpoint",
+    "commit": "8a4b08d3d43c9d8510bf4bef6ed8e24f1ff59679",
+    "checkpoint_implementation_commit": "a37fbdec0dd2dd2d717a9fd754a07b98a475540b",
+    "closed_task_6_minors": [
+      "replay_complete_in_flight_page_for_late_consumer",
+      "rename_partial_hot_full_page_scenario"
+    ],
+    "observed_results": {
+      "python": "211 passed, 2 warnings in 22.29s",
+      "node": "10/10 test files exited 0",
+      "test_ocr": "explicitly_excluded_not_run"
+    },
+    "open_follow_up": {
+      "id": "partial_producer_cleanup_attach_race",
+      "status": "resolved-after-final-review",
+      "resolved_commit": "3fc910d86c4a32b959b92dbd4a570a4cd969ceda",
+      "impact": "late consumer can miss image_done and scope_done while terminal producer cleanup is pending",
+      "resolution": "finishProducer and failProducer delete the terminal producer before awaited removeProducerJobs cleanup",
+      "verification": {
+        "focused_node": "background-progressive.test.js RED timeout, GREEN transport OK; popup.test.js OK",
+        "full_node": "10/10 sequential test files exited 0"
+      }
+    }
+  },
+  "post_final_review_update": {
+    "status": "verified_no_open_findings",
+    "commit": "1855a2700d35362619208579cca185aab14782ff",
+    "finding": "pre_ocr_terminal_stale_stage_retry",
+    "impact": "a late request during terminal cleanup could attach to a rejected OCR stage and fail without retrying source fetch, OCR, or translation",
+    "resolution": "finishProducer and failProducer synchronously release producer stages before deleting the producer map entry and awaiting job cleanup",
+    "verification": {
+      "red": "old cleanup order returned translated=0 failed=1 for the late request",
+      "green": "late request returned translated=1 failed=0 with source=2, ocr=1, translate=1",
+      "focused_node": "background-progressive.test.js transport OK",
+      "full_node": "10/10 sequential test files exited 0",
+      "review": "Terra medium PASS with no Critical, Important, or Minor findings"
+    },
+    "test_ocr": "explicitly_not_run"
+  },
+  "completion": {
+    "status": "user_approved",
+    "approved_at": "2026-08-05",
+    "verification_head": "e0e948e58c3e00513e28f15fdb139eac5415dbe1",
+    "final_implementation_commit": "1855a2700d35362619208579cca185aab14782ff",
+    "pre_closure_worklog_commit": "32718b2c1291fd7a9db3ee331b1207acb639aac5",
+    "integration": "pull_request_created_by_user",
+    "open_findings": [],
+    "first_overlay_tradeoff": {
+      "status": "accepted",
+      "decision": "Spec B prioritizes deterministic reading order, full-page context quality, and one translation request per page; cold first-overlay latency remains explicit follow-up debt and is not claimed as an optimization."
+    },
+    "observed_results": {
+      "python": "211 passed, 2 warnings in 21.44s",
+      "node": "10/10 sequential test files exited 0",
+      "test_ocr": "explicitly_excluded_not_run"
+    }
+  },
+  "runtime_telemetry": {
+    "status": "reviewed_complete",
+    "commit": "bec403b37253e4c5be18061b6baf971993a80b20",
+    "device": "cuda",
+    "frozen_control_diff": "exit 0, no output",
+    "runs": {
+      "ja1_rtl_network": {
+        "source_language": "ja",
+        "direction": "rtl",
+        "cache_state": "network_full_page",
+        "scope_metrics_ms": { "queue_wait": 0, "fetch": 2, "analysis": 0, "first_ocr": 33, "ocr_done": 38, "first_translation": 23778, "final_translation": 23778, "first_overlay": 23782, "total": 23779 },
+        "page": { "cache_hit": false, "analysis_cache_hit": true, "recognized": 21, "failed": 0, "translation_batches": [{ "batch_id": 1, "phase": "full_page", "block_count": 21, "started_ms": 40, "cache_hit": false, "error_code": null }] },
+        "counters": { "translation_calls": 1, "rate_limited": 0, "stale_work": 0 },
+        "server_delta": { "ocr_stream_200": 1, "translate_items_200": 1 }
+      },
+      "ja1_rtl_translation_hot": {
+        "source_language": "ja",
+        "direction": "rtl",
+        "cache_state": "translation_hot_not_page_artifact_hit",
+        "scope_metrics_ms": { "queue_wait": 0, "fetch": 1, "analysis": 0, "first_ocr": 12, "ocr_done": 16, "first_translation": 18, "final_translation": 19, "first_overlay": 26, "total": 19 },
+        "page": { "cache_hit": false, "analysis_cache_hit": true, "recognized": 21, "failed": 0, "translation_batches": [] },
+        "counters": { "translation_calls": 0, "rate_limited": 0, "stale_work": 0 },
+        "server_delta": { "translate_items_200": 0 }
+      },
+      "ja2_rtl_post_reset_translation_cold": {
+        "source_language": "ja",
+        "direction": "rtl",
+        "cache_state": "post_reset_translation_cold",
+        "reset": "extension_session_cache_and_hot_maps_cleared_while_idle; production_process_restarted",
+        "scope_metrics_ms": { "queue_wait": 0, "fetch": 2, "analysis": 0, "first_ocr": 31, "ocr_done": 35, "first_translation": 3296, "final_translation": 3297, "first_overlay": 3314, "total": 3297 },
+        "page": { "cache_hit": false, "analysis_cache_hit": true, "recognized": 17, "failed": 0, "translation_batches": [{ "batch_id": 1, "phase": "full_page", "block_count": 17, "started_ms": 36, "cache_hit": false, "error_code": null }] },
+        "counters": { "translation_calls": 1, "rate_limited": 0, "stale_work": 0 },
+        "server_delta": { "ocr_stream_200": 2, "translate_items_200": 1 },
+        "qualification": "Popup prewarm was observed, so this is not a claim of model-cold latency."
+      },
+      "manual_ltr": {
+        "source_language": "ja",
+        "direction": "ltr",
+        "cache_state": "network_full_page",
+        "popup_content_background": { "scope": "loaded", "source_language": "ja", "destination_language": "vi", "direction": "ltr", "job_count": 1, "image_dimensions": { "width": 1105, "height": 868 } },
+        "request": { "source_language": "ja", "destination_language": "vi", "direction": "ltr", "page_dimensions": { "width": 1105, "height": 868 }, "item_count": 17 },
+        "scope_metrics_ms": { "queue_wait": 0, "fetch": 2, "analysis": 0, "first_ocr": 10, "ocr_done": 14, "first_translation": 9449, "final_translation": 9449, "first_overlay": 9455, "total": 9450 },
+        "page": { "cache_hit": false, "analysis_cache_hit": true, "recognized": 17, "failed": 0, "translation_batches": [{ "batch_id": 1, "phase": "full_page", "block_count": 17, "cache_hit": false, "error_code": null }] },
+        "server_delta": { "ocr_stream_200": 2, "translate_items_200": 1 },
+        "instrumentation_restored": true
+      },
+      "pt": {
+        "source_language": "pt",
+        "direction": "rtl",
+        "cache_state": "network_full_page",
+        "popup_content_background": { "scope": "loaded", "source_language": "pt", "destination_language": "vi", "direction": "rtl", "job_count": 1, "image_dimensions": { "width": 500, "height": 782 } },
+        "ocr_request": { "src_lang": "pt", "has_image": true },
+        "translation_request": { "src_lang": "pt", "dst_lang": "vi", "reading_direction": "rtl", "page_dimensions": { "width": 500, "height": 782 }, "item_count": 7 },
+        "scope_metrics_ms": { "queue_wait": 0, "analysis": 0, "first_ocr": 0, "ocr_done": 5095, "first_translation": 48703, "final_translation": 48703, "first_overlay": 48725, "total": 48704 },
+        "page": { "cache_hit": false, "analysis_cache_hit": true, "recognized": 7, "failed": 0, "translation_batches": [{ "batch_id": 1, "phase": "full_page", "block_count": 7, "started_ms": 5096, "cache_hit": false, "error_code": null }] },
+        "counters": { "translation_calls": 1, "rate_limited": 0, "stale_work": 0 },
+        "instrumentation_restored": true
+      }
+    },
+    "shared_latin_engine": {
+      "server_pid": 24520,
+      "observation": "Paddle creation markers were 0 before PT, rose to 4 during PT, then remained 4 after the same-process ES prewarm.",
+      "endpoint_delta_after_ltr": { "ocr_stream_200": 3, "translate_items_200": 1 },
+      "pt_interceptor_observed": ["ja_popup_prewarm", "pt"],
+      "remaining_ocr_stream": "es_prewarm",
+      "conclusion": "Bounded runtime observation: ES prewarm did not increase Paddle creation markers after PT on the same production process. The markers alone do not prove a unique engine instance."
+    },
+    "first_overlay_tradeoff": "All full-page network runs emitted first_translation and first_overlay only after ocr_done. This deliberately delays first overlay until complete-page OCR and translation; it is a latency trade-off, not an optimization claim.",
+    "initial_ja1": "The first manual run had one successful server OCR and translation request but its worker metric sample was lost on worker restart; it is excluded from recorded timings."
+  }
+}
