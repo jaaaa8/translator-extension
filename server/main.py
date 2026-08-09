@@ -111,7 +111,8 @@ async def render_artifact(
     if cached is not None:
         return _render_payload(cached, render_artifact_key)
     if image is None:
-        if pipeline.get_analysis(analysis_key) is None:
+        analysis = pipeline.get_analysis(analysis_key)
+        if analysis is None:
             return JSONResponse(status_code=409, content={"error": "artifact_missing"})
     else:
         data = await image.read()
@@ -121,12 +122,18 @@ async def render_artifact(
                 content={"error": "source_identity_mismatch"},
             )
         try:
-            await asyncio.to_thread(pipeline.analyze, data, crop_or_error, analysis_key)
+            analysis = await asyncio.to_thread(
+                pipeline.analyze, data, crop_or_error, analysis_key
+            )
         except ValueError as error:
             return JSONResponse(status_code=422, content={"error": str(error)})
     try:
         artifact = await asyncio.wrap_future(
-            pipeline.ensure_render(analysis_key, render_artifact_key)
+            pipeline.ensure_render(
+                analysis_key,
+                render_artifact_key,
+                analysis=analysis,
+            )
         )
     except KeyError:
         return JSONResponse(status_code=409, content={"error": "artifact_missing"})

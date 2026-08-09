@@ -122,7 +122,7 @@ def test_render_artifact_upload_returns_complete_http_payload(monkeypatch):
             self.cached_analysis = analysis(key)
             return self.cached_analysis
 
-        def ensure_render(self, analysis_key, render_key):
+        def ensure_render(self, analysis_key, render_key, *, analysis=None):
             assert (analysis_key, render_key) == ("analysis-1", "render-1")
             future = Future()
             future.set_result(expected)
@@ -161,6 +161,55 @@ def test_render_artifact_upload_returns_complete_http_payload(monkeypatch):
         ],
         "byte_size": 3,
     }
+
+
+@pytest.mark.parametrize("with_image", [False, True], ids=["warm-cache", "upload"])
+def test_render_artifact_forwards_resolved_analysis_after_cache_eviction(
+    monkeypatch, with_image
+):
+    resolved = analysis()
+    expected = render()
+    pipeline = make_pipeline()
+    analysis_lookups = 0
+
+    def get_analysis(key):
+        nonlocal analysis_lookups
+        assert key == "analysis-1"
+        analysis_lookups += 1
+        return resolved if not with_image and analysis_lookups == 1 else None
+
+    def analyze_image(data, crop, key):
+        assert with_image
+        assert (data, crop, key) == (b"png", None, "analysis-1")
+        return resolved
+
+    def build(artifact, render_key):
+        # Mutation caught: discarding the resolved artifact or omitting analysis=analysis.
+        assert artifact is resolved
+        assert render_key == "render-1"
+        return expected
+
+    monkeypatch.setattr(pipeline, "get_analysis", get_analysis)
+    monkeypatch.setattr(pipeline, "analyze", analyze_image)
+    monkeypatch.setattr(pipeline_module, "build_render_artifact", build, raising=False)
+    monkeypatch.setattr(main, "_pipeline", pipeline)
+    request = {
+        "data": {
+            "analysis_key": "analysis-1",
+            "render_artifact_key": "render-1",
+            "source_content_hash": sha256(b"png").hexdigest(),
+        }
+    }
+    if with_image:
+        request["files"] = {"image": ("page.png", b"png", "image/png")}
+
+    try:
+        response = TestClient(main.app).post("/render-artifact", **request)
+    finally:
+        shutdown_render_executor(pipeline)
+
+    assert response.status_code == 200
+    assert response.json()["render_artifact_key"] == "render-1"
 
 
 def test_ensure_render_singleflights_concurrent_callers_and_caches_once(monkeypatch):
