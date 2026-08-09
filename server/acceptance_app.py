@@ -289,6 +289,7 @@ async def health():
             "detector": "acceptance-detector-v1",
             "dedupe": "acceptance-dedupe-v1",
             "prep": "acceptance-prep-v1",
+            "region_resolver": "acceptance-region-resolver-v1",
             "recognizers": {
                 "ja": "acceptance-recognizer-ja-v1",
                 "es": "acceptance-recognizer-es-v1",
@@ -299,6 +300,11 @@ async def health():
             "policy": "acceptance-policy-v1",
             "layout_order": "reading-order-v1",
             "page_schema": "acceptance-page-v1",
+        },
+        "patch_versions": {
+            "cleaner": "acceptance-cleaner-v1",
+            "render_encoding": "png-rgba-v1",
+            "render_schema": "render-v1",
         },
     }
 
@@ -338,6 +344,7 @@ async def ocr_stream(
     analysis_key: str = Form(...),
     ocr_key: str = Form(...),
     src_lang: str = Form(...),
+    render_artifact_key: str | None = Form(None),
     image: UploadFile | None = File(None),
 ):
     if src_lang not in {"ja", "es", "pt"}:

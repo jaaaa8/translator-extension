@@ -1,3 +1,4 @@
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from hashlib import sha256
 from math import ceil, floor
@@ -15,6 +16,7 @@ from .artifacts import (
     stable_block_id,
 )
 from .region_resolver import resolve_regions
+from .rendering import build_render_artifact
 
 _MIN_CROP_H = 48
 ANALYSIS_MAX_BYTES = 128 * 1024 * 1024
@@ -101,6 +103,14 @@ class Pipeline:
             size_of=lambda artifact: artifact.byte_size,
         )
         self._ocr_cache = BoundedLru(max_items=256)
+        self._render_cache = BoundedLru(
+            max_items=32,
+            max_bytes=128 * 1024 * 1024,
+            size_of=lambda artifact: artifact.byte_size,
+        )
+        self._render_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="render")
+        self._render_futures = {}
+        self._render_futures_lock = Lock()
 
     @property
     def langs(self) -> list[str]:
@@ -108,6 +118,46 @@ class Pipeline:
 
     def get_analysis(self, key):
         return self._analysis_cache.get(key)
+
+    def get_render(self, key):
+        return self._render_cache.get(key)
+
+    def ensure_render(self, analysis_key, render_key, *, analysis=None):
+        if analysis is not None and analysis.key != analysis_key:
+            raise ValueError("analysis_key_mismatch")
+        cached = self.get_render(render_key)
+        if cached is not None:
+            future = Future()
+            future.set_result(cached)
+            return future
+        with self._render_futures_lock:
+            cached = self.get_render(render_key)
+            if cached is not None:
+                future = Future()
+                future.set_result(cached)
+                return future
+            future = self._render_futures.get(render_key)
+            if future is not None:
+                return future
+            if analysis is None:
+                analysis = self.get_analysis(analysis_key)
+            if analysis is None:
+                raise KeyError("analysis_missing")
+            future = self._render_executor.submit(self._build_render, analysis, render_key)
+            self._render_futures[render_key] = future
+            return future
+
+    def _build_render(self, analysis, render_key):
+        # Wait until ensure_render has registered this worker as the singleflight owner.
+        with self._render_futures_lock:
+            pass
+        try:
+            artifact = build_render_artifact(analysis, render_key)
+            self._render_cache.put(render_key, artifact)
+            return artifact
+        finally:
+            with self._render_futures_lock:
+                self._render_futures.pop(render_key, None)
 
     def _decode_crop(self, image_bytes, crop):
         arr = np.frombuffer(image_bytes, np.uint8)

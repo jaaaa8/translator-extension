@@ -1,5 +1,7 @@
 from contextlib import asynccontextmanager
 import asyncio
+import base64
+from hashlib import sha256
 import json
 import time
 
@@ -44,6 +46,7 @@ def health():
         "device": config.DEVICE,
         "langs": config.LANGS,
         "versions": config.PIPELINE_VERSIONS,
+        "patch_versions": config.PATCH_VERSIONS,
     }
 
 
@@ -59,6 +62,75 @@ def _validated_crop(left, top, right, bottom):
 
 def _ndjson(event):
     return json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+
+def _render_payload(artifact, render_artifact_key):
+    return {
+        "schema_version": "render-v1",
+        "render_artifact_key": render_artifact_key,
+        "analysis_key": artifact.analysis_key,
+        "image_w": artifact.image_w,
+        "image_h": artifact.image_h,
+        "blocks": [
+            {
+                "block_id": block.block_id,
+                "patch_id": block.patch_id,
+                "patch_bbox": block.patch_bbox,
+                "clean_region": block.clean_region,
+                "fit_bbox": block.fit_bbox,
+                "patch_mime": block.patch_mime,
+                "patch_rgba": (
+                    base64.b64encode(block.patch_png).decode("ascii")
+                    if block.patch_png is not None
+                    else None
+                ),
+                "reason": block.reason,
+            }
+            for block in artifact.blocks
+        ],
+        "byte_size": artifact.byte_size,
+    }
+
+
+@app.post("/render-artifact")
+async def render_artifact(
+    analysis_key: str = Form(...),
+    render_artifact_key: str = Form(...),
+    source_content_hash: str = Form(...),
+    image: UploadFile | None = File(None),
+    crop_left: float | None = Form(None),
+    crop_top: float | None = Form(None),
+    crop_right: float | None = Form(None),
+    crop_bottom: float | None = Form(None),
+):
+    crop_or_error = _validated_crop(crop_left, crop_top, crop_right, crop_bottom)
+    if isinstance(crop_or_error, JSONResponse):
+        return crop_or_error
+    pipeline = get_pipeline()
+    cached = pipeline.get_render(render_artifact_key)
+    if cached is not None:
+        return _render_payload(cached, render_artifact_key)
+    if image is None:
+        if pipeline.get_analysis(analysis_key) is None:
+            return JSONResponse(status_code=409, content={"error": "artifact_missing"})
+    else:
+        data = await image.read()
+        if sha256(data).hexdigest() != source_content_hash:
+            return JSONResponse(
+                status_code=409,
+                content={"error": "source_identity_mismatch"},
+            )
+        try:
+            await asyncio.to_thread(pipeline.analyze, data, crop_or_error, analysis_key)
+        except ValueError as error:
+            return JSONResponse(status_code=422, content={"error": str(error)})
+    try:
+        artifact = await asyncio.wrap_future(
+            pipeline.ensure_render(analysis_key, render_artifact_key)
+        )
+    except KeyError:
+        return JSONResponse(status_code=409, content={"error": "artifact_missing"})
+    return _render_payload(artifact, render_artifact_key)
 
 
 # sync def → FastAPI chạy trong threadpool, không chặn /health khi đang xử lý ảnh
@@ -90,6 +162,7 @@ async def ocr_stream(
     analysis_key: str = Form(...),
     ocr_key: str = Form(...),
     src_lang: str = Form(...),
+    render_artifact_key: str | None = Form(None),
     image: UploadFile | None = File(None),
     crop_left: float | None = Form(None),
     crop_top: float | None = Form(None),
@@ -117,6 +190,12 @@ async def ocr_stream(
                 )
             else:
                 analysis_cache_hit = True
+            if render_artifact_key is not None:
+                pipeline.ensure_render(
+                    analysis_key,
+                    render_artifact_key,
+                    analysis=analysis,
+                )
             analysis_ms = max(0, round((time.perf_counter() - analysis_started) * 1000))
             yield _ndjson({
                 "type": "analysis_ready",

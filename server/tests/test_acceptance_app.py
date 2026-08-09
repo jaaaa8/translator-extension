@@ -99,6 +99,7 @@ def test_health_exposes_complete_fixed_versions_for_extension_keys():
         payload = http.get("/health").json()
         assert "langs" not in payload
         assert version_shape(payload["versions"]) == version_shape(config.PIPELINE_VERSIONS)
+        assert version_shape(payload["patch_versions"]) == version_shape(config.PATCH_VERSIONS)
         assert set(payload["versions"]["recognizers"]) == set(
             config.PIPELINE_VERSIONS["recognizers"]
         )
@@ -107,6 +108,7 @@ def test_health_exposes_complete_fixed_versions_for_extension_keys():
             "detector": "acceptance-detector-v1",
             "dedupe": "acceptance-dedupe-v1",
             "prep": "acceptance-prep-v1",
+            "region_resolver": "acceptance-region-resolver-v1",
             "recognizers": {
                 "ja": "acceptance-recognizer-ja-v1",
                 "es": "acceptance-recognizer-es-v1",
@@ -117,6 +119,11 @@ def test_health_exposes_complete_fixed_versions_for_extension_keys():
             "policy": "acceptance-policy-v1",
             "layout_order": "reading-order-v1",
             "page_schema": "acceptance-page-v1",
+        }
+        assert payload["patch_versions"] == {
+            "cleaner": "acceptance-cleaner-v1",
+            "render_encoding": "png-rgba-v1",
+            "render_schema": "render-v1",
         }
 
 
