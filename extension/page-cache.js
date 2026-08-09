@@ -240,8 +240,12 @@ function storedPage(record, now) {
   if (!Array.isArray(record.blocks)) throw new TypeError("blocks must be an array");
   value.blocks = record.blocks.map(storedTranslationBlock);
   if (record.manifest_ids !== undefined) value.manifest_ids = storedManifestIds(record.manifest_ids);
-  if (value.manifest_ids?.some((id) => value.blocks.some((block) => block.block_id === id && block.kind === "sfx"))) {
-    throw new TypeError("manifest_ids must not include SFX blocks");
+  if (value.manifest_ids?.some((id) => {
+    const matches = value.blocks.filter((block) => block.block_id === id);
+    return matches.length !== 1 || matches[0].kind !== "text" || matches[0].state !== "translated" ||
+      typeof matches[0].trans_text !== "string" || matches[0].trans_text.trim().length === 0;
+  })) {
+    throw new TypeError("manifest_ids must map to exactly one translated text block");
   }
   if (record.manifest_mismatch_count !== undefined) {
     if (![0, 1].includes(record.manifest_mismatch_count)) throw new TypeError("manifest_mismatch_count must be 0 or 1");

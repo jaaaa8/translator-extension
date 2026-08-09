@@ -269,6 +269,19 @@ test("catches validator weakening at the page-v2 persistence boundary", async (t
       row.manifest_ids = ["sfx-1"];
       row.render.blocks[0].block_id = "sfx-1";
     }],
+    ["accepting a manifest ID without a translation block", (row) => {
+      row.manifest_ids = ["missing"];
+      row.render.blocks[0].block_id = "missing";
+    }],
+    ["accepting a manifest ID mapped to a null-kind block", (row) => { row.blocks[0].kind = null; }],
+    ["accepting a manifest ID mapped to an OCR-complete block", (row) => { row.blocks[0].state = "ocr_complete"; }],
+    ["accepting a manifest ID mapped to a failed block", (row) => { row.blocks[0].state = "failed"; }],
+    ["accepting a manifest ID mapped to null trans_text", (row) => { row.blocks[0].trans_text = null; }],
+    ["accepting a manifest ID mapped to empty trans_text", (row) => { row.blocks[0].trans_text = ""; }],
+    ["accepting a manifest ID mapped to whitespace-only trans_text", (row) => { row.blocks[0].trans_text = " \t\n"; }],
+    ["accepting a manifest ID mapped to duplicate translation blocks", (row) => {
+      row.blocks.push(structuredClone(row.blocks[0]));
+    }],
   ];
 
   for (const [name, mutate] of mutations) {
