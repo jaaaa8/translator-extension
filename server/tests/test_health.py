@@ -15,6 +15,7 @@ def test_health():
     assert body["versions"] == config.PIPELINE_VERSIONS
     assert body["patch_versions"] == config.PATCH_VERSIONS
     assert body["versions"]["region_resolver"] == "light-component-v1"
+    assert body["versions"]["prompt"] == "comic-page-items-v3"
     assert all(lang in body["versions"]["recognizers"] for lang in body["langs"])
     assert body["versions"]["recognizers"]["es"] == body["versions"]["recognizers"]["pt"]
     assert set(body["patch_versions"]) == {"cleaner", "render_encoding", "render_schema"}

@@ -247,8 +247,8 @@ def test_missing_api_key_raises(monkeypatch):
 
 def test_translate_items_accepts_reordered_exact_ids(monkeypatch):
     reply = json.dumps([
-        {"id": "b2", "translation": "hai"},
-        {"id": "b1", "translation": "mot"},
+        {"id": "b2", "kind": "sfx", "translation": None},
+        {"id": "b1", "kind": "text", "translation": "mot"},
     ])
     translator = make(monkeypatch, [reply])
     assert translator.translate_items(
@@ -262,13 +262,13 @@ def test_translate_items_accepts_reordered_exact_ids(monkeypatch):
         page_height=871,
         reading_direction="rtl",
     ) == [
-        {"id": "b1", "translation": "mot"},
-        {"id": "b2", "translation": "hai"},
+        {"id": "b1", "kind": "text", "translation": "mot"},
+        {"id": "b2", "kind": "sfx", "translation": None},
     ]
 
 
 def test_translate_items_projects_exact_fields_and_page_context(monkeypatch):
-    reply = json.dumps([{"id": "b1", "translation": "một"}])
+    reply = json.dumps([{"id": "b1", "kind": "text", "translation": "một"}])
     translator, clients = make_with_clients(monkeypatch, [reply])
 
     assert translator.translate_items(
@@ -286,25 +286,79 @@ def test_translate_items_projects_exact_fields_and_page_context(monkeypatch):
         page_width=1107,
         page_height=871,
         reading_direction="rtl",
-    ) == [{"id": "b1", "translation": "một"}]
+    ) == [{"id": "b1", "kind": "text", "translation": "một"}]
 
     prompt = clients[0].models.calls[0]["contents"]
     assert '"page_width": 1107' in prompt
     assert '"page_height": 871' in prompt
     assert '"reading_direction": "rtl"' in prompt
-    assert '"id": "b1"' in prompt
-    assert '"text": "one"' in prompt
-    assert '"reading_order": 0' in prompt
-    assert '"bbox": [10, 20, 30, 40]' in prompt
-    assert "ignored" not in prompt
+    prompt_items = json.loads(prompt.split("Input items JSON:\n", 1)[1].split("\n\nReturn ONLY", 1)[0])
+    assert prompt_items == [{
+        "id": "b1", "text": "one", "reading_order": 0, "bbox": [10, 20, 30, 40],
+    }]
+
+
+def test_item_prompt_requires_strict_sfx_contract():
+    prompt = tr.ITEM_PROMPT.replace("\n", " ")
+    assert 'Classify sound-effect lettering as "sfx"' in tr.ITEM_PROMPT
+    assert 'dialogue and narration as "text"' in prompt
+    assert '"id":"the input id","kind":"text"|"sfx","translation":"translated text or null"' in tr.ITEM_PROMPT
+    assert "Use null only when kind is sfx." in tr.ITEM_PROMPT
+
+
+def test_normalize_items_preserves_text_and_sfx_null():
+    assert tr._normalize_items([
+        {"id": "b2", "kind": "sfx", "translation": None},
+        {"id": "b1", "kind": "text", "translation": "xin chào"},
+    ], ["b1", "b2"]) == [
+        {"id": "b1", "kind": "text", "translation": "xin chào"},
+        {"id": "b2", "kind": "sfx", "translation": None},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("items", "expected_ids"),
+    [
+        ([{"id": "b1", "kind": "text", "translation": None}], ["b1"]),
+        ([{"id": "b1", "kind": "text", "translation": ""}], ["b1"]),
+        ([{"id": "b1", "kind": "sfx", "translation": "bam"}], ["b1"]),
+        ([{"id": "b1", "kind": "caption", "translation": "caption"}], ["b1"]),
+        ([{"id": "b1", "kind": "text", "translation": "x", "extra": True}], ["b1"]),
+        ([{"id": "b1", "kind": "text"}], ["b1"]),
+        ([
+            {"id": "b1", "kind": "text", "translation": "x"},
+            {"id": "b1", "kind": "text", "translation": "y"},
+        ], ["b1"]),
+        ([{"id": "b1", "kind": "text", "translation": "x"}], ["b1", "b2"]),
+        ([{"id": "foreign", "kind": "text", "translation": "x"}], ["b1"]),
+        pytest.param(
+            [{"id": "b1", "kind": "text", "translation": "   "}],
+            ["b1"],
+            id="text_whitespace",
+        ),
+        pytest.param(
+            [{"id": "b1", "kind": "text", "translation": 1}],
+            ["b1"],
+            id="text_non_string",
+        ),
+        pytest.param(
+            [{"id": 1, "kind": "text", "translation": "x"}],
+            ["1"],
+            id="id_non_string_not_coerced",
+        ),
+    ],
+)
+def test_normalize_items_rejects_invalid_response_contract(items, expected_ids):
+    with pytest.raises(ValueError):
+        tr._normalize_items(items, expected_ids)
 
 
 @pytest.mark.parametrize(
     "reply",
     [
-        [{"id": "b1", "translation": "x"}],
-        [{"id": "b1", "translation": "x"}, {"id": "foreign", "translation": "y"}],
-        [{"id": "b1", "translation": "x"}, {"id": "b1", "translation": "y"}],
+        [{"id": "b1", "kind": "text", "translation": "x"}],
+        [{"id": "b1", "kind": "text", "translation": "x"}, {"id": "foreign", "kind": "text", "translation": "y"}],
+        [{"id": "b1", "kind": "text", "translation": "x"}, {"id": "b1", "kind": "text", "translation": "y"}],
     ],
 )
 def test_translate_items_rejects_missing_foreign_or_duplicate_ids(monkeypatch, reply):

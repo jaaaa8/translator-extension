@@ -19,7 +19,7 @@ PIPELINE_VERSIONS = {
         "pt": "paddleocr-latin-ppocrv6-v1",
     },
     "translator_model": GEMINI_MODEL,
-    "prompt": "comic-page-items-v2",
+    "prompt": "comic-page-items-v3",
     "policy": "full-page-v1",
     "layout_order": "reading-order-v1",
     "page_schema": "page-v1",
