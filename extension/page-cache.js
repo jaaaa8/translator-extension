@@ -1,8 +1,11 @@
-const PAGE_SCHEMA = "page-v1";
+const PAGE_SCHEMA = "page-v2";
 const PAGE_PREFIX = "mt:page:";
 const JOB_PREFIX = "mt:job:";
 const ACTIVE_STATES = new Set(["queued", "running"]);
 const TERMINAL_STATES = new Set(["partial", "complete", "failed"]);
+const PAGE_STATES = new Set([...ACTIVE_STATES, ...TERMINAL_STATES]);
+const TRANSLATION_STATES = new Set(["ocr_complete", "translated", "failed"]);
+const RENDER_REASONS = new Set(["clean_failed", "layout_failed", "fit_failed", "unsupported_region"]);
 class CacheFullError extends Error {}
 
 function pageStorageKey(key) { return PAGE_PREFIX + key; }
@@ -88,24 +91,113 @@ function storedVersions(versions) {
   return value;
 }
 
-function storedBlock(source) {
+function storedBbox(value, field, nullable = false) {
+  if (value === null && nullable) return null;
+  if (!Array.isArray(value) || value.length !== 4 ||
+    !value.every((item) => typeof item === "number" && Number.isFinite(item))) {
+    throw new TypeError(`${field} must be four finite numbers`);
+  }
+  return [...value];
+}
+
+function storedTranslationBlock(source) {
   if (!source || Object.getPrototypeOf(source) !== Object.prototype) throw new TypeError("block must be metadata");
   const block = {};
-  copyStrings(block, source, ["block_id", "src_text", "state"]);
-  if (source.trans_text !== undefined) {
-    if (source.trans_text !== null && typeof source.trans_text !== "string") {
-      throw new TypeError("trans_text must be a string or null");
-    }
-    block.trans_text = source.trans_text;
+  for (const field of ["block_id", "src_text"]) {
+    if (typeof source[field] !== "string") throw new TypeError(`${field} must be a string`);
+    block[field] = source[field];
   }
-  const { bbox } = source;
-  if (bbox !== undefined) {
-    if (!Array.isArray(bbox) || bbox.length !== 4 || !bbox.every((value) => typeof value === "number" && Number.isFinite(value))) {
-      throw new TypeError("bbox must be four finite numbers");
-    }
-    block.bbox = [...bbox];
+  block.bbox = storedBbox(source.bbox, "bbox");
+  if (source.trans_text !== null && typeof source.trans_text !== "string") {
+    throw new TypeError("trans_text must be a string or null");
+  }
+  block.trans_text = source.trans_text;
+  if (![null, "text", "sfx"].includes(source.kind)) throw new TypeError("kind must be text, sfx, or null");
+  block.kind = source.kind;
+  if (typeof source.vertical !== "boolean") throw new TypeError("vertical must be a boolean");
+  block.vertical = source.vertical;
+  if (source.reading_order !== null && (!Number.isInteger(source.reading_order) || source.reading_order < 0)) {
+    throw new TypeError("reading_order must be a nonnegative integer or null");
+  }
+  block.reading_order = source.reading_order;
+  if (!TRANSLATION_STATES.has(source.state)) throw new TypeError("state must be translation metadata");
+  block.state = source.state;
+  if (block.kind === "sfx" && block.trans_text !== null) throw new TypeError("sfx trans_text must be null");
+  return block;
+}
+
+function storedManifestIds(manifestIds) {
+  if (!Array.isArray(manifestIds) || !manifestIds.every((id) => typeof id === "string")) {
+    throw new TypeError("manifest_ids must contain strings");
+  }
+  if (new Set(manifestIds).size !== manifestIds.length) throw new TypeError("manifest_ids must be unique");
+  return [...manifestIds];
+}
+
+function storedLayoutProfile(profile) {
+  if (profile === null) return null;
+  if (!profile || Object.getPrototypeOf(profile) !== Object.prototype) {
+    throw new TypeError("layout_profile must be metadata or null");
+  }
+  return {
+    font_px: storedNumber(profile.font_px, "layout_profile.font_px"),
+    line_height: storedNumber(profile.line_height, "layout_profile.line_height"),
+  };
+}
+
+function storedRenderBlock(source) {
+  if (!source || Object.getPrototypeOf(source) !== Object.prototype) throw new TypeError("render block must be metadata");
+  if (typeof source.block_id !== "string") throw new TypeError("block_id must be a string");
+  if (!["in_place", "skip"].includes(source.render_mode)) throw new TypeError("render_mode must be in_place or skip");
+  if (source.patch_id !== null && typeof source.patch_id !== "string") throw new TypeError("patch_id must be a string or null");
+  if (source.reason !== null && !RENDER_REASONS.has(source.reason)) throw new TypeError("reason must be a capability reason or null");
+  const block = {
+    block_id: source.block_id,
+    render_mode: source.render_mode,
+    patch_id: source.patch_id,
+    patch_bbox: storedBbox(source.patch_bbox, "patch_bbox", true),
+    fit_bbox: storedBbox(source.fit_bbox, "fit_bbox", true),
+    layout_profile: storedLayoutProfile(source.layout_profile),
+    reason: source.reason,
+  };
+  if (block.render_mode === "in_place" &&
+    (block.patch_id === null || block.patch_bbox === null || block.fit_bbox === null ||
+      block.layout_profile === null || block.reason !== null)) {
+    throw new TypeError("in_place render block requires patch and layout metadata");
+  }
+  if (block.render_mode === "skip" &&
+    (block.patch_id !== null || block.patch_bbox !== null || block.layout_profile !== null || !RENDER_REASONS.has(block.reason))) {
+    throw new TypeError("skip render block requires a capability reason without patch metadata");
   }
   return block;
+}
+
+function storedRenderSubrecord(source, manifestIds) {
+  if (!source || Object.getPrototypeOf(source) !== Object.prototype) throw new TypeError("render must be metadata");
+  if (source.schema_version !== "render-page-v1") throw new TypeError("render schema_version must be render-page-v1");
+  if (typeof source.render_artifact_key !== "string") throw new TypeError("render_artifact_key must be a string");
+  if (typeof source.layout_fit_version !== "string") throw new TypeError("layout_fit_version must be a string");
+  if (typeof source.breaker_open !== "boolean") throw new TypeError("breaker_open must be a boolean");
+  if (!Array.isArray(source.blocks)) throw new TypeError("render blocks must be an array");
+  const value = {
+    schema_version: "render-page-v1",
+    render_artifact_key: source.render_artifact_key,
+    patch_versions: storedVersions(source.patch_versions),
+    layout_fit_version: source.layout_fit_version,
+    breaker_open: source.breaker_open,
+    blocks: source.blocks.map(storedRenderBlock),
+  };
+  if (value.breaker_open) {
+    if (value.blocks.length !== 0) throw new TypeError("breaker sentinel blocks must be empty");
+  } else {
+    if (manifestIds === undefined) throw new TypeError("ready render requires manifest_ids");
+    const blockIds = new Set(value.blocks.map((block) => block.block_id));
+    if (blockIds.size !== value.blocks.length || value.blocks.length !== manifestIds.length ||
+      !manifestIds.every((id) => blockIds.has(id))) {
+      throw new TypeError("ready render block IDs must match manifest_ids");
+    }
+  }
+  return value;
 }
 
 function storedCrop(crop) {
@@ -126,7 +218,15 @@ function storedPage(record, now) {
     updated_at: storedNumber(now, "updated_at"),
     last_accessed_at: storedNumber(record.last_accessed_at ?? now, "last_accessed_at"),
   };
-  copyStrings(value, record, ["page_artifact_key", "analysis_key", "ocr_key", "overlay_key", "src_lang", "dst_lang", "state"]);
+  copyStrings(value, record, ["page_artifact_key", "analysis_key", "ocr_key", "render_artifact_key", "source_content_hash", "src_lang", "dst_lang"]);
+  if (record.reading_direction !== undefined) {
+    if (!["rtl", "ltr"].includes(record.reading_direction)) throw new TypeError("reading_direction must be rtl or ltr");
+    value.reading_direction = record.reading_direction;
+  }
+  if (record.state !== undefined) {
+    if (!PAGE_STATES.has(record.state)) throw new TypeError("state must be page metadata");
+    value.state = record.state;
+  }
   if (record.source_url !== undefined) value.source_url = storedUrl(record.source_url);
   copyNumbers(value, record, ["natural_width", "natural_height", "image_w", "image_h", "created_at"], ["image_w", "image_h"]);
   copyBooleans(value, record, ["analysis_known", "ocr_done"]);
@@ -135,8 +235,19 @@ function storedPage(record, now) {
     value.last_error = record.last_error;
   }
   if (record.versions !== undefined) value.versions = storedVersions(record.versions);
+  if (record.patch_versions !== undefined) value.patch_versions = storedVersions(record.patch_versions);
   value.crop = storedCrop(record.crop ?? "full");
-  value.blocks = (record.blocks || []).map(storedBlock);
+  if (!Array.isArray(record.blocks)) throw new TypeError("blocks must be an array");
+  value.blocks = record.blocks.map(storedTranslationBlock);
+  if (record.manifest_ids !== undefined) value.manifest_ids = storedManifestIds(record.manifest_ids);
+  if (value.manifest_ids?.some((id) => value.blocks.some((block) => block.block_id === id && block.kind === "sfx"))) {
+    throw new TypeError("manifest_ids must not include SFX blocks");
+  }
+  if (record.manifest_mismatch_count !== undefined) {
+    if (![0, 1].includes(record.manifest_mismatch_count)) throw new TypeError("manifest_mismatch_count must be 0 or 1");
+    value.manifest_mismatch_count = record.manifest_mismatch_count;
+  }
+  if (record.render !== undefined) value.render = storedRenderSubrecord(record.render, value.manifest_ids);
   return value;
 }
 
@@ -161,11 +272,39 @@ function storedJob(record) {
   return value;
 }
 
+function pageVersionsEqual(rowVersions, liveVersions, srcLang) {
+  if (!rowVersions || !liveVersions || Object.getPrototypeOf(rowVersions) !== Object.prototype ||
+    Object.getPrototypeOf(liveVersions) !== Object.prototype) return false;
+  const rowKeys = Object.keys(rowVersions).filter((key) => key !== "recognizers");
+  const liveKeys = Object.keys(liveVersions).filter((key) => key !== "recognizers");
+  if (rowKeys.length !== liveKeys.length || !rowKeys.every((key) =>
+    Object.prototype.hasOwnProperty.call(liveVersions, key) &&
+    typeof rowVersions[key] === "string" && rowVersions[key] === liveVersions[key])) return false;
+  const rowRecognizers = rowVersions.recognizers;
+  const liveRecognizers = liveVersions.recognizers;
+  if (rowRecognizers === undefined && liveRecognizers === undefined) return true;
+  if (!rowRecognizers || !liveRecognizers || Object.getPrototypeOf(rowRecognizers) !== Object.prototype ||
+    Object.getPrototypeOf(liveRecognizers) !== Object.prototype || typeof srcLang !== "string") return false;
+  return typeof rowRecognizers[srcLang] === "string" && rowRecognizers[srcLang] === liveRecognizers[srcLang];
+}
+
+function runtimePage(row, layoutFitVersion) {
+  if (layoutFitVersion === undefined || !row.render || row.render.layout_fit_version === layoutFitVersion) return row;
+  return {
+    ...row,
+    render: {
+      ...row.render,
+      blocks: row.render.blocks.map((block) => ({ ...block, layout_profile: null })),
+    },
+  };
+}
+
 class PageCache {
   constructor(storage, { budgetBytes = 8 * 1024 * 1024, now = Date.now } = {}) {
     this.storage = storage;
     this.budgetBytes = budgetBytes;
     this.now = now;
+    this.layoutFitVersion = undefined;
   }
 
   async _all() {
@@ -173,12 +312,13 @@ class PageCache {
   }
 
   async _touch(key, row) {
+    const touched = storedPage(row, row.updated_at);
     try {
-      const touched = { ...row, last_accessed_at: storedNumber(this.now(), "last_accessed_at") };
+      touched.last_accessed_at = storedNumber(this.now(), "last_accessed_at");
       await this.storage.set({ [key]: touched });
-      return touched;
+      return runtimePage(touched, this.layoutFitVersion);
     } catch {
-      return row;
+      return runtimePage(touched, this.layoutFitVersion);
     }
   }
 
@@ -199,11 +339,23 @@ class PageCache {
     return null;
   }
 
-  async purgeIncompatible(versions) {
-    const remove = Object.entries(await this._all())
-      .filter(([key, row]) => key.startsWith(PAGE_PREFIX) &&
-        (row.schema_version !== PAGE_SCHEMA || !metadataEqual(row.versions, versions)))
-      .map(([key]) => key);
+  async purgeIncompatible(versions, patchVersions, layoutFitVersion) {
+    if (layoutFitVersion !== undefined) {
+      if (typeof layoutFitVersion !== "string") throw new TypeError("layoutFitVersion must be a string");
+      this.layoutFitVersion = layoutFitVersion;
+    }
+    const remove = [];
+    for (const [key, row] of Object.entries(await this._all())) {
+      if (!key.startsWith(PAGE_PREFIX)) continue;
+      if (row.schema_version !== PAGE_SCHEMA || !pageVersionsEqual(row.versions, versions, row.src_lang)) {
+        remove.push(key);
+      } else if (row.render !== undefined && patchVersions !== undefined &&
+        (!metadataEqual(row.patch_versions, patchVersions) || !metadataEqual(row.render.patch_versions, patchVersions))) {
+        const preserved = storedPage(row, row.updated_at);
+        delete preserved.render;
+        await this.storage.set({ [key]: preserved });
+      }
+    }
     if (remove.length) await this.storage.remove(remove);
     return remove.length;
   }
@@ -286,9 +438,10 @@ class PageCache {
           await this.storage.remove(key);
           continue;
         }
-        const page = row.state === "running" ? { ...row, state: "queued" } : row;
-        pages.push(page);
-        if (page !== row) await this.storage.set({ [key]: page });
+        const page = storedPage(row, row.updated_at);
+        if (page.state === "running") page.state = "queued";
+        pages.push(runtimePage(page, this.layoutFitVersion));
+        if (!metadataEqual(page, row)) await this.storage.set({ [key]: page });
       } else if (key.startsWith(JOB_PREFIX)) {
         const job = row.state === "running" ? { ...row, state: "queued" } : row;
         jobs.push(job);

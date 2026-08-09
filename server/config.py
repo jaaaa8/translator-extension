@@ -22,7 +22,7 @@ PIPELINE_VERSIONS = {
     "prompt": "comic-page-items-v3",
     "policy": "full-page-v1",
     "layout_order": "reading-order-v1",
-    "page_schema": "page-v1",
+    "page_schema": "page-v2",
 }
 PATCH_VERSIONS = {
     "cleaner": "telea3-feather2-v1",

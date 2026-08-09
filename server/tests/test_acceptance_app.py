@@ -118,7 +118,7 @@ def test_health_exposes_complete_fixed_versions_for_extension_keys():
             "prompt": "acceptance-prompt-v1",
             "policy": "acceptance-policy-v1",
             "layout_order": "reading-order-v1",
-            "page_schema": "acceptance-page-v1",
+            "page_schema": "page-v2",
         }
         assert payload["patch_versions"] == {
             "cleaner": "acceptance-cleaner-v1",
@@ -131,7 +131,7 @@ def test_health_fixture_and_assets_are_isolated_and_deterministic():
     with client() as http:
         health = http.get("/health").json()
         assert health["status"] == "ok"
-        assert health["versions"]["page_schema"] == "acceptance-page-v1"
+        assert health["versions"]["page_schema"] == "page-v2"
         fixture = http.get("/fixture.html?acceptance=reader")
         assert fixture.status_code == 200
         assert "MangaTranslator layout fixture" in fixture.text

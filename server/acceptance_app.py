@@ -299,7 +299,7 @@ async def health():
             "prompt": "acceptance-prompt-v1",
             "policy": "acceptance-policy-v1",
             "layout_order": "reading-order-v1",
-            "page_schema": "acceptance-page-v1",
+            "page_schema": "page-v2",
         },
         "patch_versions": {
             "cleaner": "acceptance-cleaner-v1",
