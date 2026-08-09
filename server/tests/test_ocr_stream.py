@@ -21,6 +21,7 @@ from server.pipeline import Pipeline
 class FakeStreamPipeline:
     def __init__(self):
         self.analysis = None
+        self.render_calls = []
 
     def get_analysis(self, key):
         return self.analysis if self.analysis and self.analysis.key == key else None
@@ -50,6 +51,9 @@ class FakeStreamPipeline:
     def _iter_ocr(self, analysis, analysis_key, src_lang, ocr_key, cancelled):
         yield from self.iter_ocr(analysis_key, src_lang, ocr_key, cancelled)
 
+    def ensure_render(self, analysis_key, render_artifact_key, *, analysis=None):
+        self.render_calls.append((analysis_key, render_artifact_key, analysis))
+
 
 def events(response):
     return [json.loads(line) for line in response.text.splitlines()]
@@ -62,7 +66,7 @@ def test_ocr_stream_cold_then_warm(monkeypatch):
     cold = client.post(
         "/ocr-stream",
         files={"image": ("page.png", b"png", "image/png")},
-        data={"analysis_key": "a1", "ocr_key": "o1", "src_lang": "es"},
+        data={"analysis_key": "a1", "ocr_key": "o1", "src_lang": "es", "render_artifact_key": "render-1"},
     )
     cold_events = events(cold)
     assert [row["type"] for row in cold_events] == [
@@ -73,10 +77,16 @@ def test_ocr_stream_cold_then_warm(monkeypatch):
     assert cold_events[1]["vertical"] is False
     warm = client.post(
         "/ocr-stream",
-        data={"analysis_key": "a1", "ocr_key": "o2", "src_lang": "ja"},
+        data={"analysis_key": "a1", "ocr_key": "o2", "src_lang": "ja", "render_artifact_key": "render-2"},
     )
     assert warm.status_code == 200
     assert events(warm)[0]["analysis_cache_hit"] is True
+    # Mutation caught: dropping render preparation from either cold or warm
+    # stream after making the key required.
+    assert [(analysis, render) for analysis, render, _ in pipeline.render_calls] == [
+        ("a1", "render-1"),
+        ("a1", "render-2"),
+    ]
 
 
 def test_ocr_stream_keeps_nonzero_duration_for_delayed_cache_hit(monkeypatch):
@@ -89,7 +99,7 @@ def test_ocr_stream_keeps_nonzero_duration_for_delayed_cache_hit(monkeypatch):
     response = TestClient(main.app).post(
         "/ocr-stream",
         files={"image": ("page.png", b"png", "image/png")},
-        data={"analysis_key": "a1", "ocr_key": "o1", "src_lang": "es"},
+        data={"analysis_key": "a1", "ocr_key": "o1", "src_lang": "es", "render_artifact_key": "render-1"},
     )
 
     ready = events(response)[0]
@@ -110,7 +120,7 @@ def test_ocr_stream_excludes_delay_before_body_consumption(monkeypatch):
 
     response = asyncio.run(main.ocr_stream(
         Request(), analysis_key="a1", ocr_key="o1", src_lang="ja", image=None,
-        render_artifact_key=None,
+        render_artifact_key="render-1",
     ))
     clock[0] = 11.0
     ready = json.loads(asyncio.run(anext(response.body_iterator)))
@@ -122,10 +132,22 @@ def test_ocr_stream_reports_analysis_missing(monkeypatch):
     monkeypatch.setattr(main, "_pipeline", FakeStreamPipeline())
     response = TestClient(main.app).post(
         "/ocr-stream",
-        data={"analysis_key": "missing", "ocr_key": "o1", "src_lang": "ja"},
+        data={"analysis_key": "missing", "ocr_key": "o1", "src_lang": "ja", "render_artifact_key": "render-1"},
     )
     assert response.status_code == 409
     assert response.json() == {"error": "analysis_missing"}
+
+
+def test_ocr_stream_requires_render_artifact_key(monkeypatch):
+    # Mutation caught: restoring the optional Task 5 compatibility seam.
+    monkeypatch.setattr(main, "_pipeline", FakeStreamPipeline())
+    response = TestClient(main.app).post(
+        "/ocr-stream",
+        files={"image": ("page.png", b"png", "image/png")},
+        data={"analysis_key": "a1", "ocr_key": "o1", "src_lang": "ja"},
+    )
+
+    assert response.status_code == 422
 
 
 def test_ocr_stream_keeps_warm_analysis_after_cache_eviction(monkeypatch):
@@ -155,7 +177,7 @@ def test_ocr_stream_keeps_warm_analysis_after_cache_eviction(monkeypatch):
 
     response = TestClient(main.app).post(
         "/ocr-stream",
-        data={"analysis_key": "a1", "ocr_key": "o1", "src_lang": "ja"},
+        data={"analysis_key": "a1", "ocr_key": "o1", "src_lang": "ja", "render_artifact_key": "render-1"},
     )
 
     assert response.status_code == 200

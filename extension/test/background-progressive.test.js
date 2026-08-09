@@ -1,7 +1,8 @@
 const assert = require("assert");
 const fs = require("fs");
+const test = require("node:test");
 const vm = require("vm");
-const { webcrypto } = require("crypto");
+const { createHash, webcrypto } = require("crypto");
 const { TextEncoder, TextDecoder } = require("util");
 
 function responseFrom(chunks) {
@@ -21,6 +22,13 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+function sourceIdentityFor(source, bytes = Buffer.from(source)) {
+  return {
+    sourceContentHash: createHash("sha256").update(bytes).digest("hex"),
+    blob: new Blob([bytes]),
+  };
+}
+
 async function flush(turns = 4) {
   for (let index = 0; index < turns; index++) {
     await Promise.resolve();
@@ -31,7 +39,7 @@ async function flush(turns = 4) {
 async function waitUntil(check, label) {
   for (let index = 0; index < 1000; index++) {
     if (check()) return;
-    await flush(1);
+    await new Promise((resolve) => setTimeout(resolve, 1));
   }
   assert.fail(`timed out waiting for ${label}`);
 }
@@ -80,14 +88,16 @@ function fakePort(name = "translation") {
 
 function createFakeServer() {
   const versions = {
-    detector: "d1", dedupe: "dd1", prep: "p1",
+    detector: "d1", dedupe: "dd1", prep: "p1", region_resolver: "rr1",
     recognizers: { ja: "r-ja", es: "r-latin", pt: "r-latin" },
-    translator_model: "g1", prompt: "pr1", policy: "po1", layout_order: "reading-order-v1", page_schema: "page-v1",
+    translator_model: "g1", prompt: "pr1", policy: "po1", layout_order: "reading-order-v1", page_schema: "page-v2",
   };
+  const patchVersions = { cleaner: "c1", render_encoding: "png-rgba-v1", render_schema: "render-v1" };
   const counts = { health: 0, source: 0, ocr: 0, coldOcr: 0, warmOcr: 0, translate: 0, aborted: 0 };
   const translationBatches = [];
   const translationRequests = [];
   const translationBodies = [];
+  const ocrForms = [];
   const sourceGates = new Map();
   const failedSources = new Set();
   const ocrRows = new Map();
@@ -97,6 +107,7 @@ function createFakeServer() {
   const translationResults = [];
   let online = true;
   let responseVersions = versions;
+  let responsePatchVersions = patchVersions;
 
   async function waitForGate(gate, signal) {
     if (!gate) return;
@@ -112,7 +123,7 @@ function createFakeServer() {
     if (url.endsWith("/health")) {
       counts.health++;
       if (!online) throw new Error("offline");
-      return { ok: true, json: async () => ({ versions: responseVersions }) };
+      return { ok: true, json: async () => ({ versions: responseVersions, patch_versions: responsePatchVersions }) };
     }
     if (!url.startsWith("http://127.0.0.1:8910/")) {
       counts.source++;
@@ -129,6 +140,7 @@ function createFakeServer() {
     if (url.endsWith("/ocr-stream")) {
       counts.ocr++;
       const form = options.body;
+      ocrForms.push(form);
       const analysisKey = form.get("analysis_key");
       const image = form.get("image");
       if (!image && !analysisSources.has(analysisKey)) return { ok: false, status: 409, json: async () => ({ error: "analysis_missing" }) };
@@ -187,12 +199,15 @@ function createFakeServer() {
 
   return {
     versions,
+    patchVersions,
     counts,
     translationBatches,
     translationRequests,
     translationBodies,
+    ocrForms,
     fetch,
     setResponseVersions(value) { responseVersions = value; },
+    setResponsePatchVersions(value) { responsePatchVersions = value; },
     setOnline(value) { online = value; },
     holdSource(pageName) { const gate = deferred(); sourceGates.set(pageName, gate); return gate; },
     releaseSource(pageName) { sourceGates.get(pageName)?.resolve(); sourceGates.delete(pageName); },
@@ -231,15 +246,28 @@ function createBackgroundApp({ storage = fakeStorage(), server = createFakeServe
     return vm.runInContext("JSON.parse(__storageJson)", context);
   };
   server.setResponseVersions(vm.runInContext(`(${JSON.stringify(server.versions)})`, context));
+  server.setResponsePatchVersions(vm.runInContext(`(${JSON.stringify(server.patchVersions)})`, context));
   vm.runInContext(fs.readFileSync("extension/page-cache.js", "utf8"), context);
   vm.runInContext(fs.readFileSync("extension/reading-order.js", "utf8"), context);
+  if (fs.existsSync("extension/source-fetch.js")) {
+    vm.runInContext(fs.readFileSync("extension/source-fetch.js", "utf8"), context);
+  }
   vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
   return {
     context,
     server,
     storage,
     async ready() { await vm.runInContext("ready", context); },
-    connect() { const value = fakePort(); connectListener(value); return value; },
+    connect() {
+      const value = fakePort();
+      const deliver = value.receive.bind(value);
+      value.receive = (message) => {
+        context.__portJson = JSON.stringify(message);
+        deliver(vm.runInContext("JSON.parse(__portJson)", context));
+      };
+      connectListener(value);
+      return value;
+    },
     message(message) {
       return new Promise((resolve, reject) => {
         const handled = runtimeListeners.some((listener) => listener(message, {}, resolve) === true);
@@ -259,10 +287,12 @@ function createBackgroundApp({ storage = fakeStorage(), server = createFakeServe
       );
       return port.sent.find((event) => event.type === type);
     },
-    async keysFor(job, srcLang = "ja", dstLang = "vi") {
+    async keysFor(job, srcLang = "ja", dstLang = "vi", sourceIdentity = sourceIdentityFor(job.source_url)) {
       return context.buildKeys(
         { ...job, src_lang: srcLang, dst_lang: dstLang },
-        vm.runInContext("serverVersions", context)
+        sourceIdentity,
+        vm.runInContext("serverVersions", context),
+        server.patchVersions,
       );
     },
     page(pageKey) { return storage.rows[`mt:page:${pageKey}`]; },
@@ -278,11 +308,19 @@ function createBackgroundApp({ storage = fakeStorage(), server = createFakeServe
 }
 
 async function scenario(name, check) {
+  let timer;
   try {
-    await check();
+    await Promise.race([
+      check(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("scenario timed out after 5000ms")), 5000);
+      }),
+    ]);
   } catch (error) {
     error.message = `${name}: ${error.message}`;
     throw error;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -291,6 +329,7 @@ const context = {
   crypto: webcrypto,
   console,
   setTimeout, clearTimeout,
+  AbortController, AbortSignal, FormData, Blob, structuredClone,
   importScripts: () => {},
   chrome: {
     runtime: {
@@ -304,9 +343,12 @@ const context = {
 };
 vm.createContext(context);
 vm.runInContext(fs.readFileSync("extension/reading-order.js", "utf8"), context);
+if (fs.existsSync("extension/source-fetch.js")) {
+  vm.runInContext(fs.readFileSync("extension/source-fetch.js", "utf8"), context);
+}
 vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
 
-(async () => {
+test("background progressive transport", { timeout: 30000 }, async () => {
   // The producer API is deliberately exercised through a port: changing
   // acceptScope to only retain foreground work must make this fail.
   assert.strictEqual(typeof context.acceptScope, "function");
@@ -320,9 +362,11 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const missingDirection = app.startScope("default-direction", "visible", app.job("default-direction-job", "https://x/default-direction.jpg"));
     delete missingDirection.reading_direction;
     port.receive(missingDirection);
-    await app.waitFor("page_job_accepted", port);
+    await waitUntil(() => server.counts.source === 1, "held source identity fetch");
     assert.strictEqual(app.storedJob("default-direction-job").descriptor.reading_direction, "rtl");
+    assert.strictEqual(port.sent.some((event) => event.type === "page_job_accepted"), false);
     server.releaseSource("default-direction");
+    await app.waitFor("page_job_accepted", port);
     await app.waitFor("scope_done", port);
 
     const beforeSource = server.counts.source;
@@ -408,12 +452,56 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     );
   });
 
+  await scenario("every OCR stream carries the exact render key built from fetched bytes", async () => {
+    // Mutation caught: omitting render_artifact_key or deriving it from translation identity.
+    const server = createFakeServer();
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const job = app.job("render-key-job", "https://x/render-key.jpg");
+    const expected = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const port = app.connect();
+    port.receive(app.startScope("render-key", "visible", job));
+    await app.waitFor("scope_done", port);
+
+    assert.strictEqual(server.ocrForms.length, 1);
+    assert.strictEqual(server.ocrForms[0].get("render_artifact_key"), expected.renderArtifactKey);
+    assert.strictEqual(await server.ocrForms[0].get("image").text(), job.source_url);
+    assert.strictEqual(server.counts.source, 1);
+    const stored = app.page(expected.pageArtifactKey);
+    assert.strictEqual(stored.source_content_hash, sourceIdentityFor(job.source_url).sourceContentHash);
+    assert.strictEqual(stored.render_artifact_key, expected.renderArtifactKey);
+    assert.deepStrictEqual(stored.patch_versions, server.patchVersions);
+  });
+
+  await scenario("different crops share one retained source fetch", async () => {
+    // Mutation caught: deduping the source entry by URL plus crop instead of URL alone.
+    const server = createFakeServer();
+    server.holdSource("shared-crop");
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const port = app.connect();
+    port.receive({
+      ...app.startScope("shared-crop", "visible"),
+      jobs: [
+        app.job("shared-crop-full", "https://x/shared-crop.jpg"),
+        app.job("shared-crop-half", "https://x/shared-crop.jpg", {
+          crop: { left: 0, top: 0, right: 0.5, bottom: 1 },
+        }),
+      ],
+    });
+    await waitUntil(() => server.counts.source === 1, "one shared source fetch");
+    server.releaseSource("shared-crop");
+    const done = await app.waitFor("scope_done", port);
+    assert.deepStrictEqual({ images: done.images, failed: done.failed }, { images: 2, failed: 0 });
+    assert.strictEqual(server.counts.source, 1);
+  });
+
   await scenario("late consumer replays a completed in-flight page before persistence", async () => {
     const storage = fakeStorage();
     const releaseCompleteWrite = deferred();
     let completeWriteHeld = false;
     storage.beforeSet = async (values) => {
-      if (completeWriteHeld || !Object.values(values).some((row) => row?.schema_version === "page-v1" && row.state === "complete")) return;
+      if (completeWriteHeld || !Object.values(values).some((row) => row?.schema_version === "page-v2" && row.state === "complete")) return;
       completeWriteHeld = true;
       await releaseCompleteWrite.promise;
     };
@@ -452,7 +540,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
         ],
         expected: { translated: 1, failed: 1 },
         lateExpected: { translated: 1, failed: 0 },
-        sourceCalls: 1,
+        sourceCalls: 2,
       },
       {
         name: "failed",
@@ -463,7 +551,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
         ],
         expected: { translated: 0, failed: 1 },
         lateExpected: { translated: 0, failed: 1 },
-        sourceCalls: 1,
+        sourceCalls: 2,
       },
       {
         name: "pre-ocr-failed",
@@ -509,7 +597,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     }
   });
 
-  await scenario("A continues after disconnect and exact return makes zero calls", async () => {
+  await scenario("A continues after disconnect and exact return only rehashes source", async () => {
     const server = createFakeServer();
     server.holdSource("detached");
     const app = createBackgroundApp({ server });
@@ -518,7 +606,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
     const first = app.connect();
     first.receive(app.startScope("detached-request", "visible", job));
-    await app.waitFor("page_job_accepted", first);
+    await waitUntil(() => server.counts.source === 1, "detached source fetch");
     first.disconnect();
     server.releaseSource("detached");
     await waitUntil(() => app.page(keys.pageArtifactKey)?.state === "complete", "detached page completion");
@@ -543,7 +631,10 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       { image_w: replayed.image_w, image_h: replayed.image_h },
       { image_w: 100, image_h: 200 }
     );
-    assert.deepStrictEqual(server.counts, calls);
+    // Mutation caught: retaining a settled source entry after the producer's
+    // final release would make this revisit skip the required byte hash fetch.
+    assert.deepStrictEqual({ ...server.counts, source: calls.source }, calls);
+    assert.strictEqual(server.counts.source, calls.source + 1);
   });
 
   await scenario("loaded disconnect aborts active and queued work and leaves no storage", async () => {
@@ -602,9 +693,11 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     port.receive(offline.startScope("offline", "visible", offline.job("offline-job", "https://x/offline.jpg")));
     await waitUntil(() => offline.storedJob("offline-job")?.waiting_for_health === true, "offline ledger");
     await flush(20);
+    // Mutation caught: deferring source acquisition until server health returns
+    // breaks eager URL dedupe/hash work and forces resume to fetch again.
     assert.deepStrictEqual(
       { health: offlineServer.counts.health, source: offlineServer.counts.source },
-      { health: 2, source: 0 }
+      { health: 2, source: 1 }
     );
     offlineServer.setOnline(true);
     assert.strictEqual((await offline.message({ type: "health" })).ok, true);
@@ -671,14 +764,19 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     });
     const server = createFakeServer();
     server.holdSource("legacy-direction");
+    server.holdOcrAfterFirst("legacy-direction");
     const app = createBackgroundApp({ storage, server });
+    // Mutation caught: awaiting restored source bytes inside global readiness
+    // blocks every new worker request while one old image fetch is slow.
     await app.ready();
+    await waitUntil(() => server.counts.source === 1, "legacy direction source fetch");
+    server.releaseSource("legacy-direction");
     await waitUntil(() => app.storedJob(descriptor.job_id)?.page_artifact_key, "legacy direction repersist");
     const stored = app.storedJob(descriptor.job_id);
     const expected = await app.keysFor({ ...descriptor, reading_direction: "rtl" });
     assert.strictEqual(stored.descriptor.reading_direction, "rtl");
     assert.strictEqual(stored.page_artifact_key, expected.pageArtifactKey);
-    server.releaseSource("legacy-direction");
+    server.releaseOcr("legacy-direction");
     await waitUntil(() => app.storedJob(descriptor.job_id) === undefined, "legacy direction completion");
   });
 
@@ -742,18 +840,23 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const job = app.job("prewarm-job", "https://x/prewarm.jpg");
     const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
     app.server.holdSource("prewarm");
-    const response = await app.message({
+    const responsePromise = app.message({
       type: "prewarmJob",
       src_lang: "ja",
       dst_lang: "vi",
       job,
     });
+    // Mutation caught: leaving the runtime prewarm caller on the old
+    // attachDescriptor signature skips source acquisition/hash entirely.
+    await waitUntil(() => app.server.counts.source === 1, "prewarm source identity");
+    assert.strictEqual(app.debug().producers, 0);
+    app.server.releaseSource("prewarm");
+    const response = await responsePromise;
     assert.strictEqual(response.ok, true);
     app.context.__prewarmKey = keys.pageArtifactKey;
     assert.strictEqual(vm.runInContext("producers.get(__prewarmKey).descriptor.reading_direction", app.context), "rtl");
     assert.strictEqual(app.storedJob("prewarm-job"), undefined);
     assert.strictEqual(app.page(keys.pageArtifactKey), undefined);
-    app.server.releaseSource("prewarm");
     await waitUntil(() => app.server.counts.ocr === 1 && app.debug().producers === 0, "prewarm completion");
     assert.deepStrictEqual(
       { source: app.server.counts.source, ocr: app.server.counts.ocr, translate: app.server.counts.translate },
@@ -781,7 +884,10 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     });
     assert.strictEqual(response.ok, true);
     await waitUntil(() => app.debug().producers === 0, "cached prewarm completion");
-    assert.deepStrictEqual(app.server.counts, before);
+    // Mutation caught: URL-only prewarm lookup would skip hashing the current
+    // bytes before deciding that the page artifact is still compatible.
+    assert.deepStrictEqual({ ...app.server.counts, source: before.source }, before);
+    assert.strictEqual(app.server.counts.source, before.source + 1);
   });
 
   await scenario("target change reuses a persisted zero-block OCR completion", async () => {
@@ -812,7 +918,10 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const en = app.connect();
     en.receive({ ...app.startScope("empty-en", "visible", app.job("empty-en-job", "https://x/empty.jpg")), dst_lang: "en" });
     const enDone = await app.waitFor("scope_done", en);
-    assert.deepStrictEqual(server.counts, before);
+    // Mutation caught: prewarm and target-change jobs must each establish the
+    // current byte identity even when zero-block OCR itself is reusable.
+    assert.deepStrictEqual({ ...server.counts, source: before.source }, before);
+    assert.strictEqual(server.counts.source, before.source + 2);
     assert.deepStrictEqual(
       { translated: enDone.translated, failed: enDone.failed, cache_hit: enDone.cache_hit },
       { translated: 0, failed: 0, cache_hit: false }
@@ -850,8 +959,8 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
 
   await scenario("detached queued manual work is demoted to background FIFO", async () => {
     const server = createFakeServer();
-    server.holdSource("slot-a");
-    server.holdSource("slot-b");
+    server.holdOcrAfterFirst("slot-a");
+    server.holdOcrAfterFirst("slot-b");
     const app = createBackgroundApp({ server });
     await app.ready();
     const blockers = app.connect();
@@ -862,9 +971,11 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
         app.job("slot-b", "https://x/slot-b.jpg"),
       ],
     });
-    await waitUntil(() => server.counts.source === 2, "occupied producer slots");
+    await waitUntil(() => server.counts.ocr === 2, "occupied producer slots");
     const manual = app.connect();
     manual.receive(app.startScope("queued-manual", "visible", app.job("queued-manual-job", "https://x/queued-manual.jpg")));
+    // Mutation caught: coupling the source-pool limit to producer slots would
+    // prevent this third identity from reaching the foreground task queue.
     await app.waitFor("page_job_accepted", manual);
     await waitUntil(
       () => vm.runInContext("taskQueue.some((task) => task.producer?.descriptor.job_id === 'queued-manual-job')", app.context),
@@ -880,7 +991,8 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       1
     );
     blockers.disconnect();
-    await waitUntil(() => server.counts.source === 3, "detached manual source fetch");
+    await waitUntil(() => server.counts.ocr === 3, "detached manual OCR");
+    assert.strictEqual(server.counts.source, 3);
   });
 
   await scenario("detached A never renders on replacement B", async () => {
@@ -890,7 +1002,9 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     await app.ready();
     const active = app.connect();
     active.receive(app.startScope("rA", "visible", app.job("jA", "https://x/A.jpg")));
-    await app.waitFor("page_job_accepted", active);
+    await waitUntil(() => server.counts.source === 1, "detached A source identity");
+    // Mutation caught: cancelling an unmatched visible acquisition during
+    // replacement would prevent detached A from completing in background.
     active.receive(app.startScope("rB", "visible", app.job("jB", "https://x/B.jpg"), "rA"));
     await waitUntil(
       () => active.sent.some((event) => event.type === "scope_done" && event.request_id === "rB"),
@@ -920,24 +1034,28 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const keys = await app.keysFor({ ...descriptor, reading_direction: "rtl" });
     const now = Date.now();
     storage.rows[`mt:page:${keys.pageArtifactKey}`] = {
-      schema_version: "page-v1",
+      schema_version: "page-v2",
       page_artifact_key: keys.pageArtifactKey,
       analysis_key: keys.analysisKey,
       ocr_key: keys.ocrKey,
-      overlay_key: keys.overlayKey,
+      render_artifact_key: keys.renderArtifactKey,
+      source_content_hash: sourceIdentityFor(descriptor.source_url).sourceContentHash,
       source_url: descriptor.source_url,
       crop: "full",
       natural_width: 100,
       natural_height: 200,
       src_lang: "ja",
       dst_lang: "vi",
+      reading_direction: "rtl",
       versions: vm.runInContext("serverVersions", app.context),
+      patch_versions: app.server.patchVersions,
       state: "running",
       analysis_known: false,
       ocr_done: false,
       image_w: null,
       image_h: null,
       blocks: [],
+      manifest_mismatch_count: 0,
       created_at: now,
       updated_at: now,
       last_accessed_at: now,
@@ -974,20 +1092,21 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     await app.ready();
     const active = app.connect();
     active.receive(app.startScope("old", "visible", app.job("old-job", "https://x/shared.jpg")));
-    await app.waitFor("page_job_accepted", active);
     await waitUntil(() => server.counts.source === 1, "shared source fetch");
+    // Mutation caught: releasing the old final ref before acquiring the exact
+    // replacement aborts the shared fetch and starts a second URL request.
     active.receive(app.startScope(
       "new",
       "visible",
       app.job("new-job", "https://x/shared.jpg"),
       "old"
     ));
+    await waitUntil(() => app.storedJob("old-job") === undefined, "old ledger removal");
+    server.releaseSource("shared");
     await waitUntil(
       () => active.sent.some((event) => event.type === "page_job_accepted" && event.request_id === "new"),
       "replacement acceptance"
     );
-    await waitUntil(() => app.storedJob("old-job") === undefined, "old ledger removal");
-    server.releaseSource("shared");
     await waitUntil(
       () => active.sent.some((event) => event.type === "scope_done" && event.request_id === "new"),
       "replacement completion"
@@ -1104,9 +1223,11 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       dst_lang: "en",
     });
     await app.waitFor("scope_done", en);
+    // Mutation caught: artifact reuse must follow a fresh exact-byte identity,
+    // not treat a repeated URL as proof that source content is unchanged.
     assert.deepStrictEqual(
       { source: app.server.counts.source, ocr: app.server.counts.ocr, translate: app.server.counts.translate },
-      { source: 1, ocr: 1, translate: 2 }
+      { source: 2, ocr: 1, translate: 2 }
     );
 
     const es = app.connect();
@@ -1122,7 +1243,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
         warmOcr: app.server.counts.warmOcr,
         translate: app.server.counts.translate,
       },
-      { source: 1, coldOcr: 1, warmOcr: 1, translate: 3 }
+      { source: 3, coldOcr: 1, warmOcr: 1, translate: 3 }
     );
 
     const back = app.connect();
@@ -1130,7 +1251,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     await app.waitFor("scope_done", back);
     assert.deepStrictEqual(
       { source: app.server.counts.source, ocr: app.server.counts.ocr, translate: app.server.counts.translate },
-      { source: 1, ocr: 2, translate: 3 }
+      { source: 4, ocr: 2, translate: 3 }
     );
     assert.ok(back.sent.some((event) => event.type === "translation" && event.cache_hit));
   });
@@ -1144,27 +1265,31 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
     const now = Date.now();
     app.storage.rows[`mt:page:${keys.pageArtifactKey}`] = {
-      schema_version: "page-v1",
+      schema_version: "page-v2",
       page_artifact_key: keys.pageArtifactKey,
       analysis_key: keys.analysisKey,
       ocr_key: keys.ocrKey,
-      overlay_key: keys.overlayKey,
+      render_artifact_key: keys.renderArtifactKey,
+      source_content_hash: sourceIdentityFor(job.source_url).sourceContentHash,
       source_url: job.source_url,
       crop: "full",
       natural_width: 100,
       natural_height: 200,
       src_lang: "ja",
       dst_lang: "vi",
+      reading_direction: "rtl",
       versions: app.server.versions,
+      patch_versions: app.server.patchVersions,
       state: "partial",
       analysis_known: true,
       ocr_done: true,
       image_w: 100,
       image_h: 200,
       blocks: [
-        { block_id: "b1", bbox: [1, 2, 3, 4], src_text: "one", trans_text: "vi:one", state: "complete" },
-        { block_id: "b2", bbox: [5, 6, 7, 8], src_text: "two", trans_text: null, state: "ocr_complete" },
+        { block_id: "b1", bbox: [1, 2, 3, 4], src_text: "one", trans_text: "vi:one", kind: "text", vertical: false, reading_order: 0, state: "translated" },
+        { block_id: "b2", bbox: [5, 6, 7, 8], src_text: "two", trans_text: null, kind: "text", vertical: false, reading_order: 1, state: "ocr_complete" },
       ],
+      manifest_mismatch_count: 0,
       created_at: now,
       updated_at: now,
       last_accessed_at: now,
@@ -1191,14 +1316,17 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       ["b1", "b2"]
     );
     assert.deepStrictEqual(app.server.translationBatches, [["b1", "b2"]]);
+    // Mutation caught: a partial-page reuse still has to prove the source hash
+    // before trusting its analysis/OCR identities.
     assert.deepStrictEqual(
       { source: app.server.counts.source, ocr: app.server.counts.ocr },
-      { source: 0, ocr: 0 }
+      { source: 1, ocr: 0 }
     );
     assert.strictEqual(app.page(keys.pageArtifactKey).state, "complete");
+    assert.ok(Number.isFinite(done.page_metrics[0].fetch_ms));
     assert.deepStrictEqual(
-      { fetch_ms: done.page_metrics[0].fetch_ms, analysis_ms: done.page_metrics[0].analysis_ms, first_ocr_ms: done.page_metrics[0].first_ocr_ms, ocr_done_ms: done.page_metrics[0].ocr_done_ms },
-      { fetch_ms: null, analysis_ms: null, first_ocr_ms: null, ocr_done_ms: null }
+      { analysis_ms: done.page_metrics[0].analysis_ms, first_ocr_ms: done.page_metrics[0].first_ocr_ms, ocr_done_ms: done.page_metrics[0].ocr_done_ms },
+      { analysis_ms: null, first_ocr_ms: null, ocr_done_ms: null }
     );
   });
 
@@ -1290,24 +1418,28 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const sibling = await app.keysFor({ ...job, reading_direction: "rtl" }, "ja", "en");
     const timestamp = Date.now();
     app.storage.rows[`mt:page:${sibling.pageArtifactKey}`] = {
-      schema_version: "page-v1",
+      schema_version: "page-v2",
       page_artifact_key: sibling.pageArtifactKey,
       analysis_key: sibling.analysisKey,
       ocr_key: sibling.ocrKey,
-      overlay_key: sibling.overlayKey,
+      render_artifact_key: sibling.renderArtifactKey,
+      source_content_hash: sourceIdentityFor(job.source_url).sourceContentHash,
       source_url: job.source_url,
       crop: "full",
       natural_width: 999,
       natural_height: 777,
       src_lang: "ja",
       dst_lang: "en",
+      reading_direction: "rtl",
       versions: app.server.versions,
+      patch_versions: app.server.patchVersions,
       state: "partial",
       analysis_known: false,
       ocr_done: true,
       image_w: 321,
       image_h: 654,
-      blocks: [{ block_id: "warm-b1", bbox: [1, 2, 3, 4], src_text: "warm", trans_text: null, state: "ocr_complete" }],
+      blocks: [{ block_id: "warm-b1", bbox: [1, 2, 3, 4], src_text: "warm", trans_text: null, kind: "text", vertical: false, reading_order: 0, state: "ocr_complete" }],
+      manifest_mismatch_count: 0,
       created_at: timestamp,
       updated_at: timestamp,
       last_accessed_at: timestamp,
@@ -1320,9 +1452,11 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       { page_width: server.translationBodies[0].page_width, page_height: server.translationBodies[0].page_height },
       { page_width: 321, page_height: 654 }
     );
+    // Mutation caught: warm OCR reuse still starts from a verified current
+    // source hash; only detector/recognizer calls are skipped.
     assert.deepStrictEqual(
       { source: server.counts.source, ocr: server.counts.ocr },
-      { source: 0, ocr: 0 }
+      { source: 1, ocr: 0 }
     );
     server.releaseTranslation("vi");
     await app.waitFor("scope_done", port);
@@ -1392,7 +1526,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
   await scenario("producer accepted offsets preserve zero and shared negative values", async () => {
     let tick = 0;
     const server = createFakeServer();
-    server.holdSource("shared-offset");
+    server.holdOcrAfterFirst("shared-offset");
     const app = createBackgroundApp({ server, clock: { now: () => tick } });
     await app.ready();
     const first = app.connect();
@@ -1402,7 +1536,9 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const second = app.connect();
     second.receive(app.startScope("offset-second", "visible", app.job("offset-second-job", "https://x/shared-offset.jpg")));
     await app.waitFor("page_job_accepted", second);
-    server.releaseSource("shared-offset");
+    // Mutation caught: recreating an exact in-flight producer for the late
+    // consumer loses the original accepted timestamp and negative offset.
+    server.releaseOcr("shared-offset");
     const firstDone = await app.waitFor("scope_done", first);
     const secondDone = await app.waitFor("scope_done", second);
     assert.strictEqual(firstDone.page_metrics[0].accepted_offset_ms, 0);
@@ -1441,7 +1577,14 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       { images: 2, translated: 1, failed: 1 }
     );
     assert.strictEqual(app.page(goodKeys.pageArtifactKey).state, "complete");
-    assert.strictEqual(app.page(brokenKeys.pageArtifactKey).state, "failed");
+    assert.strictEqual(app.page(brokenKeys.pageArtifactKey), undefined);
+    assert.strictEqual(done.page_metrics.find((row) => row.job_id === "broken-image").error_code, "source_unavailable");
+    server.allowSource("broken");
+    const retry = app.connect();
+    retry.receive(app.startScope("broken-retry", "visible", app.job("broken-retry-job", broken.source_url)));
+    const retried = await app.waitFor("scope_done", retry);
+    assert.deepStrictEqual({ translated: retried.translated, failed: retried.failed }, { translated: 1, failed: 0 });
+    assert.strictEqual(app.page(brokenKeys.pageArtifactKey).state, "complete");
   });
 
   await scenario("failed translation batch preserves a later valid batch", async () => {
@@ -1633,7 +1776,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
 
   await scenario("target replacement retires old unsent translation but shares OCR", async () => {
     const server = createFakeServer();
-    server.holdSource("replace-target");
+    server.holdOcrAfterFirst("replace-target");
     const app = createBackgroundApp({ server });
     await app.ready();
     const port = app.connect();
@@ -1641,6 +1784,12 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     port.receive(app.startScope("old-target", "visible", app.job("old-target-job", source)));
     await app.waitFor("page_job_accepted", port);
     await waitUntil(() => server.counts.source === 1, "old target source fetch");
+    await waitUntil(
+      () => vm.runInContext("[...producers.values()].some((producer) => producer.page.blocks.length === 1)", app.context),
+      "old target first OCR block",
+    );
+    // Mutation caught: retiring the old OCR stage before the target-language
+    // replacement attaches forces a second recognition pass.
     port.receive({
       ...app.startScope("new-target", "visible", app.job("new-target-job", source), "old-target"),
       dst_lang: "en",
@@ -1650,7 +1799,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       "new target acceptance"
     );
     await waitUntil(() => app.storedJob("old-target-job") === undefined, "old target ledger removal");
-    server.releaseSource("replace-target");
+    server.releaseOcr("replace-target");
     await waitUntil(
       () => port.sent.some((event) => event.type === "scope_done" && event.request_id === "new-target"),
       "new target completion"
@@ -1664,6 +1813,50 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       port.sent.some((event) => event.type === "translation" && event.request_id === "old-target"),
       false
     );
+  });
+
+  await scenario("multi-page target replacement attaches every shared OCR stage before release", async () => {
+    // Mutation caught: releasing the whole old request after only the first
+    // matching row retires the second page's OCR stage and recognizes it twice.
+    const server = createFakeServer();
+    server.holdOcrAfterFirst("replace-many-a");
+    server.holdOcrAfterFirst("replace-many-b");
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const port = app.connect();
+    const jobs = ["a", "b"].map((suffix) =>
+      app.job(`replace-many-old-${suffix}`, `https://x/replace-many-${suffix}.jpg`));
+    port.receive({ ...app.startScope("replace-many-old", "visible"), jobs });
+    await waitUntil(
+      () => server.counts.ocr === 2 && vm.runInContext(
+        "[...producers.values()].filter((producer) => producer.page.blocks.length === 1).length === 2",
+        app.context,
+      ),
+      "two old OCR stages",
+    );
+
+    port.receive({
+      ...app.startScope("replace-many-new", "visible", undefined, "replace-many-old"),
+      dst_lang: "en",
+      jobs: ["a", "b"].map((suffix) =>
+        app.job(`replace-many-new-${suffix}`, `https://x/replace-many-${suffix}.jpg`)),
+    });
+    await waitUntil(
+      () => port.sent.filter((event) =>
+        event.type === "page_job_accepted" && event.request_id === "replace-many-new").length === 2,
+      "two replacement acceptances",
+    );
+    server.releaseOcr("replace-many-a");
+    server.releaseOcr("replace-many-b");
+    await waitUntil(
+      () => port.sent.some((event) => event.type === "scope_done" && event.request_id === "replace-many-new"),
+      "multi-page replacement completion",
+    );
+    assert.deepStrictEqual(
+      { source: server.counts.source, ocr: server.counts.ocr, translate: server.counts.translate },
+      { source: 2, ocr: 2, translate: 2 },
+    );
+    assert.ok(server.translationRequests.every((row) => row.dst_lang === "en"));
   });
 
   await scenario("target replacement replays OCR blocks emitted before it attached", async () => {
@@ -1866,7 +2059,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
 
   await scenario("recognizer replacement keeps cold analysis owner alive", async () => {
     const server = createFakeServer();
-    server.holdSource("replace-recognizer");
+    server.holdOcrAfterFirst("replace-recognizer");
     const app = createBackgroundApp({ server });
     await app.ready();
     const port = app.connect();
@@ -1874,6 +2067,9 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     port.receive(app.startScope("old-recognizer", "visible", app.job("old-recognizer-job", source)));
     await app.waitFor("page_job_accepted", port);
     await waitUntil(() => server.counts.source === 1, "recognizer source fetch");
+    await waitUntil(() => server.counts.coldOcr === 1, "cold recognizer OCR");
+    // Mutation caught: retiring the cold recognizer before the replacement
+    // attaches aborts the shared analysis owner needed by the warm recognizer.
     port.receive({
       ...app.startScope(
         "new-recognizer",
@@ -1891,7 +2087,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     await flush();
     assert.strictEqual(server.counts.source, 1);
     assert.strictEqual(server.counts.aborted, 0);
-    server.releaseSource("replace-recognizer");
+    server.releaseOcr("replace-recognizer");
     await waitUntil(
       () => port.sent.some((event) => event.type === "scope_done" && event.request_id === "new-recognizer"),
       "new recognizer completion"
@@ -1908,10 +2104,11 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
   });
 
   const versions = {
-    detector: "d1", dedupe: "dd1", prep: "p1",
+    detector: "d1", dedupe: "dd1", prep: "p1", region_resolver: "rr1",
     recognizers: { ja: "r-ja", es: "r-latin", pt: "r-latin" },
-    translator_model: "g1", prompt: "pr1", policy: "po1", layout_order: "reading-order-v1", page_schema: "page-v1",
+    translator_model: "g1", prompt: "pr1", policy: "po1", layout_order: "reading-order-v1", page_schema: "page-v2",
   };
+  const patchVersions = { cleaner: "c1", render_encoding: "png-rgba-v1", render_schema: "render-v1" };
   const job = {
     source_url: "https://x/page.jpg?token=secret",
     crop: null,
@@ -1921,12 +2118,35 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     dst_lang: "vi",
     reading_direction: "rtl",
   };
-  const vi = await context.buildKeys(job, versions);
-  const en = await context.buildKeys({ ...job, dst_lang: "en" }, versions);
-  const es = await context.buildKeys({ ...job, src_lang: "es" }, versions);
-  const pt = await context.buildKeys({ ...job, src_lang: "pt" }, versions);
-  const ltr = await context.buildKeys({ ...job, reading_direction: "ltr" }, versions);
-  const oldLayout = await context.buildKeys(job, { ...versions, layout_order: "reading-order-v0" });
+  const sourceIdentity = sourceIdentityFor(job.source_url, Buffer.from([0, 1, 2, 255]));
+  const vi = await context.buildKeys(job, sourceIdentity, versions, patchVersions);
+  const restoredFull = await context.buildKeys({ ...job, crop: "full" }, sourceIdentity, versions, patchVersions);
+  const otherUrl = await context.buildKeys({ ...job, source_url: "https://other/page.jpg" }, sourceIdentity, versions, patchVersions);
+  const changedBytes = await context.buildKeys(job, sourceIdentityFor(job.source_url, Buffer.from([0, 1, 3, 255])), versions, patchVersions);
+  const en = await context.buildKeys({ ...job, dst_lang: "en" }, sourceIdentity, versions, patchVersions);
+  const es = await context.buildKeys({ ...job, src_lang: "es" }, sourceIdentity, versions, patchVersions);
+  const pt = await context.buildKeys({ ...job, src_lang: "pt" }, sourceIdentity, versions, patchVersions);
+  const ltr = await context.buildKeys({ ...job, reading_direction: "ltr" }, sourceIdentity, versions, patchVersions);
+  const oldLayout = await context.buildKeys(job, sourceIdentity, { ...versions, layout_order: "reading-order-v0" }, patchVersions);
+  const resolverBump = await context.buildKeys(job, sourceIdentity, { ...versions, region_resolver: "rr2" }, patchVersions);
+  const promptBump = await context.buildKeys(job, sourceIdentity, { ...versions, prompt: "pr2" }, patchVersions);
+  const modelBump = await context.buildKeys(job, sourceIdentity, { ...versions, translator_model: "g2" }, patchVersions);
+  const cleanerBump = await context.buildKeys(job, sourceIdentity, versions, { ...patchVersions, cleaner: "c2" });
+  const hashJson = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  const expectedAnalysis = hashJson([sourceIdentity.sourceContentHash, "full", "d1", "dd1", "p1", "rr1"]);
+  const expectedOcr = hashJson([expectedAnalysis, "ja", "r-ja"]);
+  const expectedPage = hashJson([expectedOcr, "vi", "rtl", "reading-order-v1", "g1", "pr1", "po1", "page-v2"]);
+  const expectedRender = hashJson([expectedAnalysis, "c1", "png-rgba-v1", "render-v1"]);
+  assert.deepStrictEqual(
+    { analysis: vi.analysisKey, ocr: vi.ocrKey, page: vi.pageArtifactKey, render: vi.renderArtifactKey },
+    { analysis: expectedAnalysis, ocr: expectedOcr, page: expectedPage, render: expectedRender },
+  );
+  // Mutation caught: PageCache persists an omitted crop as the canonical
+  // "full" sentinel, which must retain the same analysis identity on restart.
+  assert.strictEqual(restoredFull.analysisKey, vi.analysisKey);
+  assert.strictEqual(vi.analysisKey, otherUrl.analysisKey);
+  assert.notStrictEqual(vi.analysisKey, changedBytes.analysisKey);
+  assert.notStrictEqual(vi.analysisKey, resolverBump.analysisKey);
   assert.strictEqual(vi.analysisKey, en.analysisKey);
   assert.strictEqual(vi.ocrKey, en.ocrKey);
   assert.notStrictEqual(vi.pageArtifactKey, en.pageArtifactKey);
@@ -1935,10 +2155,14 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
   assert.notStrictEqual(es.ocrKey, pt.ocrKey);
   assert.strictEqual(vi.analysisKey, ltr.analysisKey);
   assert.strictEqual(vi.ocrKey, ltr.ocrKey);
-  assert.notStrictEqual(vi.overlayKey, ltr.overlayKey);
+  assert.notStrictEqual(vi.pageArtifactKey, ltr.pageArtifactKey);
   assert.strictEqual(vi.analysisKey, oldLayout.analysisKey);
   assert.strictEqual(vi.ocrKey, oldLayout.ocrKey);
-  assert.notStrictEqual(vi.overlayKey, oldLayout.overlayKey);
+  assert.notStrictEqual(vi.pageArtifactKey, oldLayout.pageArtifactKey);
+  assert.strictEqual(vi.renderArtifactKey, en.renderArtifactKey);
+  assert.strictEqual(vi.renderArtifactKey, promptBump.renderArtifactKey);
+  assert.strictEqual(vi.renderArtifactKey, modelBump.renderArtifactKey);
+  assert.notStrictEqual(vi.renderArtifactKey, cleanerBump.renderArtifactKey);
 
   const blocks = [
     { block_id: "b2", src_text: "second" },
@@ -2062,8 +2286,4 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
   assert.strictEqual(request.outstanding, 0);
   assert.strictEqual(request.pendingJobs.length, 0);
   assert.strictEqual(foregroundRequest.outstanding, 0);
-  console.log("background-progressive.test.js transport OK");
-})().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
 });

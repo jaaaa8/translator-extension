@@ -162,7 +162,7 @@ async def ocr_stream(
     analysis_key: str = Form(...),
     ocr_key: str = Form(...),
     src_lang: str = Form(...),
-    render_artifact_key: str | None = Form(None),
+    render_artifact_key: str = Form(...),
     image: UploadFile | None = File(None),
     crop_left: float | None = Form(None),
     crop_top: float | None = Form(None),
@@ -190,12 +190,11 @@ async def ocr_stream(
                 )
             else:
                 analysis_cache_hit = True
-            if render_artifact_key is not None:
-                pipeline.ensure_render(
-                    analysis_key,
-                    render_artifact_key,
-                    analysis=analysis,
-                )
+            pipeline.ensure_render(
+                analysis_key,
+                render_artifact_key,
+                analysis=analysis,
+            )
             analysis_ms = max(0, round((time.perf_counter() - analysis_started) * 1000))
             yield _ndjson({
                 "type": "analysis_ready",

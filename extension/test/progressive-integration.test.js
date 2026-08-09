@@ -1,13 +1,15 @@
 const assert = require("assert");
 const fs = require("fs");
+const test = require("node:test");
 const vm = require("vm");
 const { webcrypto } = require("crypto");
 
 const versions = {
-  detector: "d1", dedupe: "dd1", prep: "p1",
+  detector: "d1", dedupe: "dd1", prep: "p1", region_resolver: "rr1",
   recognizers: { ja: "ja1", es: "es1" },
-  translator_model: "g1", prompt: "p1", policy: "batch1", layout_order: "reading-order-v1", page_schema: "page-v1",
+  translator_model: "g1", prompt: "p1", policy: "batch1", layout_order: "reading-order-v1", page_schema: "page-v2",
 };
+const patchVersions = { cleaner: "c1", render_encoding: "png-rgba-v1", render_schema: "render-v1" };
 
 function eventTarget() {
   const listeners = [];
@@ -60,15 +62,18 @@ function createServer() {
   const faults = { source: new Set(), ocr: new Set(), translation: new Set() };
   const events = [];
   const translationBodies = [];
+  const ocrForms = [];
   const server = {
     calls,
     events,
     translationBodies,
+    ocrForms,
     clone: structuredClone,
     async fetch(url, options = {}) {
-      if (url.endsWith("/health")) return { ok: true, json: async () => server.clone({ versions }) };
+      if (url.endsWith("/health")) return { ok: true, json: async () => server.clone({ versions, patch_versions: patchVersions }) };
       if (url.endsWith("/ocr-stream")) {
         calls.ocrStream++;
+        ocrForms.push(options.body);
         const source = options.body.get("image") ? await options.body.get("image").text() : "A.jpg";
         const name = /\/([A-D])\.jpg/.exec(source)?.[1] || "A";
         if (held.has(name)) await held.get(name).promise;
@@ -79,7 +84,7 @@ function createServer() {
         ], () => events.push(["image_done", name]));
         return ndjson([
           { type: "analysis_ready", image_w: 1000, image_h: 1600, analysis_ms: 7 },
-          { type: "ocr_block", block_id: `${name}-b1`, bbox: [10, 20, 100, 40], src_text: name },
+          { type: "ocr_block", block_id: `${name}-b1`, bbox: [10, 20, 100, 40], src_text: name, kind: "text", vertical: false },
           { type: "image_done" },
         ], () => events.push(["image_done", name]));
       }
@@ -151,9 +156,10 @@ async function eventually(predicate, label) {
   throw new Error(`timed out: ${label}`);
 }
 
-function createIntegration({ server = createServer(), session = storageSession(), clock = performance, pages = [{ name: "A", rect: { left: 0, top: 0, right: 500, bottom: 600, width: 500, height: 600 } }] } = {}) {
+function createIntegration({ server = createServer(), session = storageSession(), clock = performance, idStart = 0, pages = [{ name: "A", rect: { left: 0, top: 0, right: 500, bottom: 600, width: 500, height: 600 } }] } = {}) {
   const pair = portPair();
   let workerAlive = true;
+  let cloneStorageRead = (value) => value;
   const runtimeMessages = eventTarget();
   const connects = eventTarget();
   const background = {
@@ -168,12 +174,20 @@ function createIntegration({ server = createServer(), session = storageSession()
     },
     chrome: {
       storage: { session: Object.fromEntries(["get", "set", "remove", "getBytesInUse"].map((method) => [
-        method, (...args) => workerAlive ? session[method](...args) : Promise.resolve(method === "getBytesInUse" ? 0 : {}),
+        method, async (...args) => {
+          if (!workerAlive) return method === "getBytesInUse" ? 0 : {};
+          const value = await session[method](...args);
+          return method === "get" ? cloneStorageRead(value) : value;
+        },
       ])) }, action: { setBadgeText() {}, setBadgeBackgroundColor() {} },
       runtime: { onMessage: runtimeMessages, onConnect: connects },
     },
   };
   vm.createContext(background);
+  cloneStorageRead = (value) => {
+    background.__storageJson = JSON.stringify(value);
+    return vm.runInContext("JSON.parse(__storageJson)", background);
+  };
   background.__wire = {};
   pair.toBackground = (message) => {
     background.__wire.json = JSON.stringify(message);
@@ -182,10 +196,13 @@ function createIntegration({ server = createServer(), session = storageSession()
   server.clone = pair.toBackground;
   vm.runInContext(fs.readFileSync("extension/page-cache.js", "utf8"), background);
   vm.runInContext(fs.readFileSync("extension/reading-order.js", "utf8"), background);
+  if (fs.existsSync("extension/source-fetch.js")) {
+    vm.runInContext(fs.readFileSync("extension/source-fetch.js", "utf8"), background);
+  }
   vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), background);
   connects.emit(pair.background);
 
-  let id = 0;
+  let id = idStart;
   const images = pages.map((page) => ({ src: `https://reader/${page.name}.jpg`, currentSrc: "", complete: true,
     naturalWidth: 1000, naturalHeight: 1600, isConnected: true, baseURI: "https://reader/", parentElement: null,
     rect: page.rect, getAttribute: () => "", getBoundingClientRect() { return this.rect; }, getClientRects() { return [this.rect]; } }));
@@ -230,9 +247,10 @@ function createIntegration({ server = createServer(), session = storageSession()
   };
 }
 
-(async () => {
+test("progressive integration", { timeout: 10000 }, async () => {
   const app = createIntegration();
   const result = await app.click();
+  assert.match(app.server.ocrForms[0].get("render_artifact_key"), /^[0-9a-f]{64}$/);
   assert.deepStrictEqual(app.server.translationBodies[0], {
     src_lang: "ja",
     dst_lang: "vi",
@@ -264,7 +282,9 @@ function createIntegration({ server = createServer(), session = storageSession()
 
   const beforeReplay = { ...app.server.calls };
   const replay = await app.click();
-  assert.deepStrictEqual(app.server.calls, beforeReplay);
+  assert.strictEqual(app.server.calls.source, beforeReplay.source + 1);
+  assert.strictEqual(app.server.calls.ocrStream, beforeReplay.ocrStream);
+  assert.strictEqual(app.server.calls.translate, beforeReplay.translate);
   assert.strictEqual(replay.cacheHit, true);
   assert.strictEqual(app.text(), "A translated");
 
@@ -301,11 +321,16 @@ function createIntegration({ server = createServer(), session = storageSession()
   const replacement = createIntegration({ server: replacementServer });
   const replaced = replacement.click();
   await eventually(() => replacementServer.calls.source === 1, "deferred source fetch");
+  // Mutation caught: waiting for the replacement source before releasing the
+  // superseded request prevents prompt cancellation and leaks its acquisition.
   const latest = replacement.click();
   assert.strictEqual((await replaced).ok, false);
-  const statusBefore = await replacement.pageStatus();
+  const statusBefore = await eventually(async () => {
+    const status = await replacement.pageStatus();
+    return status.background === 1 ? status : null;
+  }, "replacement ledger handoff");
   const statusAfterReopen = await replacement.pageStatus();
-  assert.ok(statusBefore.background >= 1);
+  assert.strictEqual(statusBefore.background, 1);
   assert.deepStrictEqual(statusAfterReopen, statusBefore);
   await eventually(async () => Number.isFinite((await replacement.summary()).cancel_latency_ms.p50), "replacement cancellation telemetry");
   replacementServer.finishSource("A");
@@ -328,7 +353,10 @@ function createIntegration({ server = createServer(), session = storageSession()
   const replacementVisible = cancelled.click();
   assert.strictEqual((await cancelledLoaded).ok, false);
   await replacementVisible;
-  assert.ok((await cancelled.summary()).counters.stale_work >= 1);
+  // Mutation caught: a cancelled pre-identity acquisition reaching OCR would
+  // turn prompt cancellation into stale producer work.
+  assert.strictEqual(cancelledServer.calls.ocrStream, 1);
+  assert.strictEqual((await cancelled.summary()).counters.stale_work, 0);
 
   let tick = 0;
   const agedServer = createServer();
@@ -350,7 +378,7 @@ function createIntegration({ server = createServer(), session = storageSession()
   void beforeRestart.click();
   await eventually(() => restartServer.calls.translate === 1, "translation before worker restart");
   beforeRestart.killWorker();
-  const afterRestart = createIntegration({ server: restartServer, session: sharedSession });
+  const afterRestart = createIntegration({ server: restartServer, session: sharedSession, idStart: 100 });
   const resumed = afterRestart.click();
   await eventually(() => restartServer.calls.translate >= 2, "translation resumed by restarted worker");
   restartServer.finishTranslation("A");
@@ -379,6 +407,8 @@ function createIntegration({ server = createServer(), session = storageSession()
   faultServer.fail("translation", "D");
   const sameRect = { left: 0, top: 0, right: 500, bottom: 600, width: 500, height: 600 };
   const faults = createIntegration({ server: faultServer, pages: ["A", "B", "C", "D"].map((name) => ({ name, rect: sameRect })) });
+  // Mutation caught: observing a later eager source rejection only when its
+  // ordered row is reached crashes the worker as an unhandled rejection.
   const partial = await faults.click();
   assert.deepStrictEqual({ blocks: partial.blocks, failed: partial.failed }, { blocks: 1, failed: 3 });
   assert.strictEqual(faults.text(), "A translated");
@@ -406,11 +436,12 @@ function createIntegration({ server = createServer(), session = storageSession()
   const legacyMixed = [mixed.legacyOcr("C"), mixed.legacyOcr("D")];
   await Promise.resolve();
   await Promise.resolve();
+  // Mutation caught: letting legacy source fetches bypass the shared pool
+  // raises the mixed progressive/legacy source peak above two.
   assert.ok(mixedServer.calls.peakSource <= 2, `mixed OCR peak ${mixedServer.calls.peakSource}`);
   for (const name of ["A", "B"]) mixedServer.finishSource(name);
   await eventually(() => mixedServer.calls.source === 4, "legacy fetches after progressive slots");
   for (const name of ["C", "D"]) mixedServer.finishSource(name);
   assert.strictEqual((await progressiveMixed).blocks, 2);
   assert.ok((await Promise.all(legacyMixed)).every((row) => row.ok));
-  console.log("progressive-integration.test.js OK");
-})().catch((error) => { console.error(error); process.exitCode = 1; });
+});

@@ -70,7 +70,12 @@ def wait_for_event(
 
 def ocr_form(page: str, analysis: str, ocr: str):
     return {
-        "data": {"analysis_key": analysis, "ocr_key": ocr, "src_lang": "ja"},
+        "data": {
+            "analysis_key": analysis,
+            "ocr_key": ocr,
+            "src_lang": "ja",
+            "render_artifact_key": f"render-{page}",
+        },
         "files": {"image": (f"{page}.png", page_png(page), "image/png")},
     }
 
@@ -338,10 +343,21 @@ def test_ocr_stream_holds_releases_and_preserves_good_block_on_fault():
 def test_ocr_stream_requires_or_reuses_analysis_image_mapping():
     with client() as http:
         post_json(http, "/__acceptance/reset")
+        omitted = http.post("/ocr-stream", **{
+            **ocr_form("A", "analysis-omitted", "ocr-omitted"),
+            "data": {
+                "analysis_key": "analysis-omitted",
+                "ocr_key": "ocr-omitted",
+                "src_lang": "ja",
+            },
+        })
+        # Mutation caught: restoring the optional Task 5 compatibility seam.
+        assert omitted.status_code == 422
         missing = http.post("/ocr-stream", data={
             "analysis_key": "analysis-A",
             "ocr_key": "ocr-missing",
             "src_lang": "ja",
+            "render_artifact_key": "render-A",
         })
         assert missing.status_code == 409
 
@@ -351,6 +367,7 @@ def test_ocr_stream_requires_or_reuses_analysis_image_mapping():
             "analysis_key": "analysis-A",
             "ocr_key": "ocr-warm",
             "src_lang": "ja",
+            "render_artifact_key": "render-A",
         })
         assert warm.status_code == 200
         assert ndjson(warm)[1]["block_id"] == "A-1"

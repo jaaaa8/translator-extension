@@ -1,10 +1,12 @@
 if (typeof importScripts === "function") {
-  importScripts("page-cache.js", "reading-order.js");
+  importScripts("page-cache.js", "reading-order.js", "source-fetch.js");
 }
 
 const SERVER = "http://127.0.0.1:8910";
 const MAX_CONCURRENT = 2;
+const MAX_SOURCE_FETCH = 2;
 const MAX_OUTSTANDING_PER_REQUEST = 4;
+const LAYOUT_FIT_VERSION = "dom-fit-10px-v1";
 const PRIORITY = Object.freeze({ foreground: 0, background: 1, prewarm: 2 });
 const metricSamples = [];
 const metricSamplesByRequest = new Map();
@@ -69,7 +71,7 @@ function benchmarkSummary() {
 }
 
 function canonicalCrop(crop) {
-  if (!crop) return "full";
+  if (!crop || crop === "full") return "full";
   const rounded = Object.fromEntries(
     ["left", "top", "right", "bottom"].map((key) => [
       key, Math.round(crop[key] * 1e6) / 1e6,
@@ -91,31 +93,30 @@ async function hashValue(value) {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function buildKeys(job, versions) {
+async function buildKeys(job, sourceIdentity, versions, patchVersions) {
   const crop = canonicalCrop(job.crop);
-  const sourceUrl = new URL(job.source_url);
-  sourceUrl.hash = "";
-  const sourceRevision = await hashValue([
-    sourceUrl.href,
-    job.natural_width,
-    job.natural_height,
-  ]);
+  const sourceContentHash = sourceIdentity.sourceContentHash;
   const analysisKey = await hashValue([
-    sourceRevision, crop, versions.detector, versions.dedupe, versions.prep,
+    sourceContentHash, crop, versions.detector, versions.dedupe, versions.prep,
+    versions.region_resolver,
   ]);
   const ocrKey = await hashValue([
     analysisKey, job.src_lang, versions.recognizers[job.src_lang],
   ]);
-  const overlayKey = await hashValue([
-    sourceRevision, crop, ocrKey, job.dst_lang, job.reading_direction, versions.layout_order,
+  const pageArtifactKey = await hashValue([
+    ocrKey, job.dst_lang, job.reading_direction, versions.layout_order,
     versions.translator_model, versions.prompt, versions.policy,
+    versions.page_schema,
   ]);
   return {
-    sourceRevision,
+    sourceContentHash,
     analysisKey,
     ocrKey,
-    overlayKey,
-    pageArtifactKey: await hashValue([overlayKey, versions.page_schema]),
+    pageArtifactKey,
+    renderArtifactKey: await hashValue([
+      analysisKey, patchVersions.cleaner, patchVersions.render_encoding,
+      patchVersions.render_schema,
+    ]),
     crop,
   };
 }
@@ -236,13 +237,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return;
   }
   if (msg.type === "prewarmJob") {
-    ready.then(async () => {
-      if (!serverVersions) await refreshServerVersions(false);
+    ready.then(() => {
       const source = msg.job || msg;
-      const descriptor = { ...source, scope: "prewarm", src_lang: msg.src_lang, dst_lang: msg.dst_lang, reading_direction: normalizeReadingDirection(source.reading_direction) };
-      const request = createRequest(null, { request_id: `prewarm:${Date.now()}`, scope: "prewarm", src_lang: msg.src_lang, dst_lang: msg.dst_lang, jobs: [descriptor] });
-      await attachDescriptor(request, descriptor, { job_id: `prewarm:${Date.now()}`, state: "queued" });
-      admitRequestJobs(request);
+      return acceptScope(null, {
+        request_id: `prewarm:${Date.now()}`,
+        scope: "prewarm",
+        src_lang: msg.src_lang,
+        dst_lang: msg.dst_lang,
+        reading_direction: source.reading_direction,
+        jobs: [source],
+      });
     }).then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: String(error) }));
     return true;
   }
@@ -253,22 +257,22 @@ function ocrKey({ url, srcLang, crop }) {
 }
 
 async function fetchOcr({ url, srcLang, crop }) {
-
-  const imgResp = await fetch(url);
-  if (!imgResp.ok) throw new Error(`fetch ảnh: HTTP ${imgResp.status}`);
-  const blob = await imgResp.blob();
-
-  const form = new FormData();
-  form.append("image", blob, "page.png");
-  form.append("src_lang", srcLang);
-  if (crop) {
-    form.append("crop_left", crop.left);
-    form.append("crop_top", crop.top);
-    form.append("crop_right", crop.right);
-    form.append("crop_bottom", crop.bottom);
+  const acquisition = sourcePool.acquire(url);
+  try {
+    const { blob } = await acquisition.promise;
+    const form = new FormData();
+    form.append("image", blob, "page.png");
+    form.append("src_lang", srcLang);
+    if (crop) {
+      form.append("crop_left", crop.left);
+      form.append("crop_top", crop.top);
+      form.append("crop_right", crop.right);
+      form.append("crop_bottom", crop.bottom);
+    }
+    return postJson(`${SERVER}/ocr`, form);
+  } finally {
+    acquisition.release();
   }
-
-  return postJson(`${SERVER}/ocr`, form);
 }
 
 async function ocrImage(msg) {
@@ -356,7 +360,13 @@ const ocrStages = new Map();
 const hotOcr = new Map();
 const hotTranslations = new Map();
 const offlineJobs = [];
+const sourcePool = MangaSourceFetch.create({
+  fetchImpl: (...args) => fetch(...args),
+  cryptoImpl: crypto,
+  maxConcurrent: MAX_SOURCE_FETCH,
+});
 let serverVersions = null;
+let serverPatchVersions = null;
 
 function lruSet(map, key, value, limit) {
   map.delete(key); map.set(key, value);
@@ -368,7 +378,12 @@ async function refreshServerVersions(resume = true) {
   if (!response.ok) throw new Error(`health HTTP ${response.status}`);
   const data = await response.json();
   serverVersions = data.versions;
-  await pageCache?.purgeIncompatible(serverVersions);
+  serverPatchVersions = data.patch_versions;
+  await pageCache?.purgeIncompatible(
+    serverVersions,
+    serverPatchVersions,
+    LAYOUT_FIT_VERSION,
+  );
   if (resume) void resumeOfflineJobs();
   return data;
 }
@@ -380,7 +395,7 @@ const ready = (async () => {
     await refreshServerVersions(false);
     const byKey = new Map(pages.filter((p) => metadataEqual(p.versions, serverVersions)).map((p) => [p.page_artifact_key, p]));
     for (const job of jobs) if (job.scope === "visible" && (job.state === "queued" || job.state === "running")) restoreProducer(job, byKey);
-    await resumeOfflineJobs();
+    void resumeOfflineJobs();
     pumpTasks();
   } catch {
     for (const job of jobs) if (job.scope === "visible") restoreProducer(job);
@@ -395,9 +410,25 @@ function consumerKey(requestId, jobId) {
 }
 
 function createRequest(port, message) {
-  const request = { requestId: message.request_id, scope: message.scope, srcLang: message.src_lang, dstLang: message.dst_lang, port, jobs: new Map(), jobsBySourceCrop: new Map(), expectedJobIds: new Set((message.jobs || []).map((row) => row.job_id)), pendingJobs: [], outstanding: 0, connected: true, done: new Set(), hits: 0, translated: 0, failed: 0, acceptedAt: now(), firstOverlayMs: null, firstOverlayByJob: new Map(), metricRows: [], counters: { translation_calls: 0, rate_limited: 0, stale_work: 0 }, countedCounterProducers: new Set(), cancelLatencyMs: null };
+  const request = { requestId: message.request_id, scope: message.scope, srcLang: message.src_lang, dstLang: message.dst_lang, port, jobs: new Map(), jobsBySourceCrop: new Map(), sourceAcquisitions: new Map(), sourceDescriptors: new Map(), cancelledSourceJobs: new Set(), expectedJobIds: new Set((message.jobs || []).map((row) => row.job_id)), pendingJobs: [], outstanding: 0, connected: true, done: new Set(), hits: 0, translated: 0, failed: 0, acceptedAt: now(), firstOverlayMs: null, firstOverlayByJob: new Map(), metricRows: [], counters: { translation_calls: 0, rate_limited: 0, stale_work: 0 }, countedCounterProducers: new Set(), cancelLatencyMs: null };
   for (const row of message.jobs || []) request.jobsBySourceCrop.set(sourceCropKey(row), row);
   return request;
+}
+function releasePendingSource(request, jobId) {
+  const acquisition = request.sourceAcquisitions.get(jobId);
+  if (!acquisition) return;
+  request.sourceAcquisitions.delete(jobId);
+  request.sourceDescriptors.delete(jobId);
+  acquisition.release();
+}
+function releaseMatchingPendingSources(request, replacement) {
+  for (const [jobId] of request.sourceAcquisitions) {
+    const descriptor = request.sourceDescriptors.get(jobId);
+    if (!descriptor || !replacement.jobsBySourceCrop.has(sourceCropKey(descriptor))) continue;
+    request.cancelledSourceJobs.add(jobId);
+    releasePendingSource(request, jobId);
+    void pageCache?.removeJob(jobId);
+  }
 }
 function emit(producer, type, extra = {}) {
   for (const consumer of producer.consumers.values()) if (requests.get(consumer.requestId)?.connected && consumer.port) consumer.port.postMessage({ ...extra, type, request_id: consumer.requestId, job_id: consumer.jobId, page_artifact_key: producer.pageKey });
@@ -407,32 +438,73 @@ function persist(producer) {
   producer.persistChain = producer.persistChain.then(() => pageCache.putPage(producer.page).catch(() => { producer.page.last_error = "cache_failed"; }));
   return producer.persistChain;
 }
-function createProducer(descriptor, keys, page) {
-  const createdAt = Date.now();
-  const record = page || { schema_version: serverVersions.page_schema, page_artifact_key: keys.pageArtifactKey, analysis_key: keys.analysisKey, ocr_key: keys.ocrKey, overlay_key: keys.overlayKey, source_url: descriptor.source_url, crop: keys.crop, natural_width: descriptor.natural_width, natural_height: descriptor.natural_height, src_lang: descriptor.src_lang, dst_lang: descriptor.dst_lang, versions: serverVersions, state: "queued", analysis_known: false, ocr_done: false, image_w: null, image_h: null, blocks: [], created_at: createdAt, updated_at: createdAt, last_accessed_at: createdAt, last_error: null };
-  return { pageKey: keys.pageArtifactKey, analysisKey: keys.analysisKey, ocrKey: keys.ocrKey, descriptor, page: record, consumers: new Map(), jobIds: new Set(), persistUntilDone: false, prewarmOnly: descriptor.scope === "prewarm", state: "queued", translationBatchTrace: [], persistChain: Promise.resolve(), cancelled: false, retired: false, timings: { accepted: now() }, durations: { fetch_ms: null, analysis_ms: null }, analysisCacheHit: null, ocrSummary: null, counters: { translation_calls: 0, rate_limited: 0, stale_work: 0 } };
+function releaseProducerSource(producer) {
+  if (!producer.sourceAcquisition) return;
+  producer.sourceAcquisition.release();
+  producer.sourceAcquisition = null;
 }
-async function attachDescriptor(request, descriptor, ledger) {
-  if (!serverVersions) { if (request.scope === "visible") await pageCache.putJob({ ...ledger, waiting_for_health: true }); offlineJobs.push({ request, descriptor, ledger }); return; }
-  const keys = await buildKeys(descriptor, serverVersions); descriptor.page_artifact_key = keys.pageArtifactKey;
+function createProducer(descriptor, keys, page, sourceIdentity, sourceAcquisition = null) {
+  const createdAt = Date.now();
+  const record = page || { schema_version: serverVersions.page_schema, page_artifact_key: keys.pageArtifactKey, analysis_key: keys.analysisKey, ocr_key: keys.ocrKey, render_artifact_key: keys.renderArtifactKey, source_content_hash: keys.sourceContentHash, source_url: descriptor.source_url, crop: keys.crop, natural_width: descriptor.natural_width, natural_height: descriptor.natural_height, src_lang: descriptor.src_lang, dst_lang: descriptor.dst_lang, reading_direction: descriptor.reading_direction, versions: serverVersions, patch_versions: serverPatchVersions, state: "queued", analysis_known: false, ocr_done: false, image_w: null, image_h: null, blocks: [], manifest_mismatch_count: 0, created_at: createdAt, updated_at: createdAt, last_accessed_at: createdAt, last_error: null };
+  return { pageKey: keys.pageArtifactKey, analysisKey: keys.analysisKey, ocrKey: keys.ocrKey, renderArtifactKey: keys.renderArtifactKey, sourceIdentity, sourceAcquisition, descriptor, page: record, consumers: new Map(), jobIds: new Set(), persistUntilDone: false, prewarmOnly: descriptor.scope === "prewarm", state: "queued", translationBatchTrace: [], persistChain: Promise.resolve(), cancelled: false, retired: false, timings: { accepted: now() }, durations: { fetch_ms: descriptor.source_fetch_ms ?? null, analysis_ms: null }, analysisCacheHit: null, ocrSummary: null, counters: { translation_calls: 0, rate_limited: 0, stale_work: 0 } };
+}
+async function attachDescriptor(request, descriptor, ledger, sourceIdentity, sourceAcquisition) {
+  if (request.cancelledSourceJobs.has(descriptor.job_id)) { releasePendingSource(request, descriptor.job_id); return; }
+  if (!serverVersions) {
+    if (request.scope === "visible") await pageCache.putJob({ ...ledger, waiting_for_health: true });
+    request.sourceAcquisitions.delete(descriptor.job_id);
+    request.sourceDescriptors.delete(descriptor.job_id);
+    offlineJobs.push({ request, descriptor, ledger, sourceIdentity, sourceAcquisition });
+    return;
+  }
+  const keys = await buildKeys(descriptor, sourceIdentity, serverVersions, serverPatchVersions); descriptor.page_artifact_key = keys.pageArtifactKey;
+  if (request.cancelledSourceJobs.has(descriptor.job_id)) { releasePendingSource(request, descriptor.job_id); return; }
   request.jobsBySourceCrop.set(sourceCropKey(descriptor), descriptor);
-  if (request.scope === "prewarm" && await pageCache?.findPage((p) => p.ocr_key === keys.ocrKey && p.ocr_done === true)) return;
+  const cachedOcr = request.scope === "prewarm"
+    ? await pageCache?.findPage((p) => p.ocr_key === keys.ocrKey && p.ocr_done === true)
+    : null;
+  if (cachedOcr) {
+    request.sourceAcquisitions.delete(descriptor.job_id);
+    request.sourceDescriptors.delete(descriptor.job_id);
+    sourceAcquisition.release();
+    completeJob(request, descriptor.job_id, 0, 0, true, null, null, null, {
+      pageKey: cachedOcr.page_artifact_key,
+    });
+    return;
+  }
   let page = request.scope === "visible" ? await pageCache.getPage(keys.pageArtifactKey) : null;
   if (!page && request.scope === "visible") {
     const analysis = await pageCache.findPage(
       (p) => p.analysis_key === keys.analysisKey && p.analysis_known === true
     );
     const sibling = await pageCache.findPage((p) => p.ocr_key === keys.ocrKey && p.ocr_done === true);
-    page = createProducer(descriptor, keys).page;
+    page = createProducer(descriptor, keys, null, sourceIdentity).page;
     const geometry = analysis || sibling;
     page.analysis_known = !!geometry; page.ocr_done = sibling?.ocr_done === true;
     if (geometry) { page.image_w = geometry.image_w; page.image_h = geometry.image_h; }
-    if (sibling) page.blocks = sibling.blocks.map(({ block_id, bbox, src_text }) => ({ block_id, bbox, src_text, trans_text: null, state: "ocr_complete" }));
+    if (sibling) page.blocks = sibling.blocks.map((block) => ({ block_id: block.block_id, bbox: [...block.bbox], src_text: block.src_text, trans_text: null, kind: block.kind, vertical: block.vertical, reading_order: block.reading_order, state: "ocr_complete" }));
     await pageCache.putPage(page);
   }
-  if (page?.state === "complete") { accepted(request, descriptor, page, true); await pageCache.removeJob(descriptor.job_id); return; }
+  if (request.cancelledSourceJobs.has(descriptor.job_id)) { releasePendingSource(request, descriptor.job_id); return; }
+  if (page?.state === "complete") {
+    request.sourceAcquisitions.delete(descriptor.job_id);
+    request.sourceDescriptors.delete(descriptor.job_id);
+    sourceAcquisition.release();
+    accepted(request, descriptor, page, true);
+    await pageCache.removeJob(descriptor.job_id);
+    return;
+  }
   let producer = producers.get(keys.pageArtifactKey);
-  if (!producer) { producer = createProducer(descriptor, keys, page); producers.set(keys.pageArtifactKey, producer); }
+  if (!producer) {
+    producer = createProducer(descriptor, keys, page, sourceIdentity, sourceAcquisition);
+    request.sourceAcquisitions.delete(descriptor.job_id);
+    request.sourceDescriptors.delete(descriptor.job_id);
+    producers.set(keys.pageArtifactKey, producer);
+  } else {
+    request.sourceAcquisitions.delete(descriptor.job_id);
+    request.sourceDescriptors.delete(descriptor.job_id);
+    sourceAcquisition.release();
+  }
   if (!producer.page.ocr_done) {
     producer.ocrStage = attachStage(ocrStages, producer.ocrKey, producer);
     producer.analysisStage = attachStage(analysisStages, producer.analysisKey, producer);
@@ -468,19 +540,72 @@ async function acceptScope(port, message) {
   const request = createRequest(port, message); requests.set(request.requestId, request);
   if (!message.jobs?.length) { if (message.replaces_request_id) releaseRequest(message.replaces_request_id, request); scopeDone(request); return; }
   if (!serverVersions) try { await refreshServerVersions(false); } catch {}
-  for (const row of message.jobs) {
+  const rows = message.jobs.map((row) => {
     const descriptor = { ...row, src_lang: request.srcLang, dst_lang: request.dstLang, scope: request.scope, reading_direction: readingDirection };
+    const sourceStartedAt = now();
+    const sourceAcquisition = sourcePool.acquire(descriptor.source_url);
+    request.sourceAcquisitions.set(descriptor.job_id, sourceAcquisition);
+    request.sourceDescriptors.set(descriptor.job_id, descriptor);
+    return { descriptor, sourceStartedAt, sourceAcquisition };
+  });
+  for (const { descriptor } of rows) request.jobsBySourceCrop.set(sourceCropKey(descriptor), descriptor);
+  const replacedRequest = message.replaces_request_id
+    ? requests.get(message.replaces_request_id)
+    : null;
+  const replacementAttachKeys = new Set();
+  if (replacedRequest) {
+    releaseMatchingPendingSources(replacedRequest, request);
+    for (const producer of new Set(replacedRequest.jobs.values())) {
+      const key = sourceCropKey(producer.descriptor);
+      if (request.jobsBySourceCrop.has(key)) replacementAttachKeys.add(key);
+    }
+  }
+  let replacementReleased = false;
+  const releaseReplacement = () => {
+    if (replacementReleased || !message.replaces_request_id) return;
+    replacementReleased = true;
+    releaseRequest(message.replaces_request_id, request);
+  };
+  if (!replacedRequest || replacementAttachKeys.size === 0) releaseReplacement();
+  for (const row of rows) {
+    const { descriptor, sourceStartedAt, sourceAcquisition } = row;
+    const ledger = { job_id: descriptor.job_id, request_id: request.requestId, scope: request.scope, src_lang: request.srcLang, dst_lang: request.dstLang, descriptor, state: "queued", created_at: Date.now() };
     try {
-      const ledger = { job_id: descriptor.job_id, request_id: request.requestId, scope: request.scope, src_lang: request.srcLang, dst_lang: request.dstLang, descriptor, state: "queued", created_at: Date.now() };
       if (request.scope === "visible") await pageCache?.putJob(ledger);
-      await attachDescriptor(request, descriptor, ledger);
     } catch (error) {
+      releasePendingSource(request, descriptor.job_id);
+      if (request.cancelledSourceJobs.has(descriptor.job_id)) continue;
       const code = typeof CacheFullError !== "undefined" && error instanceof CacheFullError ? "cache_full" : "request_failed";
-      port?.postMessage({ type: "job_error", request_id: request.requestId, job_id: descriptor.job_id, code, error: String(error) });
+      request.port?.postMessage({ type: "job_error", request_id: request.requestId, job_id: descriptor.job_id, code, error: String(error) });
+      completeJob(request, descriptor.job_id, 0, 1, false, null, null, null, { pageKey: descriptor.page_artifact_key, errorCode: code });
+      continue;
+    }
+    let sourceIdentity;
+    try {
+      sourceIdentity = await sourceAcquisition.promise;
+    } catch (error) {
+      releasePendingSource(request, descriptor.job_id);
+      if (request.cancelledSourceJobs.has(descriptor.job_id)) continue;
+      request.port?.postMessage({ type: "job_error", request_id: request.requestId, job_id: descriptor.job_id, code: "source_unavailable", error: String(error) });
+      completeJob(request, descriptor.job_id, 0, 1, false, { fetch_ms: Math.max(0, now() - sourceStartedAt) }, null, null, { pageKey: null, errorCode: "source_unavailable" });
+      continue;
+    }
+    descriptor.source_fetch_ms = Math.max(0, now() - sourceStartedAt);
+    if (request.cancelledSourceJobs.has(descriptor.job_id)) { releasePendingSource(request, descriptor.job_id); continue; }
+    try {
+      await attachDescriptor(request, descriptor, ledger, sourceIdentity, sourceAcquisition);
+      if (!request.cancelledSourceJobs.has(descriptor.job_id)) admitRequestJobs(request);
+      replacementAttachKeys.delete(sourceCropKey(descriptor));
+      if (replacementAttachKeys.size === 0) releaseReplacement();
+    } catch (error) {
+      releasePendingSource(request, descriptor.job_id);
+      if (request.cancelledSourceJobs.has(descriptor.job_id)) continue;
+      const code = typeof CacheFullError !== "undefined" && error instanceof CacheFullError ? "cache_full" : "request_failed";
+      request.port?.postMessage({ type: "job_error", request_id: request.requestId, job_id: descriptor.job_id, code, error: String(error) });
       completeJob(request, descriptor.job_id, 0, 1, false, null, null, null, { pageKey: descriptor.page_artifact_key, errorCode: code });
     }
   }
-  if (message.replaces_request_id) releaseRequest(message.replaces_request_id, request);
+  releaseReplacement();
   admitRequestJobs(request);
 }
 function completeJob(request, jobId, translated, failed, hit, metrics = null, counters = null, counterProducer = null, meta = {}) {
@@ -560,7 +685,7 @@ function attachStage(map, key, producer) {
   return stage;
 }
 function appendCrop(form, crop) { if (crop && crop !== "full") for (const key of ["left", "top", "right", "bottom"]) form.append(`crop_${key}`, crop[key]); }
-async function openOcrStream(producer, image) { const form = new FormData(); form.append("analysis_key", producer.analysisKey); form.append("ocr_key", producer.ocrKey); form.append("src_lang", producer.descriptor.src_lang); appendCrop(form, producer.descriptor.crop); if (image) { const started = now(); const response = await fetch(producer.descriptor.source_url, { signal: producer.ocrStage.controller.signal }); producer.durations.fetch_ms += now() - started; if (!response.ok) throw new Error(`fetch image HTTP ${response.status}`); form.append("image", await response.blob(), "page.png"); } return fetch(`${SERVER}/ocr-stream`, { method: "POST", body: form, signal: producer.ocrStage.controller.signal }); }
+async function openOcrStream(producer, image) { const form = new FormData(); form.append("analysis_key", producer.analysisKey); form.append("ocr_key", producer.ocrKey); form.append("render_artifact_key", producer.renderArtifactKey); form.append("src_lang", producer.descriptor.src_lang); appendCrop(form, producer.descriptor.crop); if (image) form.append("image", producer.sourceIdentity.blob, "page.png"); return fetch(`${SERVER}/ocr-stream`, { method: "POST", body: form, signal: producer.ocrStage.controller.signal }); }
 async function needsAnalysisImage(producer, analysis) {
   if (producer.page.analysis_known || analysis.complete) return false;
   while (analysis.owner && analysis.owner !== producer.ocrKey) {
@@ -669,7 +794,7 @@ async function consumeOcr(producer) {
   })();
   return stage.promise;
 }
-function ocrBlockFromEvent(event) { return { block_id: event.block_id, bbox: event.bbox, src_text: event.src_text ?? event.text, trans_text: null, state: "ocr_complete" }; }
+function ocrBlockFromEvent(event) { return { block_id: event.block_id, bbox: event.bbox, src_text: event.src_text ?? event.text, trans_text: null, kind: event.kind ?? null, vertical: event.vertical === true, reading_order: null, state: "ocr_complete" }; }
 async function applyOcrBlock(producer, event) { const block = ocrBlockFromEvent(event); mark(producer, "first_ocr"); if (!producer.page.blocks.some((row) => row.block_id === block.block_id)) producer.page.blocks.push(block); await persist(producer); }
 async function translationKeyForBatch(producer, blocks, block) {
   const contextHash = await hashValue(blocks.map((block, reading_order) => ({
@@ -696,7 +821,7 @@ function applyTranslation(producer, item) {
   block.trans_text = item.translation || item.text;
   mark(producer, "first_translation");
   producer.timings.final_translation = now();
-  block.state = "complete";
+  block.state = "translated";
   emit(producer, "translation", { ...block, image_w: producer.page.image_w, image_h: producer.page.image_h });
 }
 function isRateLimited(error) { return error.status === 429 || error.errorCode === "rate_limited"; }
@@ -776,7 +901,7 @@ async function translateFullPage(producer, orderedBlocks) {
     producer.page.last_error = String(error);
     for (const block of orderedBlocks) {
       const stored = producer.page.blocks.find((row) => row.block_id === block.block_id);
-      if (stored) stored.state = "translation_failed";
+      if (stored) stored.state = "failed";
       emit(producer, "block_error", { block_id: block.block_id, stage: "translation", code: "translation_failed" });
     }
     return { translated: 0, failed: orderedBlocks.length };
@@ -791,6 +916,7 @@ async function runProducer(producer) {
     if (producer.prewarmOnly) {
       releaseProducerStages(producer);
       producers.delete(producer.pageKey);
+      releaseProducerSource(producer);
       producer.jobIds.clear();
       return;
     }
@@ -812,6 +938,10 @@ async function runProducer(producer) {
       error.errorCode ||= "reading_order_failed";
       throw error;
     }
+    ordered.blocks.forEach((block, readingOrder) => {
+      const stored = producer.page.blocks.find((row) => row.block_id === block.block_id);
+      if (stored) stored.reading_order = readingOrder;
+    });
     const summary = await translateFullPage(producer, ordered.blocks);
     if (producer.retired) return;
     await finishProducer(producer, summary);
@@ -834,6 +964,7 @@ async function finishProducer(producer, summary) {
   for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, summary.translated, failed, false, metrics, producer.counters, producer, { pageKey: producer.pageKey, acceptedAt: producer.timings.accepted });
   releaseProducerStages(producer);
   producers.delete(producer.pageKey);
+  releaseProducerSource(producer);
   await removeProducerJobs(producer);
 }
 async function failProducer(producer, error) {
@@ -847,6 +978,7 @@ async function failProducer(producer, error) {
   for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, 0, 1, false, metrics, producer.counters, producer, { pageKey: producer.pageKey, errorCode, acceptedAt: producer.timings.accepted });
   releaseProducerStages(producer);
   producers.delete(producer.pageKey);
+  releaseProducerSource(producer);
   await removeProducerJobs(producer);
 }
 function removeQueuedTasks(producer) { for (const task of taskQueue) if (task.producer === producer) task.cancelled = () => true; }
@@ -884,6 +1016,7 @@ function retireProducer(producer) {
   producer.persistUntilDone = false;
   removeQueuedTasks(producer);
   releaseProducerStages(producer);
+  releaseProducerSource(producer);
   if (producers.get(producer.pageKey) === producer) producers.delete(producer.pageKey);
   if (pageCache && persistArtifact) {
     const useful = producer.page.analysis_known || producer.page.blocks.length;
@@ -901,6 +1034,14 @@ function releaseRequest(requestId, replacement = null) {
   if (!request) return;
   const cancelStartedAt = now();
   request.connected = false;
+  for (const [jobId] of request.sourceAcquisitions) {
+    const descriptor = request.sourceDescriptors.get(jobId);
+    const replacementDescriptor = descriptor && replacement?.jobsBySourceCrop.get(sourceCropKey(descriptor));
+    if (request.scope === "visible" && !replacementDescriptor) continue;
+    request.cancelledSourceJobs.add(jobId);
+    releasePendingSource(request, jobId);
+    if (replacementDescriptor) void pageCache?.removeJob(jobId);
+  }
   const releasedProducers = new Set(request.jobs.values());
   for (const producer of releasedProducers) {
     const releasedConsumers = [];
@@ -929,16 +1070,44 @@ function releaseRequest(requestId, replacement = null) {
     const replaced = replacement?.jobsBySourceCrop.has(sourceCropKey(row.descriptor));
     if (request.scope === "visible" && !replaced) continue;
     offlineJobs.splice(index, 1);
+    row.request.cancelledSourceJobs.add(row.descriptor.job_id);
+    row.sourceAcquisition?.release();
     void pageCache?.removeJob(row.descriptor.job_id);
   }
   request.cancelLatencyMs = Math.round(now() - cancelStartedAt);
   recordMetrics(request.requestId, { ...scopeMetrics(request), cancel_latency_ms: request.cancelLatencyMs, page_metrics: request.metricRows, counter_records: new Set([...request.countedCounterProducers, ...releasedProducers].map((producer) => producer.counters)) });
+  request.port = null;
   requests.delete(requestId);
 }
 function disconnectPort(port) { ports.delete(port); for (const request of requests.values()) if (request.port === port) releaseRequest(request.requestId); }
 function offlineLedger(job) { job.descriptor.reading_direction = normalizeReadingDirection(job.descriptor.reading_direction); const request = createRequest(null, { request_id: job.request_id, scope: "visible", src_lang: job.src_lang, dst_lang: job.dst_lang, jobs: [job.descriptor] }); request.connected = false; requests.set(request.requestId, request); return { request, descriptor: job.descriptor, ledger: job }; }
 function restoreProducer(job) { try { offlineJobs.push(offlineLedger(job)); } catch { void pageCache?.removeJob(job.job_id); } }
-async function resumeOfflineJobs() { const jobs = offlineJobs.splice(0); for (const row of jobs) { await attachDescriptor(row.request, row.descriptor, row.ledger); admitRequestJobs(row.request); } }
+async function resumeOfflineJobs() {
+  const jobs = offlineJobs.splice(0);
+  for (const row of jobs) {
+    row.sourceStartedAt ??= now();
+    row.sourceAcquisition ??= sourcePool.acquire(row.descriptor.source_url);
+    row.request.sourceAcquisitions.set(row.descriptor.job_id, row.sourceAcquisition);
+    row.request.sourceDescriptors.set(row.descriptor.job_id, row.descriptor);
+  }
+  for (const row of jobs) {
+    try {
+      row.sourceIdentity ??= await row.sourceAcquisition.promise;
+      row.descriptor.source_fetch_ms = Math.max(0, now() - row.sourceStartedAt);
+      await attachDescriptor(row.request, row.descriptor, row.ledger, row.sourceIdentity, row.sourceAcquisition);
+      admitRequestJobs(row.request);
+    } catch (error) {
+      releasePendingSource(row.request, row.descriptor.job_id);
+      if (row.request.cancelledSourceJobs.has(row.descriptor.job_id)) continue;
+      const code = row.sourceIdentity ?
+        (typeof CacheFullError !== "undefined" && error instanceof CacheFullError ? "cache_full" : "request_failed") :
+        "source_unavailable";
+      completeJob(row.request, row.descriptor.job_id, 0, 1, false,
+        code === "source_unavailable" ? { fetch_ms: Math.max(0, now() - row.sourceStartedAt) } : null,
+        null, null, { pageKey: row.descriptor.page_artifact_key, errorCode: code });
+    }
+  }
+}
 
 if (chrome.runtime.onConnect && chrome.runtime.onConnect.addListener) {
   chrome.runtime.onConnect.addListener((port) => {

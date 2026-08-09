@@ -344,7 +344,7 @@ async def ocr_stream(
     analysis_key: str = Form(...),
     ocr_key: str = Form(...),
     src_lang: str = Form(...),
-    render_artifact_key: str | None = Form(None),
+    render_artifact_key: str = Form(...),
     image: UploadFile | None = File(None),
 ):
     if src_lang not in {"ja", "es", "pt"}:
@@ -381,6 +381,8 @@ async def ocr_stream(
                 "block_id": f"{page}-{index}",
                 "bbox": [80, 80, 240, 120],
                 "src_text": f"{page}:block-{index}",
+                "kind": "text",
+                "vertical": False,
             }) + "\n"
         if block_fault:
             yield json.dumps({
