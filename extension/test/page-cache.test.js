@@ -566,6 +566,17 @@ test("catches version-domain mutations: purge only the stale domain", async (t) 
   assert.ok(await lruCache.getPage("frequently-found"));
   assert.strictEqual(await lruCache.getPage("less-recent"), null);
 
+  let readOnlyTick = 2;
+  const readOnlyStorage = fakeStorage();
+  const readOnlyCache = new PageCache(readOnlyStorage, { now: () => readOnlyTick });
+  await readOnlyCache.putPage(page("read-only-find", "complete", 1));
+  const readOnlyFound = await readOnlyCache.findPage(
+    (row) => row.page_artifact_key === "read-only-find",
+    { touch: false },
+  );
+  assert.strictEqual(readOnlyFound.last_accessed_at, 1);
+  assert.strictEqual(readOnlyStorage.rows["mt:page:read-only-find"].last_accessed_at, 1);
+
   let unsafeNow = 2;
   const unsafeClockStorage = fakeStorage();
   const unsafeClockCache = new PageCache(unsafeClockStorage, { now: () => unsafeNow });

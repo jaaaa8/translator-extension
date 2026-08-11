@@ -333,10 +333,11 @@ class PageCache {
     return this._touch(key, row);
   }
 
-  async findPage(predicate) {
+  async findPage(predicate, { touch = true } = {}) {
     const rows = await this._all();
     for (const [key, row] of Object.entries(rows)) {
       if (key.startsWith(PAGE_PREFIX) && row.schema_version === PAGE_SCHEMA && predicate(row)) {
+        if (!touch) return runtimePage(storedPage(row, row.updated_at), this.layoutFitVersion);
         return this._touch(key, row);
       }
     }

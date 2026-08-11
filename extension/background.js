@@ -359,6 +359,8 @@ const analysisStages = new Map();
 const ocrStages = new Map();
 const hotOcr = new Map();
 const hotTranslations = new Map();
+const renderOutcomeCollectors = new Map();
+const pageWriteTails = new Map();
 const offlineJobs = [];
 const sourcePool = MangaSourceFetch.create({
   fetchImpl: (...args) => fetch(...args),
@@ -371,6 +373,24 @@ let serverPatchVersions = null;
 function lruSet(map, key, value, limit) {
   map.delete(key); map.set(key, value);
   while (map.size > limit) map.delete(map.keys().next().value);
+}
+function serializePageWrite(pageKey, write) {
+  const previous = pageWriteTails.get(pageKey) || Promise.resolve();
+  const run = previous.then(write, write);
+  const tail = run.catch(() => {});
+  pageWriteTails.set(pageKey, tail);
+  void tail.then(() => {
+    if (pageWriteTails.get(pageKey) === tail) pageWriteTails.delete(pageKey);
+  });
+  return run;
+}
+async function findPageForReuse(predicate) {
+  const candidate = await pageCache?.findPage(predicate, { touch: false });
+  if (!candidate) return null;
+  return serializePageWrite(candidate.page_artifact_key, async () => {
+    const current = await pageCache?.getPage(candidate.page_artifact_key);
+    return current && predicate(current) ? current : null;
+  });
 }
 
 async function refreshServerVersions(resume = true) {
@@ -435,7 +455,12 @@ function emit(producer, type, extra = {}) {
 }
 function persist(producer) {
   if (!producer.persistUntilDone || !pageCache) return Promise.resolve();
-  producer.persistChain = producer.persistChain.then(() => pageCache.putPage(producer.page).catch(() => { producer.page.last_error = "cache_failed"; }));
+  producer.persistChain = producer.persistChain.then(() => serializePageWrite(producer.pageKey, async () => {
+    const current = await pageCache.getPage(producer.pageKey);
+    if (current && (current.render_artifact_key !== producer.page.render_artifact_key ||
+        !metadataEqual(current.patch_versions, producer.page.patch_versions))) return;
+    await pageCache.putPage(producer.page);
+  })).catch(() => { producer.page.last_error = "cache_failed"; });
   return producer.persistChain;
 }
 function releaseProducerSource(producer) {
@@ -446,7 +471,33 @@ function releaseProducerSource(producer) {
 function createProducer(descriptor, keys, page, sourceIdentity, sourceAcquisition = null) {
   const createdAt = Date.now();
   const record = page || { schema_version: serverVersions.page_schema, page_artifact_key: keys.pageArtifactKey, analysis_key: keys.analysisKey, ocr_key: keys.ocrKey, render_artifact_key: keys.renderArtifactKey, source_content_hash: keys.sourceContentHash, source_url: descriptor.source_url, crop: keys.crop, natural_width: descriptor.natural_width, natural_height: descriptor.natural_height, src_lang: descriptor.src_lang, dst_lang: descriptor.dst_lang, reading_direction: descriptor.reading_direction, versions: serverVersions, patch_versions: serverPatchVersions, state: "queued", analysis_known: false, ocr_done: false, image_w: null, image_h: null, blocks: [], manifest_mismatch_count: 0, created_at: createdAt, updated_at: createdAt, last_accessed_at: createdAt, last_error: null };
-  return { pageKey: keys.pageArtifactKey, analysisKey: keys.analysisKey, ocrKey: keys.ocrKey, renderArtifactKey: keys.renderArtifactKey, sourceIdentity, sourceAcquisition, descriptor, page: record, consumers: new Map(), jobIds: new Set(), persistUntilDone: false, prewarmOnly: descriptor.scope === "prewarm", state: "queued", translationReady: null, renderReady: null, renderArtifact: null, translationBatchTrace: [], persistChain: Promise.resolve(), cancelled: false, retired: false, timings: { accepted: now() }, durations: { fetch_ms: descriptor.source_fetch_ms ?? null, analysis_ms: null }, analysisCacheHit: null, ocrSummary: null, counters: { translation_calls: 0, rate_limited: 0, stale_work: 0 } };
+  return { pageKey: keys.pageArtifactKey, analysisKey: keys.analysisKey, ocrKey: keys.ocrKey, ocrStageKey: keys.ocrKey, renderArtifactKey: keys.renderArtifactKey, sourceIdentity, sourceAcquisition, descriptor, page: record, consumers: new Map(), jobIds: new Set(), persistUntilDone: false, prewarmOnly: descriptor.scope === "prewarm", state: "queued", translationReady: null, renderReady: null, renderArtifact: null, translationBatchTrace: [], persistChain: Promise.resolve(), cancelled: false, retired: false, timings: { accepted: now() }, durations: { fetch_ms: descriptor.source_fetch_ms ?? null, analysis_ms: null }, analysisCacheHit: null, ocrSummary: null, counters: { translation_calls: 0, rate_limited: 0, stale_work: 0 } };
+}
+function reusableProducer(producer, keys, page = null) {
+  return producer && !producer.cancelled && !producer.retired &&
+    producer.renderArtifactKey === keys.renderArtifactKey &&
+    producer.page?.render_artifact_key === keys.renderArtifactKey &&
+    metadataEqual(producer.page?.patch_versions, serverPatchVersions) &&
+    (!page || (page.render_artifact_key === producer.page.render_artifact_key &&
+      metadataEqual(page.patch_versions, producer.page.patch_versions)));
+}
+async function attachProducerConsumer(request, descriptor, ledger, producer, sourceAcquisition, releaseSource) {
+  request.sourceAcquisitions.delete(descriptor.job_id);
+  request.sourceDescriptors.delete(descriptor.job_id);
+  if (releaseSource) sourceAcquisition.release();
+  if (!producer.page.ocr_done) {
+    producer.ocrStage = attachStage(ocrStages, producer.ocrStageKey, producer);
+    producer.analysisStage = attachStage(analysisStages, producer.analysisKey, producer);
+  }
+  producer.consumers.set(consumerKey(request.requestId, descriptor.job_id), { requestId: request.requestId, jobId: descriptor.job_id, port: request.port });
+  producer.jobIds.add(descriptor.job_id);
+  if (request.scope !== "prewarm") producer.prewarmOnly = false;
+  if (request.scope === "visible") producer.persistUntilDone = true;
+  request.jobs.set(descriptor.job_id, producer); request.pendingJobs.push(producer);
+  if (request.scope === "visible") {
+    await pageCache?.putJob({ ...ledger, page_artifact_key: producer.pageKey, waiting_for_health: false });
+  }
+  accepted(request, descriptor, producer.page, false, producer.renderArtifact);
 }
 async function attachDescriptor(request, descriptor, ledger, sourceIdentity, sourceAcquisition) {
   if (request.cancelledSourceJobs.has(descriptor.job_id)) { releasePendingSource(request, descriptor.job_id); return; }
@@ -460,8 +511,13 @@ async function attachDescriptor(request, descriptor, ledger, sourceIdentity, sou
   const keys = await buildKeys(descriptor, sourceIdentity, serverVersions, serverPatchVersions); descriptor.page_artifact_key = keys.pageArtifactKey;
   if (request.cancelledSourceJobs.has(descriptor.job_id)) { releasePendingSource(request, descriptor.job_id); return; }
   request.jobsBySourceCrop.set(sourceCropKey(descriptor), descriptor);
+  const activeProducer = producers.get(keys.pageArtifactKey);
+  if (reusableProducer(activeProducer, keys)) {
+    await attachProducerConsumer(request, descriptor, ledger, activeProducer, sourceAcquisition, true);
+    return;
+  }
   const cachedOcr = request.scope === "prewarm"
-    ? await pageCache?.findPage((p) => p.ocr_key === keys.ocrKey && p.ocr_done === true)
+    ? await findPageForReuse((p) => p.ocr_key === keys.ocrKey && p.ocr_done === true)
     : null;
   if (cachedOcr) {
     request.sourceAcquisitions.delete(descriptor.job_id);
@@ -472,18 +528,40 @@ async function attachDescriptor(request, descriptor, ledger, sourceIdentity, sou
     });
     return;
   }
-  let page = request.scope === "visible" ? await pageCache.getPage(keys.pageArtifactKey) : null;
+  let page = request.scope === "visible"
+    ? await serializePageWrite(keys.pageArtifactKey, () => pageCache.getPage(keys.pageArtifactKey))
+    : null;
   if (!page && request.scope === "visible") {
-    const analysis = await pageCache.findPage(
+    const analysis = await findPageForReuse(
       (p) => p.analysis_key === keys.analysisKey && p.analysis_known === true
     );
-    const sibling = await pageCache.findPage((p) => p.ocr_key === keys.ocrKey && p.ocr_done === true);
+    const sibling = await findPageForReuse((p) => p.ocr_key === keys.ocrKey && p.ocr_done === true);
     page = createProducer(descriptor, keys, null, sourceIdentity).page;
     const geometry = analysis || sibling;
     page.analysis_known = !!geometry; page.ocr_done = sibling?.ocr_done === true;
     if (geometry) { page.image_w = geometry.image_w; page.image_h = geometry.image_h; }
     if (sibling) page.blocks = sibling.blocks.map((block) => ({ block_id: block.block_id, bbox: [...block.bbox], src_text: block.src_text, trans_text: null, kind: block.kind, vertical: block.vertical, reading_order: block.reading_order, state: "ocr_complete" }));
-    await pageCache.putPage(page);
+    page = await serializePageWrite(keys.pageArtifactKey, async () => {
+      const current = await pageCache.getPage(keys.pageArtifactKey);
+      if (current) return current;
+      await pageCache.putPage(page);
+      return page;
+    });
+  }
+  if (page && request.scope === "visible" &&
+      (page.render_artifact_key !== keys.renderArtifactKey || !metadataEqual(page.patch_versions, serverPatchVersions))) {
+    page = await serializePageWrite(keys.pageArtifactKey, async () => {
+      const current = await pageCache.getPage(keys.pageArtifactKey);
+      if (!current) return page;
+      if (current.render_artifact_key !== keys.renderArtifactKey ||
+          !metadataEqual(current.patch_versions, serverPatchVersions)) {
+        current.render_artifact_key = keys.renderArtifactKey;
+        current.patch_versions = serverPatchVersions;
+        delete current.render;
+        await pageCache.putPage(current);
+      }
+      return current;
+    });
   }
   if (request.cancelledSourceJobs.has(descriptor.job_id)) { releasePendingSource(request, descriptor.job_id); return; }
   const hasManifest = page != null && Object.hasOwn(page, "manifest_ids");
@@ -491,50 +569,70 @@ async function attachDescriptor(request, descriptor, ledger, sourceIdentity, sou
   if (terminalHit) {
     request.sourceAcquisitions.delete(descriptor.job_id);
     request.sourceDescriptors.delete(descriptor.job_id);
+    if (freshBreakerSentinel(page)) {
+      request.port?.postMessage({ type: "page_job_accepted", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, state: "complete" });
+      completeJob(request, descriptor.job_id, page.blocks.length, 0, true, { recognized: page.blocks.length, failed: 0 }, null, null, { pageKey: page.page_artifact_key });
+      sourceAcquisition.release();
+      await pageCache?.removeJob(descriptor.job_id);
+      return;
+    }
     const producer = createProducer(descriptor, keys, page, sourceIdentity, sourceAcquisition);
     producer.translationReady = Promise.resolve({ translated: page.blocks.length, failed: 0 });
     request.port?.postMessage({ type: "page_job_accepted", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, state: "complete" });
+    let recoveryQueued = false;
     try {
       producer.renderReady = fetchRenderArtifact(producer);
       const artifact = await producer.renderReady;
       replayPage(request, descriptor.job_id, page, true, artifact);
       completeJob(request, descriptor.job_id, page.blocks.length, 0, true, { recognized: page.blocks.length, failed: 0 }, null, null, { pageKey: page.page_artifact_key });
     } catch (error) {
+      if (error?.errorCode === "manifest_mismatch") {
+        try {
+          const action = await handleManifestMismatch(producer);
+          if (action === "recover") {
+            producer.persistUntilDone = true;
+            producer.prewarmOnly = false;
+            producer.consumers.set(consumerKey(request.requestId, descriptor.job_id), { requestId: request.requestId, jobId: descriptor.job_id, port: request.port });
+            producer.jobIds.add(descriptor.job_id);
+            request.jobs.set(descriptor.job_id, producer);
+            request.pendingJobs.push(producer);
+            producers.set(producer.pageKey, producer);
+            recoveryQueued = true;
+            return;
+          }
+          completeJob(request, descriptor.job_id, page.blocks.length, 0, true, { recognized: page.blocks.length, failed: 0 }, null, null, { pageKey: page.page_artifact_key });
+          return;
+        } catch (claimError) {
+          error = claimError;
+        }
+      }
       page.last_error = String(error);
       page.state = "partial";
-      await pageCache?.putPage(page).catch(() => {});
+      await serializePageWrite(page.page_artifact_key, async () => {
+        const current = await pageCache?.getPage(page.page_artifact_key);
+        if (!current || current.render_artifact_key !== page.render_artifact_key ||
+            !metadataEqual(current.patch_versions, page.patch_versions)) return;
+        current.last_error = page.last_error;
+        current.state = page.state;
+        await pageCache?.putPage(current);
+      }).catch(() => {});
       request.port?.postMessage({ type: "image_done", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, translated: 0, failed: 1 });
       completeJob(request, descriptor.job_id, 0, 1, false, { recognized: page.blocks.length, failed: 1 }, null, null, { pageKey: page.page_artifact_key, errorCode: error.errorCode || "render_failed" });
     } finally {
-      releaseProducerSource(producer);
-      await pageCache?.removeJob(descriptor.job_id);
+      if (!recoveryQueued) {
+        releaseProducerSource(producer);
+        await pageCache?.removeJob(descriptor.job_id);
+      }
     }
     return;
   }
   let producer = producers.get(keys.pageArtifactKey);
-  if (!producer) {
+  const joinsProducer = reusableProducer(producer, keys, page);
+  if (!joinsProducer) {
     producer = createProducer(descriptor, keys, page, sourceIdentity, sourceAcquisition);
-    request.sourceAcquisitions.delete(descriptor.job_id);
-    request.sourceDescriptors.delete(descriptor.job_id);
     producers.set(keys.pageArtifactKey, producer);
-  } else {
-    request.sourceAcquisitions.delete(descriptor.job_id);
-    request.sourceDescriptors.delete(descriptor.job_id);
-    sourceAcquisition.release();
   }
-  if (!producer.page.ocr_done) {
-    producer.ocrStage = attachStage(ocrStages, producer.ocrKey, producer);
-    producer.analysisStage = attachStage(analysisStages, producer.analysisKey, producer);
-  }
-  producer.consumers.set(consumerKey(request.requestId, descriptor.job_id), { requestId: request.requestId, jobId: descriptor.job_id, port: request.port });
-  producer.jobIds.add(descriptor.job_id);
-  if (request.scope !== "prewarm") producer.prewarmOnly = false;
-  if (request.scope === "visible") producer.persistUntilDone = true;
-  request.jobs.set(descriptor.job_id, producer); request.pendingJobs.push(producer);
-  if (request.scope === "visible") {
-    await pageCache?.putJob({ ...ledger, page_artifact_key: keys.pageArtifactKey, waiting_for_health: false });
-  }
-  accepted(request, descriptor, producer.page, false, producer.renderArtifact);
+  await attachProducerConsumer(request, descriptor, ledger, producer, sourceAcquisition, joinsProducer);
 }
 function accepted(request, descriptor, page, cacheHit, artifact = null) {
   request.port?.postMessage({ type: "page_job_accepted", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, state: cacheHit ? "complete" : page.state });
@@ -543,7 +641,9 @@ function accepted(request, descriptor, page, cacheHit, artifact = null) {
 function replayPage(request, jobId, page, cacheHit, artifact = null) {
   if (page.image_w) request.port?.postMessage({ type: "progress", request_id: request.requestId, job_id: jobId, image_w: page.image_w, image_h: page.image_h });
   if (!artifact || !Object.hasOwn(page, "manifest_ids")) return;
-  for (const event of renderableTranslationEvents(page, artifact)) {
+  const events = renderableTranslationEvents(page, artifact);
+  prepareRenderOutcomeCollector(page, artifact, [{ requestId: request.requestId, jobId, port: request.port }]);
+  for (const event of events) {
     request.port?.postMessage({ ...event, type: "translation", request_id: request.requestId, job_id: jobId, page_artifact_key: page.page_artifact_key, cache_hit: cacheHit === true });
   }
 }
@@ -741,6 +841,151 @@ function validRenderBbox(bbox) {
   return Array.isArray(bbox) && bbox.length === 4 && bbox.every(Number.isFinite) &&
     bbox[0] >= 0 && bbox[1] >= 0 && bbox[2] > 0 && bbox[3] > 0;
 }
+const RENDER_CAPABILITY_REASONS = new Set(["clean_failed", "layout_failed", "fit_failed", "unsupported_region"]);
+function freshBreakerSentinel(page) {
+  return page.render?.breaker_open === true && page.render.render_artifact_key === page.render_artifact_key &&
+    page.render.layout_fit_version === LAYOUT_FIT_VERSION &&
+    metadataEqual(page.render.patch_versions, serverPatchVersions);
+}
+function renderOutcomeKey(pageKey, renderKey, layoutFitVersion) {
+  return JSON.stringify([pageKey, renderKey, layoutFitVersion]);
+}
+function sameManifest(left, right) {
+  return Array.isArray(left) && Array.isArray(right) && left.length === right.length &&
+    left.every((blockId, index) => blockId === right[index]);
+}
+function renderCollectorMatchesPage(collector, page) {
+  return page?.page_artifact_key === collector.pageKey &&
+    page.render_artifact_key === collector.renderKey &&
+    sameManifest(page.manifest_ids, collector.manifestIds) &&
+    metadataEqual(page.patch_versions, collector.patchVersions);
+}
+function readyRenderFromCollector(collector) {
+  return {
+    schema_version: "render-page-v1",
+    render_artifact_key: collector.renderKey,
+    patch_versions: collector.patchVersions,
+    layout_fit_version: collector.layoutFitVersion,
+    breaker_open: false,
+    blocks: collector.manifestIds.map((blockId) => collector.blocks.get(blockId)),
+  };
+}
+function persistCompletedRender(collector) {
+  if (collector.persisting || collector.blocks.size !== collector.manifestIds.length) return;
+  collector.persisting = true;
+  void serializePageWrite(collector.pageKey, async () => {
+    if (renderOutcomeCollectors.get(collector.key) !== collector) return;
+    const activeProducer = collector.producer && producers.get(collector.pageKey) === collector.producer
+      ? collector.producer : null;
+    const page = await pageCache?.getPage(collector.pageKey);
+    if (renderOutcomeCollectors.get(collector.key) !== collector || !page || !renderCollectorMatchesPage(collector, page)) return;
+    const render = readyRenderFromCollector(collector);
+    page.render = render;
+    await pageCache?.putPage(page);
+    if (activeProducer && renderCollectorMatchesPage(collector, activeProducer.page)) activeProducer.page.render = render;
+  }).catch(() => {}).finally(() => {
+    if (renderOutcomeCollectors.get(collector.key) === collector) renderOutcomeCollectors.delete(collector.key);
+  });
+}
+function prepareRenderOutcomeCollector(page, artifact, consumers, producer = null) {
+  if (!pageCache || !Object.hasOwn(page, "manifest_ids")) return;
+  if (page.render?.render_artifact_key === artifact.render_artifact_key &&
+      page.render.layout_fit_version === LAYOUT_FIT_VERSION &&
+      metadataEqual(page.render.patch_versions, serverPatchVersions)) return;
+  const key = renderOutcomeKey(page.page_artifact_key, artifact.render_artifact_key, LAYOUT_FIT_VERSION);
+  let collector = renderOutcomeCollectors.get(key);
+  if (!collector || !sameManifest(collector.manifestIds, page.manifest_ids)) {
+    const artifactById = new Map(artifact.blocks.map((block) => [block.block_id, block]));
+    collector = {
+      key,
+      pageKey: page.page_artifact_key,
+      renderKey: artifact.render_artifact_key,
+      layoutFitVersion: LAYOUT_FIT_VERSION,
+      patchVersions: serverPatchVersions,
+      manifestIds: [...page.manifest_ids],
+      artifactById,
+      blocks: new Map(),
+      consumers: new Map(),
+      producer,
+      persisting: false,
+    };
+    for (const blockId of collector.manifestIds) {
+      const block = artifactById.get(blockId);
+      if (!RENDER_CAPABILITY_REASONS.has(block?.reason)) continue;
+      collector.blocks.set(blockId, {
+        block_id: blockId,
+        render_mode: "skip",
+        patch_id: null,
+        patch_bbox: null,
+        fit_bbox: validRenderBbox(block.fit_bbox) ? [...block.fit_bbox] : null,
+        layout_profile: null,
+        reason: block.reason,
+      });
+    }
+    lruSet(renderOutcomeCollectors, key, collector, 128);
+  } else if (producer) {
+    collector.producer = producer;
+  }
+  for (const consumer of consumers) {
+    if (!consumer?.port) continue;
+    collector.consumers.set(consumerKey(consumer.requestId, consumer.jobId), consumer);
+  }
+  persistCompletedRender(collector);
+}
+function validLayoutProfile(profile) {
+  return profile && typeof profile === "object" && !Array.isArray(profile) &&
+    Number.isFinite(profile.font_px) && Number.isFinite(profile.line_height);
+}
+function collectRenderOutcome(port, message) {
+  const key = renderOutcomeKey(message.page_artifact_key, message.render_artifact_key, message.layout_fit_version);
+  const collector = renderOutcomeCollectors.get(key);
+  const consumer = collector?.consumers.get(consumerKey(message.request_id, message.job_id));
+  if (!collector || consumer?.port !== port || !collector.manifestIds.includes(message.block_id) || collector.blocks.has(message.block_id)) return;
+  const artifactBlock = collector.artifactById.get(message.block_id);
+  let block;
+  if (message.painted === true && message.reason === null && validLayoutProfile(message.layout_profile) &&
+      artifactBlock?.reason === null && typeof artifactBlock.patch_id === "string" &&
+      validRenderBbox(artifactBlock.patch_bbox) && validRenderBbox(artifactBlock.fit_bbox)) {
+    block = {
+      block_id: message.block_id,
+      render_mode: "in_place",
+      patch_id: artifactBlock.patch_id,
+      patch_bbox: [...artifactBlock.patch_bbox],
+      fit_bbox: [...artifactBlock.fit_bbox],
+      layout_profile: { font_px: message.layout_profile.font_px, line_height: message.layout_profile.line_height },
+      reason: null,
+    };
+  } else if (message.painted === false && message.reason === "fit_failed" && artifactBlock) {
+    block = {
+      block_id: message.block_id,
+      render_mode: "skip",
+      patch_id: null,
+      patch_bbox: null,
+      fit_bbox: validRenderBbox(artifactBlock.fit_bbox) ? [...artifactBlock.fit_bbox] : null,
+      layout_profile: null,
+      reason: "fit_failed",
+    };
+  }
+  if (!block) return;
+  collector.blocks.set(message.block_id, block);
+  lruSet(renderOutcomeCollectors, key, collector, 128);
+  persistCompletedRender(collector);
+}
+function invalidateRenderOutcomeConsumers({ requestId = null, port = null } = {}) {
+  for (const [key, collector] of renderOutcomeCollectors) {
+    for (const [consumerId, consumer] of collector.consumers) {
+      if ((requestId !== null && consumer.requestId === requestId) || (port !== null && consumer.port === port)) {
+        collector.consumers.delete(consumerId);
+      }
+    }
+    if (!collector.consumers.size && !collector.persisting) renderOutcomeCollectors.delete(key);
+  }
+}
+function invalidateRenderOutcomePage(pageKey) {
+  for (const [key, collector] of renderOutcomeCollectors) {
+    if (collector.pageKey === pageKey) renderOutcomeCollectors.delete(key);
+  }
+}
 function renderableTranslationEvents(page, artifact) {
   if (!Object.hasOwn(page, "manifest_ids")) return [];
   const artifactById = new Map();
@@ -753,7 +998,6 @@ function renderableTranslationEvents(page, artifact) {
     artifactById.set(block.block_id, block);
   }
   if (!page.manifest_ids.every((blockId) => artifactById.has(blockId))) {
-    page.manifest_mismatch_count = 1;
     const error = new Error("render artifact does not cover manifest_ids");
     error.errorCode = "manifest_mismatch";
     throw error;
@@ -818,7 +1062,7 @@ function rejectAnalysisStage(stage, error, owner) {
   stage.reject(error);
 }
 async function consumeOcr(producer) {
-  producer.ocrStage = attachStage(ocrStages, producer.ocrKey, producer);
+  producer.ocrStage = attachStage(ocrStages, producer.ocrStageKey, producer);
   producer.analysisStage = attachStage(analysisStages, producer.analysisKey, producer);
   const stage = producer.ocrStage;
   if (stage.promise) {
@@ -979,7 +1223,9 @@ async function translateFullPage(producer, orderedBlocks) {
   })));
   if (producer.retired || producer.cancelled) return { translated: 0, failed: 0 };
   const cached = keyed.map(({ key }) => hotTranslations.get(key));
-  if (cached.every((item) => item !== undefined)) {
+  const forceNetwork = producer.forceTranslationNetwork === true;
+  producer.forceTranslationNetwork = false;
+  if (!forceNetwork && cached.every((item) => item !== undefined)) {
     cached.forEach((item, index) => applyTranslation(producer, { id: keyed[index].block.block_id, ...item }));
     producer.page.manifest_ids = orderedBlocks
       .filter((block) => producer.page.blocks.find((row) => row.block_id === block.block_id)?.kind === "text")
@@ -1039,6 +1285,55 @@ async function translateFullPage(producer, orderedBlocks) {
     return { translated: 0, failed: orderedBlocks.length };
   }
 }
+function resetProducerForManifestRecovery(producer) {
+  releaseProducerStages(producer);
+  producer.ocrStageKey = `${producer.ocrKey}:manifest-recovery`;
+  producer.ocrStage = null;
+  producer.analysisStage = null;
+  producer.translationReady = null;
+  producer.renderReady = null;
+  producer.renderArtifact = null;
+  producer.cancelled = false;
+  producer.forceTranslationNetwork = true;
+  const page = producer.page;
+  page.state = "queued";
+  page.analysis_known = false;
+  page.ocr_done = false;
+  page.image_w = null;
+  page.image_h = null;
+  page.blocks = [];
+  delete page.manifest_ids;
+  delete page.render;
+  page.last_error = null;
+}
+async function handleManifestMismatch(producer) {
+  return serializePageWrite(producer.pageKey, async () => {
+    const page = await pageCache.getPage(producer.pageKey);
+    if (!page) throw new Error("manifest mismatch page missing from cache");
+    if (page.render_artifact_key !== producer.renderArtifactKey ||
+        !metadataEqual(page.patch_versions, producer.page.patch_versions)) return "stale";
+    if (page.manifest_mismatch_count === 0) {
+      page.manifest_mismatch_count = 1;
+      await pageCache.putPage(page);
+      invalidateRenderOutcomePage(page.page_artifact_key);
+      producer.page = page;
+      resetProducerForManifestRecovery(producer);
+      return "recover";
+    }
+    page.render = {
+      schema_version: "render-page-v1",
+      render_artifact_key: producer.renderArtifactKey,
+      patch_versions: serverPatchVersions,
+      layout_fit_version: LAYOUT_FIT_VERSION,
+      breaker_open: true,
+      blocks: [],
+    };
+    await pageCache.putPage(page);
+    invalidateRenderOutcomePage(page.page_artifact_key);
+    producer.page = page;
+    return "breaker";
+  });
+}
 async function runProducer(producer) {
   mark(producer, "started");
   producer.state = producer.page.state = "running";
@@ -1084,9 +1379,27 @@ async function runProducer(producer) {
     const [artifact, summary] = await Promise.all([producer.renderReady, producer.translationReady]);
     if (producer.retired) return;
     producer.renderArtifact = artifact;
-    for (const event of renderableTranslationEvents(producer.page, artifact)) emit(producer, "translation", event);
+    const events = renderableTranslationEvents(producer.page, artifact);
+    prepareRenderOutcomeCollector(producer.page, artifact, [...producer.consumers.values()], producer);
+    for (const event of events) emit(producer, "translation", event);
     await finishProducer(producer, summary);
   } catch (error) {
+    if (!producer.retired && error?.errorCode === "manifest_mismatch") {
+      try {
+        const action = await handleManifestMismatch(producer);
+        if (action === "recover") {
+          await runProducer(producer);
+          return;
+        }
+        await finishProducer(producer, {
+          translated: producer.page.blocks.filter((block) => block.state === "translated").length,
+          failed: 0,
+        });
+        return;
+      } catch (claimError) {
+        error = claimError;
+      }
+    }
     if (!producer.retired) await failProducer(producer, error);
   }
 }
@@ -1104,7 +1417,7 @@ async function finishProducer(producer, summary) {
   const metrics = producerMetrics(producer);
   for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, summary.translated, failed, false, metrics, producer.counters, producer, { pageKey: producer.pageKey, acceptedAt: producer.timings.accepted });
   releaseProducerStages(producer);
-  producers.delete(producer.pageKey);
+  if (producers.get(producer.pageKey) === producer) producers.delete(producer.pageKey);
   releaseProducerSource(producer);
   await removeProducerJobs(producer);
 }
@@ -1118,7 +1431,7 @@ async function failProducer(producer, error) {
   const errorCode = error?.errorCode || "request_failed";
   for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, 0, 1, false, metrics, producer.counters, producer, { pageKey: producer.pageKey, errorCode, acceptedAt: producer.timings.accepted });
   releaseProducerStages(producer);
-  producers.delete(producer.pageKey);
+  if (producers.get(producer.pageKey) === producer) producers.delete(producer.pageKey);
   releaseProducerSource(producer);
   await removeProducerJobs(producer);
 }
@@ -1129,7 +1442,8 @@ function demoteQueuedTasks(producer) {
 }
 function releaseStage(map, key, pageKey) { const stage = map.get(key); if (!stage) return; stage.consumers.delete(pageKey); if (!stage.consumers.size) { stage.controller.abort(); map.delete(key); } }
 function releaseOcrConsumer(producer) {
-  const stage = ocrStages.get(producer.ocrKey);
+  const stageKey = producer.ocrStageKey || producer.ocrKey;
+  const stage = ocrStages.get(stageKey);
   if (!stage) return;
   stage.consumers.delete(producer.pageKey);
   if (stage.consumers.size) return;
@@ -1142,7 +1456,7 @@ function releaseOcrConsumer(producer) {
   }
   stage.cancelAfterCurrentBlock = true;
   stage.controller.abort();
-  ocrStages.delete(producer.ocrKey);
+  ocrStages.delete(stageKey);
 }
 function releaseProducerStages(producer) {
   releaseOcrConsumer(producer);
@@ -1160,10 +1474,15 @@ function retireProducer(producer) {
   releaseProducerSource(producer);
   if (producers.get(producer.pageKey) === producer) producers.delete(producer.pageKey);
   if (pageCache && persistArtifact) {
-    const useful = producer.page.analysis_known || producer.page.blocks.length;
-    void producer.persistChain.then(() => useful
-      ? pageCache.putPage({ ...producer.page, state: "partial" })
-      : pageCache.removePage(producer.pageKey))
+    const page = producer.page;
+    const useful = page.analysis_known || page.blocks.length;
+    void producer.persistChain.then(() => serializePageWrite(producer.pageKey, async () => {
+      const current = await pageCache.getPage(producer.pageKey);
+      if (!current || current.render_artifact_key !== producer.renderArtifactKey ||
+          !metadataEqual(current.patch_versions, page.patch_versions)) return;
+      if (useful) await pageCache.putPage({ ...page, state: "partial" });
+      else await pageCache.removePage(producer.pageKey);
+    }))
       .catch(() => {})
       .finally(() => removeProducerJobs(producer));
   } else {
@@ -1171,6 +1490,7 @@ function retireProducer(producer) {
   }
 }
 function releaseRequest(requestId, replacement = null) {
+  invalidateRenderOutcomeConsumers({ requestId });
   const request = requests.get(requestId);
   if (!request) return;
   const cancelStartedAt = now();
@@ -1220,7 +1540,7 @@ function releaseRequest(requestId, replacement = null) {
   request.port = null;
   requests.delete(requestId);
 }
-function disconnectPort(port) { ports.delete(port); for (const request of requests.values()) if (request.port === port) releaseRequest(request.requestId); }
+function disconnectPort(port) { ports.delete(port); invalidateRenderOutcomeConsumers({ port }); for (const request of requests.values()) if (request.port === port) releaseRequest(request.requestId); }
 function offlineLedger(job) { job.descriptor.reading_direction = normalizeReadingDirection(job.descriptor.reading_direction); const request = createRequest(null, { request_id: job.request_id, scope: "visible", src_lang: job.src_lang, dst_lang: job.dst_lang, jobs: [job.descriptor] }); request.connected = false; requests.set(request.requestId, request); return { request, descriptor: job.descriptor, ledger: job }; }
 function restoreProducer(job) { try { offlineJobs.push(offlineLedger(job)); } catch { void pageCache?.removeJob(job.job_id); } }
 async function resumeOfflineJobs() {
@@ -1270,6 +1590,7 @@ if (chrome.runtime.onConnect && chrome.runtime.onConnect.addListener) {
       }
       if (message.type === "cancel_request") releaseRequest(message.request_id);
       if (message.type === "render_metric") {
+        collectRenderOutcome(port, message);
         const request = requests.get(message.request_id);
         if (!Number.isFinite(message.first_overlay_ms) || !message.job_id) return;
         if (request) {
