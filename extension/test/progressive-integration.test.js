@@ -55,17 +55,23 @@ function ndjson(rows, onDone = () => {}) {
 }
 
 function createServer() {
-  const calls = { source: 0, ocrStream: 0, translate: 0, activeSource: 0, peakSource: 0 };
+  const calls = { source: 0, ocrStream: 0, renderArtifact: 0, renderKey: 0, renderBlob: 0, translate: 0, activeSource: 0, peakSource: 0 };
   const held = new Map();
   const heldSource = new Map();
   const heldTranslation = new Map();
+  const heldRender = new Map();
   const faults = { source: new Set(), ocr: new Set(), translation: new Set() };
   const events = [];
+  const renderCompletions = [];
+  const translationCompletions = [];
   const translationBodies = [];
   const ocrForms = [];
+  const renderPages = new Map();
   const server = {
     calls,
     events,
+    renderCompletions,
+    translationCompletions,
     translationBodies,
     ocrForms,
     clone: structuredClone,
@@ -76,6 +82,7 @@ function createServer() {
         ocrForms.push(options.body);
         const source = options.body.get("image") ? await options.body.get("image").text() : "A.jpg";
         const name = /\/([A-D])\.jpg/.exec(source)?.[1] || "A";
+        renderPages.set(options.body.get("render_artifact_key"), name);
         if (held.has(name)) await held.get(name).promise;
         if (faults.ocr.has(name)) return ndjson([
           { type: "analysis_ready", image_w: 1000, image_h: 1600, analysis_ms: 7 },
@@ -87,6 +94,39 @@ function createServer() {
           { type: "ocr_block", block_id: `${name}-b1`, bbox: [10, 20, 100, 40], src_text: name, kind: "text", vertical: false },
           { type: "image_done" },
         ], () => events.push(["image_done", name]));
+      }
+      if (url.endsWith("/render-artifact")) {
+        calls.renderArtifact++;
+        const image = options.body.get("image");
+        if (image) calls.renderBlob++;
+        else calls.renderKey++;
+        const renderKey = options.body.get("render_artifact_key");
+        let name = renderPages.get(renderKey);
+        if (image) {
+          name = /\/([A-D])\.jpg/.exec(await image.text())?.[1] || "A";
+          renderPages.set(renderKey, name);
+        }
+        if (!name) return { ok: false, status: 409, json: async () => server.clone({ error: "artifact_missing" }) };
+        if (heldRender.has(name)) await heldRender.get(name).promise;
+        renderCompletions.push(name);
+        const blockId = `${name}-b1`;
+        return { ok: true, status: 200, json: async () => server.clone({
+          schema_version: "render-v1",
+          render_artifact_key: renderKey,
+          analysis_key: options.body.get("analysis_key"),
+          image_w: 1000,
+          image_h: 1600,
+          blocks: [{
+            block_id: blockId,
+            patch_id: `patch-${blockId}`,
+            patch_bbox: [10, 20, 100, 40],
+            clean_region: [10, 20, 100, 40],
+            fit_bbox: [10, 20, 100, 40],
+            patch_mime: "image/png",
+            patch_rgba: Buffer.from(`patch:${blockId}`).toString("base64"),
+            reason: null,
+          }],
+        }) };
       }
       if (url.endsWith("/translate-items")) {
         calls.translate++;
@@ -110,7 +150,8 @@ function createServer() {
         if (body.items.some((item) => faults.translation.has(item.text))) {
           return { ok: false, status: 500, json: async () => server.clone({ error: "injected translation failure" }) };
         }
-        return { ok: true, json: async () => server.clone({ items: body.items.map((item) => ({ id: item.id, translation: `${item.text} translated` })) }) };
+        translationCompletions.push(translationName);
+        return { ok: true, json: async () => server.clone({ items: body.items.map((item) => ({ id: item.id, kind: "text", translation: `${item.text} translated` })) }) };
       }
       if (url.endsWith("/ocr")) {
         return { ok: true, json: async () => server.clone({ image_w: 1000, image_h: 1600, blocks: [] }) };
@@ -139,9 +180,15 @@ function createServer() {
       const promise = new Promise((done) => { resolve = done; });
       heldTranslation.set(name, { promise, resolve });
     },
+    holdRender(name) {
+      let resolve;
+      const promise = new Promise((done) => { resolve = done; });
+      heldRender.set(name, { promise, resolve });
+    },
     finishPage(name) { held.get(name)?.resolve(); held.delete(name); },
     finishSource(name) { heldSource.get(name)?.resolve(); heldSource.delete(name); },
     finishTranslation(name) { heldTranslation.get(name)?.resolve(); heldTranslation.delete(name); },
+    finishRender(name) { heldRender.get(name)?.resolve(); heldRender.delete(name); },
     fail(stage, name) { faults[stage].add(name); },
   };
   return server;
@@ -285,8 +332,31 @@ test("progressive integration", { timeout: 10000 }, async () => {
   assert.strictEqual(app.server.calls.source, beforeReplay.source + 1);
   assert.strictEqual(app.server.calls.ocrStream, beforeReplay.ocrStream);
   assert.strictEqual(app.server.calls.translate, beforeReplay.translate);
+  assert.strictEqual(app.server.calls.renderKey, beforeReplay.renderKey + 1);
+  assert.strictEqual(app.server.calls.renderBlob, beforeReplay.renderBlob);
   assert.strictEqual(replay.cacheHit, true);
   assert.strictEqual(app.text(), "A translated");
+
+  const renderJoinServer = createServer();
+  renderJoinServer.holdRender("A");
+  const renderJoin = createIntegration({ server: renderJoinServer });
+  const renderJoined = renderJoin.click();
+  await eventually(() => renderJoinServer.calls.renderArtifact === 1, "held render artifact");
+  await eventually(() => renderJoinServer.translationCompletions.includes("A"), "translation completed while render held");
+  assert.strictEqual(renderJoin.text(), "");
+  renderJoinServer.finishRender("A");
+  await renderJoined;
+  assert.strictEqual(renderJoin.text(), "A translated");
+
+  const translationJoinServer = createServer();
+  translationJoinServer.holdTranslation("A");
+  const translationJoin = createIntegration({ server: translationJoinServer });
+  const translationJoined = translationJoin.click();
+  await eventually(() => translationJoinServer.renderCompletions.includes("A"), "render completed while translation held");
+  assert.strictEqual(translationJoin.text(), "");
+  translationJoinServer.finishTranslation("A");
+  await translationJoined;
+  assert.strictEqual(translationJoin.text(), "A translated");
 
   for (let index = 0; index < 100; index++) await app.click();
   const warmSummary = await app.summary();

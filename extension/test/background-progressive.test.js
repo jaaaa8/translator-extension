@@ -29,6 +29,29 @@ function sourceIdentityFor(source, bytes = Buffer.from(source)) {
   };
 }
 
+function translationKeyDigestBarrier() {
+  const entered = deferred();
+  const release = deferred();
+  let held = false;
+  return {
+    entered: entered.promise,
+    release: release.resolve,
+    crypto: {
+      subtle: {
+        async digest(_algorithm, bytes) {
+          if (!held && new TextDecoder().decode(bytes).includes('"reading_order"')) {
+            held = true;
+            entered.resolve();
+            await release.promise;
+          }
+          const value = createHash("sha256").update(Buffer.from(bytes)).digest();
+          return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+        },
+      },
+    },
+  };
+}
+
 async function flush(turns = 4) {
   for (let index = 0; index < turns; index++) {
     await Promise.resolve();
@@ -93,7 +116,7 @@ function createFakeServer() {
     translator_model: "g1", prompt: "pr1", policy: "po1", layout_order: "reading-order-v1", page_schema: "page-v2",
   };
   const patchVersions = { cleaner: "c1", render_encoding: "png-rgba-v1", render_schema: "render-v1" };
-  const counts = { health: 0, source: 0, ocr: 0, coldOcr: 0, warmOcr: 0, translate: 0, aborted: 0 };
+  const counts = { health: 0, source: 0, ocr: 0, coldOcr: 0, warmOcr: 0, render: 0, renderKey: 0, renderBlob: 0, translate: 0, aborted: 0 };
   const translationBatches = [];
   const translationRequests = [];
   const translationBodies = [];
@@ -103,6 +126,12 @@ function createFakeServer() {
   const ocrRows = new Map();
   const ocrAfterFirstGates = new Map();
   const analysisSources = new Map();
+  const renderPages = new Map();
+  const renderRows = new Map();
+  const renderGates = new Map();
+  const renderKeyMisses = new Set();
+  const failedRenders = new Set();
+  const renderForms = [];
   const translationGates = new Map();
   const translationResults = [];
   let online = true;
@@ -154,6 +183,7 @@ function createFakeServer() {
       const pageName = sourceUrl
         ? new URL(sourceUrl).pathname.split("/").pop().replace(/\.[^.]+$/, "")
         : null;
+      if (pageName) renderPages.set(form.get("render_artifact_key"), pageName);
       const srcText = form.get("src_lang") === "es" ? "hola" : "こんにちは";
       const rows = ocrRows.get(pageName) || [
         { type: "analysis_ready", image_w: 100, image_h: 200 },
@@ -179,6 +209,52 @@ function createFakeServer() {
         },
       };
     }
+    if (url.endsWith("/render-artifact")) {
+      counts.render++;
+      const form = options.body;
+      const renderKey = form.get("render_artifact_key");
+      const image = form.get("image");
+      if (image) counts.renderBlob++;
+      else counts.renderKey++;
+      let pageName = renderPages.get(renderKey);
+      if (image) {
+        const sourceUrl = await image.text();
+        pageName = new URL(sourceUrl).pathname.split("/").pop().replace(/\.[^.]+$/, "");
+        renderPages.set(renderKey, pageName);
+      }
+      renderForms.push(form);
+      if (!image && (!pageName || renderKeyMisses.delete(pageName))) {
+        return { ok: false, status: 409, json: async () => ({ error: "artifact_missing" }) };
+      }
+      await waitForGate(renderGates.get(pageName), options.signal);
+      if (failedRenders.has(pageName)) {
+        return { ok: false, status: 500, json: async () => ({ error: "clean_failed" }) };
+      }
+      const rows = ocrRows.get(pageName) || [
+        { type: "analysis_ready", image_w: 100, image_h: 200 },
+        { type: "ocr_block", block_id: "b1", bbox: [1, 2, 3, 4], src_text: "source" },
+        { type: "image_done", recognized: 1, failed: 0 },
+      ];
+      const dimensions = rows.find((row) => row.type === "analysis_ready") || {};
+      const blocks = renderRows.get(pageName) || rows.filter((row) => row.type === "ocr_block").map((row) => ({
+        block_id: row.block_id,
+        patch_id: `patch-${row.block_id}`,
+        patch_bbox: row.bbox,
+        clean_region: row.bbox,
+        fit_bbox: row.bbox,
+        patch_mime: "image/png",
+        patch_rgba: Buffer.from(`patch:${row.block_id}`).toString("base64"),
+        reason: null,
+      }));
+      return { ok: true, status: 200, json: async () => ({
+        schema_version: "render-v1",
+        render_artifact_key: renderKey,
+        analysis_key: form.get("analysis_key"),
+        image_w: dimensions.image_w,
+        image_h: dimensions.image_h,
+        blocks,
+      }) };
+    }
     if (url.endsWith("/translate-items")) {
       counts.translate++;
       const body = JSON.parse(options.body);
@@ -192,7 +268,7 @@ function createFakeServer() {
         if (result.response) return result.response;
         return { ok: true, json: async () => result };
       }
-      return { ok: true, json: async () => ({ items: body.items.map((item) => ({ id: item.id, translation: `${body.dst_lang}:${item.text}` })) }) };
+      return { ok: true, json: async () => ({ items: body.items.map((item) => ({ id: item.id, kind: "text", translation: `${body.dst_lang}:${item.text}` })) }) };
     }
     throw new Error(`unexpected fetch ${url}`);
   }
@@ -205,6 +281,7 @@ function createFakeServer() {
     translationRequests,
     translationBodies,
     ocrForms,
+    renderForms,
     fetch,
     setResponseVersions(value) { responseVersions = value; },
     setResponsePatchVersions(value) { responsePatchVersions = value; },
@@ -214,6 +291,12 @@ function createFakeServer() {
     failSource(pageName) { failedSources.add(pageName); },
     allowSource(pageName) { failedSources.delete(pageName); },
     setOcrRows(pageName, rows) { ocrRows.set(pageName, rows); },
+    setRenderRows(pageName, rows) { renderRows.set(pageName, rows); },
+    primeRender(renderKey, pageName) { renderPages.set(renderKey, pageName); },
+    missRenderKey(pageName) { renderKeyMisses.add(pageName); },
+    failRender(pageName) { failedRenders.add(pageName); },
+    holdRender(pageName) { const gate = deferred(); renderGates.set(pageName, gate); return gate; },
+    releaseRender(pageName) { renderGates.get(pageName)?.resolve(); renderGates.delete(pageName); },
     holdOcrAfterFirst(pageName) { const gate = deferred(); ocrAfterFirstGates.set(pageName, gate); return gate; },
     releaseOcr(pageName) { ocrAfterFirstGates.get(pageName)?.resolve(); ocrAfterFirstGates.delete(pageName); },
     holdTranslation(dstLang) { const gate = deferred(); translationGates.set(dstLang, gate); return gate; },
@@ -222,12 +305,12 @@ function createFakeServer() {
   };
 }
 
-function createBackgroundApp({ storage = fakeStorage(), server = createFakeServer(), clock = performance } = {}) {
+function createBackgroundApp({ storage = fakeStorage(), server = createFakeServer(), clock = performance, cryptoImpl = webcrypto } = {}) {
   let connectListener;
   const runtimeListeners = [];
   const context = {
     Promise, Map, Set, URL, TextEncoder, TextDecoder, Buffer, performance: clock,
-    crypto: webcrypto, console, setTimeout, clearTimeout,
+    crypto: cryptoImpl, console, setTimeout, clearTimeout,
     AbortController, AbortSignal, FormData, Blob, structuredClone,
     importScripts: () => {},
     chrome: {
@@ -303,7 +386,12 @@ function createBackgroundApp({ storage = fakeStorage(), server = createFakeServe
         context
       );
     },
-    restart() { return createBackgroundApp({ storage, server }); },
+    hotTranslationCount() { return vm.runInContext("hotTranslations.size", context); },
+    producer(pageKey) {
+      context.__pageKey = pageKey;
+      return vm.runInContext("producers.get(__pageKey)", context);
+    },
+    restart() { return createBackgroundApp({ storage, server, cryptoImpl }); },
   };
 }
 
@@ -404,9 +492,9 @@ test("background progressive transport", { timeout: 30000 }, async () => {
     ]);
     server.holdOcrAfterFirst("full-page");
     server.queueTranslationResult({ items: [
-      { id: "bottom", translation: "vi:bottom" },
-      { id: "left", translation: "vi:left" },
-      { id: "right", translation: "vi:right" },
+      { id: "bottom", kind: "text", translation: "vi:bottom" },
+      { id: "left", kind: "text", translation: "vi:left" },
+      { id: "right", kind: "text", translation: "vi:right" },
     ] });
     const app = createBackgroundApp({ server });
     await app.ready();
@@ -471,6 +559,229 @@ test("background progressive transport", { timeout: 30000 }, async () => {
     assert.strictEqual(stored.source_content_hash, sourceIdentityFor(job.source_url).sourceContentHash);
     assert.strictEqual(stored.render_artifact_key, expected.renderArtifactKey);
     assert.deepStrictEqual(stored.patch_versions, server.patchVersions);
+  });
+
+  await scenario("render and translation join in either order and warm replay is one key call", async () => {
+    const server = createFakeServer();
+    server.holdTranslation("vi");
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const job = app.job("join-job", "https://x/render-join.jpg");
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const first = app.connect();
+    first.receive(app.startScope("join-first", "visible", job));
+    await waitUntil(() => server.counts.translate === 1, "render-ready translation request");
+    assert.strictEqual(first.sent.some((event) => event.type === "translation"), false);
+    server.releaseTranslation("vi");
+    await app.waitFor("scope_done", first);
+    const coldEvent = first.sent.find((event) => event.type === "translation");
+    assert.deepStrictEqual(
+      {
+        patch_id: coldEvent.patch_id,
+        patch_rgba: coldEvent.patch_rgba,
+        patch_mime: coldEvent.patch_mime,
+        patch_bbox: coldEvent.patch_bbox,
+        fit_bbox: coldEvent.fit_bbox,
+        vertical: coldEvent.vertical,
+        text: coldEvent.text,
+        layout_fit_version: coldEvent.layout_fit_version,
+        layout_hint: coldEvent.layout_hint,
+      },
+      {
+        patch_id: "patch-b1",
+        patch_rgba: Buffer.from("patch:b1").toString("base64"),
+        patch_mime: "image/png",
+        patch_bbox: [1, 2, 3, 4],
+        fit_bbox: [1, 2, 3, 4],
+        vertical: false,
+        text: "vi:こんにちは",
+        layout_fit_version: "dom-fit-10px-v1",
+        layout_hint: null,
+      }
+    );
+
+    app.page(keys.pageArtifactKey).render = {
+      schema_version: "render-page-v1",
+      render_artifact_key: keys.renderArtifactKey,
+      patch_versions: server.patchVersions,
+      layout_fit_version: "dom-fit-10px-v1",
+      breaker_open: false,
+      blocks: [{
+        block_id: "b1",
+        render_mode: "in_place",
+        patch_id: "patch-b1",
+        patch_bbox: [1, 2, 3, 4],
+        fit_bbox: [1, 2, 3, 4],
+        layout_profile: { font_px: 16, line_height: 1.2 },
+        reason: null,
+      }],
+    };
+    const beforeWarm = structuredClone(server.counts);
+    server.holdRender("render-join");
+    const warm = app.connect();
+    warm.receive(app.startScope("join-warm", "visible", app.job("join-warm-job", job.source_url)));
+    await waitUntil(() => server.counts.renderKey === beforeWarm.renderKey + 1, "warm render key call");
+    assert.strictEqual(server.counts.translate, beforeWarm.translate);
+    assert.strictEqual(warm.sent.some((event) => event.type === "translation"), false);
+    server.releaseRender("render-join");
+    const warmDone = await app.waitFor("scope_done", warm);
+    assert.strictEqual(warmDone.cache_hit, true);
+    assert.strictEqual(server.counts.renderBlob, beforeWarm.renderBlob);
+    const warmEvent = warm.sent.find((event) => event.type === "translation");
+    assert.deepStrictEqual(warmEvent.layout_hint, { font_px: 16, line_height: 1.2 });
+  });
+
+  await scenario("render artifact retries exactly once with source bytes on artifact_missing", async () => {
+    const server = createFakeServer();
+    server.missRenderKey("render-retry");
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const job = app.job("render-retry-job", "https://x/render-retry.jpg", {
+      crop: { left: 0.1, top: 0.2, right: 0.9, bottom: 0.8 },
+    });
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const port = app.connect();
+    port.receive(app.startScope("render-retry", "visible", job));
+    await app.waitFor("scope_done", port);
+    assert.deepStrictEqual(
+      { render: server.counts.render, key: server.counts.renderKey, blob: server.counts.renderBlob },
+      { render: 2, key: 1, blob: 1 }
+    );
+    assert.strictEqual(server.renderForms[0].get("image"), null);
+    assert.strictEqual(await server.renderForms[1].get("image").text(), "https://x/render-retry.jpg");
+    for (const form of server.renderForms) {
+      assert.strictEqual(form.get("analysis_key"), keys.analysisKey);
+      assert.strictEqual(form.get("render_artifact_key"), keys.renderArtifactKey);
+      assert.strictEqual(form.get("source_content_hash"), sourceIdentityFor(job.source_url).sourceContentHash);
+      assert.deepStrictEqual(
+        ["left", "top", "right", "bottom"].map((name) => Number(form.get(`crop_${name}`))),
+        [0.1, 0.2, 0.9, 0.8]
+      );
+    }
+  });
+
+  await scenario("strict SFX rows persist but never enter the manifest or event stream", async () => {
+    const server = createFakeServer();
+    server.setOcrRows("mixed-kind", [
+      { type: "analysis_ready", image_w: 300, image_h: 500 },
+      { type: "ocr_block", block_id: "text", bbox: [200, 10, 20, 20], src_text: "hello", vertical: false },
+      { type: "ocr_block", block_id: "sfx", bbox: [10, 10, 20, 20], src_text: "boom", vertical: true },
+      { type: "image_done", recognized: 2, failed: 0 },
+    ]);
+    server.queueTranslationResult({ items: [
+      { id: "text", kind: "text", translation: "xin chao" },
+      { id: "sfx", kind: "sfx", translation: null },
+    ] });
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const job = app.job("mixed-kind-job", "https://x/mixed-kind.jpg");
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const port = app.connect();
+    port.receive(app.startScope("mixed-kind", "visible", job));
+    await app.waitFor("scope_done", port);
+    const page = app.page(keys.pageArtifactKey);
+    assert.deepStrictEqual(page.manifest_ids, ["text"]);
+    assert.deepStrictEqual(
+      page.blocks.map((block) => ({ id: block.block_id, kind: block.kind, trans_text: block.trans_text })),
+      [{ id: "text", kind: "text", trans_text: "xin chao" }, { id: "sfx", kind: "sfx", trans_text: null }]
+    );
+    assert.deepStrictEqual(port.sent.filter((event) => event.type === "translation").map((event) => event.block_id), ["text"]);
+  });
+
+  await scenario("all-SFX and capability-skip pages persist translations without render events", async () => {
+    const sfxServer = createFakeServer();
+    sfxServer.setOcrRows("all-sfx", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "ocr_block", block_id: "only-sfx", bbox: [1, 2, 3, 4], src_text: "boom" },
+      { type: "image_done", recognized: 1, failed: 0 },
+    ]);
+    sfxServer.queueTranslationResult({ items: [{ id: "only-sfx", kind: "sfx", translation: null }] });
+    const sfxApp = createBackgroundApp({ server: sfxServer });
+    await sfxApp.ready();
+    const sfxJob = sfxApp.job("all-sfx-job", "https://x/all-sfx.jpg");
+    const sfxKeys = await sfxApp.keysFor({ ...sfxJob, reading_direction: "rtl" });
+    const sfxPort = sfxApp.connect();
+    sfxPort.receive(sfxApp.startScope("all-sfx", "visible", sfxJob));
+    await sfxApp.waitFor("scope_done", sfxPort);
+    assert.deepStrictEqual(sfxApp.page(sfxKeys.pageArtifactKey).manifest_ids, []);
+    assert.strictEqual(sfxPort.sent.some((event) => event.type === "translation"), false);
+
+    const skipServer = createFakeServer();
+    skipServer.setRenderRows("capability-skip", [{
+      block_id: "b1", patch_id: null, patch_bbox: null, clean_region: null,
+      fit_bbox: null, patch_mime: null, patch_rgba: null, reason: "clean_failed",
+    }]);
+    const skipApp = createBackgroundApp({ server: skipServer });
+    await skipApp.ready();
+    const skipJob = skipApp.job("capability-skip-job", "https://x/capability-skip.jpg");
+    const skipKeys = await skipApp.keysFor({ ...skipJob, reading_direction: "rtl" });
+    const skipPort = skipApp.connect();
+    skipPort.receive(skipApp.startScope("capability-skip", "visible", skipJob));
+    await skipApp.waitFor("scope_done", skipPort);
+    const skipped = skipApp.page(skipKeys.pageArtifactKey);
+    assert.deepStrictEqual(skipped.manifest_ids, ["b1"]);
+    assert.strictEqual(skipped.blocks[0].trans_text, "vi:こんにちは");
+    assert.strictEqual(skipPort.sent.some((event) => event.type === "translation"), false);
+  });
+
+  await scenario("fast render rejection cancels translation still blocked in key hashing", async () => {
+    const server = createFakeServer();
+    const barrier = translationKeyDigestBarrier();
+    server.failRender("fast-render-rejection");
+    const app = createBackgroundApp({ server, cryptoImpl: barrier.crypto });
+    await app.ready();
+    const job = app.job("fast-render-rejection-job", "https://x/fast-render-rejection.jpg");
+    const port = app.connect();
+    port.receive(app.startScope("fast-render-rejection", "visible", job));
+    await barrier.entered;
+    await app.waitFor("scope_done", port);
+    assert.strictEqual(server.counts.translate, 0);
+    barrier.release();
+    await flush();
+    assert.strictEqual(server.counts.translate, 0);
+    assert.strictEqual(app.hotTranslationCount(), 0);
+    assert.strictEqual(port.sent.some((event) => event.type === "translation" || event.type === "block_error"), false);
+  });
+
+  await scenario("slow render rejection quarantines a late translation response", async () => {
+    const server = createFakeServer();
+    server.failRender("slow-render-rejection");
+    server.holdRender("slow-render-rejection");
+    server.holdTranslation("vi");
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const job = app.job("slow-render-rejection-job", "https://x/slow-render-rejection.jpg");
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const port = app.connect();
+    port.receive(app.startScope("slow-render-rejection", "visible", job));
+    await waitUntil(() => server.counts.translate === 1, "held translation request before render rejection");
+    const producer = app.producer(keys.pageArtifactKey);
+    assert.ok(producer);
+    assert.strictEqual(port.sent.some((event) => event.type === "scope_done"), false);
+    server.releaseRender("slow-render-rejection");
+    await app.waitFor("scope_done", port);
+    const terminalPage = JSON.parse(JSON.stringify(producer.page));
+    const terminalEvents = structuredClone(port.sent);
+    assert.strictEqual(app.hotTranslationCount(), 0);
+    server.releaseTranslation("vi");
+    await flush();
+    assert.strictEqual(app.hotTranslationCount(), 0);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(producer.page)), terminalPage);
+    assert.deepStrictEqual(port.sent, terminalEvents);
+  });
+
+  await scenario("manifest mismatch emits nothing", async () => {
+    const mismatchServer = createFakeServer();
+    mismatchServer.setRenderRows("manifest-mismatch", []);
+    const mismatchApp = createBackgroundApp({ server: mismatchServer });
+    await mismatchApp.ready();
+    const mismatchJob = mismatchApp.job("manifest-mismatch-job", "https://x/manifest-mismatch.jpg");
+    const mismatchKeys = await mismatchApp.keysFor({ ...mismatchJob, reading_direction: "rtl" });
+    const mismatchPort = mismatchApp.connect();
+    mismatchPort.receive(mismatchApp.startScope("manifest-mismatch", "visible", mismatchJob));
+    await mismatchApp.waitFor("scope_done", mismatchPort);
+    assert.strictEqual(mismatchPort.sent.some((event) => event.type === "translation"), false);
+    assert.strictEqual(mismatchApp.page(mismatchKeys.pageArtifactKey).manifest_mismatch_count, 1);
   });
 
   await scenario("different crops share one retained source fetch", async () => {
@@ -633,8 +944,11 @@ test("background progressive transport", { timeout: 30000 }, async () => {
     );
     // Mutation caught: retaining a settled source entry after the producer's
     // final release would make this revisit skip the required byte hash fetch.
-    assert.deepStrictEqual({ ...server.counts, source: calls.source }, calls);
+    assert.deepStrictEqual({ ...server.counts, source: calls.source, render: calls.render, renderKey: calls.renderKey }, calls);
     assert.strictEqual(server.counts.source, calls.source + 1);
+    assert.strictEqual(server.counts.render, calls.render + 1);
+    assert.strictEqual(server.counts.renderKey, calls.renderKey + 1);
+    assert.strictEqual(server.counts.renderBlob, calls.renderBlob);
   });
 
   await scenario("loaded disconnect aborts active and queued work and leaves no storage", async () => {
@@ -920,8 +1234,10 @@ test("background progressive transport", { timeout: 30000 }, async () => {
     const enDone = await app.waitFor("scope_done", en);
     // Mutation caught: prewarm and target-change jobs must each establish the
     // current byte identity even when zero-block OCR itself is reusable.
-    assert.deepStrictEqual({ ...server.counts, source: before.source }, before);
+    assert.deepStrictEqual({ ...server.counts, source: before.source, render: before.render, renderKey: before.renderKey }, before);
     assert.strictEqual(server.counts.source, before.source + 2);
+    assert.strictEqual(server.counts.render, before.render + 1);
+    assert.strictEqual(server.counts.renderKey, before.renderKey + 1);
     assert.deepStrictEqual(
       { translated: enDone.translated, failed: enDone.failed, cache_hit: enDone.cache_hit },
       { translated: 0, failed: 0, cache_hit: false }
@@ -1258,6 +1574,12 @@ test("background progressive transport", { timeout: 30000 }, async () => {
 
   await scenario("partial page requests the complete ordered page without replaying cached blocks", async () => {
     const server = createFakeServer();
+    server.setOcrRows("partial", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "ocr_block", block_id: "b1", bbox: [1, 2, 3, 4], src_text: "one" },
+      { type: "ocr_block", block_id: "b2", bbox: [5, 6, 7, 8], src_text: "two" },
+      { type: "image_done", recognized: 2, failed: 0 },
+    ]);
     server.holdTranslation("vi");
     const app = createBackgroundApp({ server });
     await app.ready();
@@ -1410,6 +1732,11 @@ test("background progressive transport", { timeout: 30000 }, async () => {
 
   await scenario("warm OCR sibling supplies decoded dimensions before full-page request", async () => {
     const server = createFakeServer();
+    server.setOcrRows("warm-sibling", [
+      { type: "analysis_ready", image_w: 321, image_h: 654 },
+      { type: "ocr_block", block_id: "warm-b1", bbox: [1, 2, 3, 4], src_text: "warm" },
+      { type: "image_done", recognized: 1, failed: 0 },
+    ]);
     server.holdTranslation("vi");
     const app = createBackgroundApp({ server });
     await app.ready();
@@ -1641,9 +1968,9 @@ test("background progressive transport", { timeout: 30000 }, async () => {
   await scenario("translation IDs are exact and a later click can retry", async () => {
     const server = createFakeServer();
     const invalidReplies = [
-      [{ id: "b2", translation: "two" }],
-      [{ id: "b2", translation: "two" }, { id: "foreign", translation: "wrong" }],
-      [{ id: "b2", translation: "two" }, { id: "b2", translation: "duplicate" }],
+      [{ id: "b2", kind: "text", translation: "two" }],
+      [{ id: "b2", kind: "text", translation: "two" }, { id: "foreign", kind: "text", translation: "wrong" }],
+      [{ id: "b2", kind: "text", translation: "two" }, { id: "b2", kind: "text", translation: "duplicate" }],
     ];
     for (let index = 0; index < invalidReplies.length; index++) {
       server.setOcrRows(`invalid-ids-${index}`, [
@@ -2174,7 +2501,9 @@ test("background progressive transport", { timeout: 30000 }, async () => {
   const layoutTranslationKey = await context.translationKeyForBatch({ ...producer, page: { versions: { ...versions, layout_order: "reading-order-v0" } } }, blocks, blocks[0]);
   const promptTranslationKey = await context.translationKeyForBatch({ ...producer, page: { versions: { ...versions, prompt: "pr2" } } }, blocks, blocks[0]);
   const policyTranslationKey = await context.translationKeyForBatch({ ...producer, page: { versions: { ...versions, policy: "po2" } } }, blocks, blocks[0]);
+  const renderVersionTranslationKey = await context.translationKeyForBatch({ ...producer, page: { versions, patch_versions: { cleaner: "c2", render_encoding: "png-rgba-v2", render_schema: "render-v2" } } }, blocks, blocks[0]);
   assert.strictEqual(new Set([translationKey, ltrTranslationKey, layoutTranslationKey, promptTranslationKey, policyTranslationKey]).size, 5);
+  assert.strictEqual(renderVersionTranslationKey, translationKey);
 
   const parsed = [];
   for await (const row of context.readNdjson(

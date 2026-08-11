@@ -446,7 +446,7 @@ function releaseProducerSource(producer) {
 function createProducer(descriptor, keys, page, sourceIdentity, sourceAcquisition = null) {
   const createdAt = Date.now();
   const record = page || { schema_version: serverVersions.page_schema, page_artifact_key: keys.pageArtifactKey, analysis_key: keys.analysisKey, ocr_key: keys.ocrKey, render_artifact_key: keys.renderArtifactKey, source_content_hash: keys.sourceContentHash, source_url: descriptor.source_url, crop: keys.crop, natural_width: descriptor.natural_width, natural_height: descriptor.natural_height, src_lang: descriptor.src_lang, dst_lang: descriptor.dst_lang, reading_direction: descriptor.reading_direction, versions: serverVersions, patch_versions: serverPatchVersions, state: "queued", analysis_known: false, ocr_done: false, image_w: null, image_h: null, blocks: [], manifest_mismatch_count: 0, created_at: createdAt, updated_at: createdAt, last_accessed_at: createdAt, last_error: null };
-  return { pageKey: keys.pageArtifactKey, analysisKey: keys.analysisKey, ocrKey: keys.ocrKey, renderArtifactKey: keys.renderArtifactKey, sourceIdentity, sourceAcquisition, descriptor, page: record, consumers: new Map(), jobIds: new Set(), persistUntilDone: false, prewarmOnly: descriptor.scope === "prewarm", state: "queued", translationBatchTrace: [], persistChain: Promise.resolve(), cancelled: false, retired: false, timings: { accepted: now() }, durations: { fetch_ms: descriptor.source_fetch_ms ?? null, analysis_ms: null }, analysisCacheHit: null, ocrSummary: null, counters: { translation_calls: 0, rate_limited: 0, stale_work: 0 } };
+  return { pageKey: keys.pageArtifactKey, analysisKey: keys.analysisKey, ocrKey: keys.ocrKey, renderArtifactKey: keys.renderArtifactKey, sourceIdentity, sourceAcquisition, descriptor, page: record, consumers: new Map(), jobIds: new Set(), persistUntilDone: false, prewarmOnly: descriptor.scope === "prewarm", state: "queued", translationReady: null, renderReady: null, renderArtifact: null, translationBatchTrace: [], persistChain: Promise.resolve(), cancelled: false, retired: false, timings: { accepted: now() }, durations: { fetch_ms: descriptor.source_fetch_ms ?? null, analysis_ms: null }, analysisCacheHit: null, ocrSummary: null, counters: { translation_calls: 0, rate_limited: 0, stale_work: 0 } };
 }
 async function attachDescriptor(request, descriptor, ledger, sourceIdentity, sourceAcquisition) {
   if (request.cancelledSourceJobs.has(descriptor.job_id)) { releasePendingSource(request, descriptor.job_id); return; }
@@ -486,12 +486,29 @@ async function attachDescriptor(request, descriptor, ledger, sourceIdentity, sou
     await pageCache.putPage(page);
   }
   if (request.cancelledSourceJobs.has(descriptor.job_id)) { releasePendingSource(request, descriptor.job_id); return; }
-  if (page?.state === "complete") {
+  const hasManifest = page != null && Object.hasOwn(page, "manifest_ids");
+  const terminalHit = hasManifest && page.state === "complete" && page.ocr_done === true;
+  if (terminalHit) {
     request.sourceAcquisitions.delete(descriptor.job_id);
     request.sourceDescriptors.delete(descriptor.job_id);
-    sourceAcquisition.release();
-    accepted(request, descriptor, page, true);
-    await pageCache.removeJob(descriptor.job_id);
+    const producer = createProducer(descriptor, keys, page, sourceIdentity, sourceAcquisition);
+    producer.translationReady = Promise.resolve({ translated: page.blocks.length, failed: 0 });
+    request.port?.postMessage({ type: "page_job_accepted", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, state: "complete" });
+    try {
+      producer.renderReady = fetchRenderArtifact(producer);
+      const artifact = await producer.renderReady;
+      replayPage(request, descriptor.job_id, page, true, artifact);
+      completeJob(request, descriptor.job_id, page.blocks.length, 0, true, { recognized: page.blocks.length, failed: 0 }, null, null, { pageKey: page.page_artifact_key });
+    } catch (error) {
+      page.last_error = String(error);
+      page.state = "partial";
+      await pageCache?.putPage(page).catch(() => {});
+      request.port?.postMessage({ type: "image_done", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, translated: 0, failed: 1 });
+      completeJob(request, descriptor.job_id, 0, 1, false, { recognized: page.blocks.length, failed: 1 }, null, null, { pageKey: page.page_artifact_key, errorCode: error.errorCode || "render_failed" });
+    } finally {
+      releaseProducerSource(producer);
+      await pageCache?.removeJob(descriptor.job_id);
+    }
     return;
   }
   let producer = producers.get(keys.pageArtifactKey);
@@ -517,16 +534,18 @@ async function attachDescriptor(request, descriptor, ledger, sourceIdentity, sou
   if (request.scope === "visible") {
     await pageCache?.putJob({ ...ledger, page_artifact_key: keys.pageArtifactKey, waiting_for_health: false });
   }
-  accepted(request, descriptor, producer.page, false);
+  accepted(request, descriptor, producer.page, false, producer.renderArtifact);
 }
-function accepted(request, descriptor, page, cacheHit) {
+function accepted(request, descriptor, page, cacheHit, artifact = null) {
   request.port?.postMessage({ type: "page_job_accepted", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, state: cacheHit ? "complete" : page.state });
-  replayPage(request, descriptor.job_id, page, cacheHit);
+  replayPage(request, descriptor.job_id, page, cacheHit, artifact);
 }
-function replayPage(request, jobId, page, cacheHit) {
+function replayPage(request, jobId, page, cacheHit, artifact = null) {
   if (page.image_w) request.port?.postMessage({ type: "progress", request_id: request.requestId, job_id: jobId, image_w: page.image_w, image_h: page.image_h });
-  if (cacheHit || page.state === "complete") for (const block of page.blocks) if (block.trans_text) request.port?.postMessage({ type: "translation", request_id: request.requestId, job_id: jobId, block_id: block.block_id, bbox: block.bbox, src_text: block.src_text, trans_text: block.trans_text, image_w: page.image_w, image_h: page.image_h, cache_hit: true });
-  if (cacheHit) completeJob(request, jobId, page.blocks.length, 0, true, { recognized: page.blocks.length, failed: 0 }, null, null, { pageKey: page.page_artifact_key });
+  if (!artifact || !Object.hasOwn(page, "manifest_ids")) return;
+  for (const event of renderableTranslationEvents(page, artifact)) {
+    request.port?.postMessage({ ...event, type: "translation", request_id: request.requestId, job_id: jobId, page_artifact_key: page.page_artifact_key, cache_hit: cacheHit === true });
+  }
 }
 async function acceptScope(port, message) {
   await ready;
@@ -685,6 +704,89 @@ function attachStage(map, key, producer) {
   return stage;
 }
 function appendCrop(form, crop) { if (crop && crop !== "full") for (const key of ["left", "top", "right", "bottom"]) form.append(`crop_${key}`, crop[key]); }
+async function requestRenderArtifact(producer, includeImage) {
+  const form = new FormData();
+  form.append("analysis_key", producer.analysisKey);
+  form.append("render_artifact_key", producer.renderArtifactKey);
+  form.append("source_content_hash", producer.sourceIdentity.sourceContentHash);
+  appendCrop(form, producer.descriptor.crop);
+  if (includeImage) form.append("image", producer.sourceIdentity.blob, "page.png");
+  const response = await fetch(`${SERVER}/render-artifact`, { method: "POST", body: form });
+  const data = await response.json();
+  return { response, data };
+}
+async function fetchRenderArtifact(producer) {
+  let result = await requestRenderArtifact(producer, false);
+  if (result.response.status === 409 && result.data?.error === "artifact_missing") {
+    result = await requestRenderArtifact(producer, true);
+  }
+  if (!result.response.ok) {
+    const error = new Error(result.data?.error || `render-artifact HTTP ${result.response.status}`);
+    error.status = result.response.status;
+    error.errorCode = result.data?.error_code || result.data?.error || "render_failed";
+    throw error;
+  }
+  const artifact = result.data;
+  if (artifact?.schema_version !== serverPatchVersions.render_schema ||
+      artifact.render_artifact_key !== producer.renderArtifactKey ||
+      artifact.analysis_key !== producer.analysisKey || artifact.image_w !== producer.page.image_w ||
+      artifact.image_h !== producer.page.image_h || !Array.isArray(artifact.blocks)) {
+    const error = new Error("render artifact identity mismatch");
+    error.errorCode = "render_artifact_mismatch";
+    throw error;
+  }
+  return artifact;
+}
+function validRenderBbox(bbox) {
+  return Array.isArray(bbox) && bbox.length === 4 && bbox.every(Number.isFinite) &&
+    bbox[0] >= 0 && bbox[1] >= 0 && bbox[2] > 0 && bbox[3] > 0;
+}
+function renderableTranslationEvents(page, artifact) {
+  if (!Object.hasOwn(page, "manifest_ids")) return [];
+  const artifactById = new Map();
+  for (const block of artifact.blocks) {
+    if (!block || typeof block.block_id !== "string" || artifactById.has(block.block_id)) {
+      const error = new Error("render artifact block IDs must be unique strings");
+      error.errorCode = "manifest_mismatch";
+      throw error;
+    }
+    artifactById.set(block.block_id, block);
+  }
+  if (!page.manifest_ids.every((blockId) => artifactById.has(blockId))) {
+    page.manifest_mismatch_count = 1;
+    const error = new Error("render artifact does not cover manifest_ids");
+    error.errorCode = "manifest_mismatch";
+    throw error;
+  }
+  const cachedLayouts = new Map((page.render?.blocks || []).map((block) => [block.block_id, block]));
+  const events = [];
+  for (const blockId of page.manifest_ids) {
+    const translation = page.blocks.find((block) => block.block_id === blockId);
+    const render = artifactById.get(blockId);
+    if (!translation || translation.kind !== "text" || typeof translation.trans_text !== "string" || !translation.trans_text.trim()) continue;
+    if (render.reason !== null || typeof render.patch_id !== "string" || typeof render.patch_rgba !== "string" ||
+        typeof render.patch_mime !== "string" || !validRenderBbox(render.patch_bbox) || !validRenderBbox(render.fit_bbox)) continue;
+    const cached = cachedLayouts.get(blockId);
+    events.push({
+      block_id: blockId,
+      bbox: [...translation.bbox],
+      src_text: translation.src_text,
+      trans_text: translation.trans_text,
+      text: translation.trans_text,
+      image_w: page.image_w,
+      image_h: page.image_h,
+      patch_id: render.patch_id,
+      patch_rgba: render.patch_rgba,
+      patch_mime: render.patch_mime,
+      patch_bbox: [...render.patch_bbox],
+      fit_bbox: [...render.fit_bbox],
+      vertical: translation.vertical === true,
+      layout_fit_version: LAYOUT_FIT_VERSION,
+      layout_hint: cached?.patch_id === render.patch_id ? cached.layout_profile : null,
+    });
+  }
+  return events;
+}
 async function openOcrStream(producer, image) { const form = new FormData(); form.append("analysis_key", producer.analysisKey); form.append("ocr_key", producer.ocrKey); form.append("render_artifact_key", producer.renderArtifactKey); form.append("src_lang", producer.descriptor.src_lang); appendCrop(form, producer.descriptor.crop); if (image) form.append("image", producer.sourceIdentity.blob, "page.png"); return fetch(`${SERVER}/ocr-stream`, { method: "POST", body: form, signal: producer.ocrStage.controller.signal }); }
 async function needsAnalysisImage(producer, analysis) {
   if (producer.page.analysis_known || analysis.complete) return false;
@@ -816,13 +918,26 @@ async function translationKeyForBatch(producer, blocks, block) {
   ]);
 }
 function applyTranslation(producer, item) {
+  const keys = item && typeof item === "object" ? Object.keys(item).sort() : [];
+  const validShape = keys.length === 3 && keys[0] === "id" && keys[1] === "kind" && keys[2] === "translation";
+  const validText = item?.kind === "text" && typeof item.translation === "string" && item.translation.trim().length > 0;
+  const validSfx = item?.kind === "sfx" && item.translation === null;
+  if (!validShape || (!validText && !validSfx)) {
+    const error = new Error("invalid translation item");
+    error.errorCode = "invalid_response";
+    throw error;
+  }
   const block = producer.page.blocks.find((row) => row.block_id === item.id);
-  if (!block) return;
-  block.trans_text = item.translation || item.text;
+  if (!block) {
+    const error = new Error("translation id set mismatch");
+    error.errorCode = "invalid_response";
+    throw error;
+  }
+  block.kind = item.kind;
+  block.trans_text = item.translation;
   mark(producer, "first_translation");
   producer.timings.final_translation = now();
   block.state = "translated";
-  emit(producer, "translation", { ...block, image_w: producer.page.image_w, image_h: producer.page.image_h });
 }
 function isRateLimited(error) { return error.status === 429 || error.errorCode === "rate_limited"; }
 function translationItemsForBlocks(data, blocks) {
@@ -834,7 +949,11 @@ function translationItemsForBlocks(data, blocks) {
   const expected = new Set(blocks.map((block) => block.block_id));
   const rows = new Map();
   for (const item of data.items) {
-    if (!item || typeof item.id !== "string" || !expected.has(item.id) || rows.has(item.id)) {
+    const keys = item && typeof item === "object" ? Object.keys(item).sort() : [];
+    const validShape = keys.length === 3 && keys[0] === "id" && keys[1] === "kind" && keys[2] === "translation";
+    const validText = item?.kind === "text" && typeof item.translation === "string" && item.translation.trim().length > 0;
+    const validSfx = item?.kind === "sfx" && item.translation === null;
+    if (!validShape || (!validText && !validSfx) || typeof item.id !== "string" || !expected.has(item.id) || rows.has(item.id)) {
       const error = new Error("translation id set mismatch");
       error.errorCode = "invalid_response";
       throw error;
@@ -849,18 +968,25 @@ function translationItemsForBlocks(data, blocks) {
   return blocks.map((block) => rows.get(block.block_id));
 }
 async function translateFullPage(producer, orderedBlocks) {
-  if (!orderedBlocks.length) return { translated: 0, failed: 0 };
+  if (!orderedBlocks.length) {
+    producer.page.manifest_ids = [];
+    return { translated: 0, failed: 0 };
+  }
+  const keyed = await Promise.all(orderedBlocks.map(async (block) => ({
+    block,
+    key: await translationKeyForBatch(producer, orderedBlocks, block),
+  })));
+  if (producer.retired || producer.cancelled) return { translated: 0, failed: 0 };
+  const cached = keyed.map(({ key }) => hotTranslations.get(key));
+  if (cached.every((item) => item !== undefined)) {
+    cached.forEach((item, index) => applyTranslation(producer, { id: keyed[index].block.block_id, ...item }));
+    producer.page.manifest_ids = orderedBlocks
+      .filter((block) => producer.page.blocks.find((row) => row.block_id === block.block_id)?.kind === "text")
+      .map((block) => block.block_id);
+    return { translated: orderedBlocks.length, failed: 0 };
+  }
+  if (producer.retired || producer.cancelled) return { translated: 0, failed: 0 };
   try {
-    const keyed = await Promise.all(orderedBlocks.map(async (block) => ({
-      block,
-      key: await translationKeyForBatch(producer, orderedBlocks, block),
-    })));
-    if (producer.retired) return { translated: 0, failed: 0 };
-    const cached = keyed.map(({ key }) => hotTranslations.get(key));
-    if (cached.every(Boolean)) {
-      for (const item of cached) applyTranslation(producer, item);
-      return { translated: orderedBlocks.length, failed: 0 };
-    }
     producer.counters.translation_calls++;
     const started = now();
     const trace = { batch_id: 1, phase: "full_page", block_ids: orderedBlocks.map((block) => block.block_id), block_count: orderedBlocks.length, started_ms: Math.round(started - producer.timings.accepted), duration_ms: null, status: null, cache_hit: false, error_code: null };
@@ -889,15 +1015,20 @@ async function translateFullPage(producer, orderedBlocks) {
     } finally {
       trace.duration_ms = Math.max(0, Math.round(now() - started));
     }
-    for (let index = 0; index < translatedItems.length; index++) {
-      lruSet(hotTranslations, keyed[index].key, translatedItems[index], 2048);
-    }
-    if (producer.retired) return { translated: 0, failed: 0 };
+    if (producer.cancelled && !producer.retired) return { translated: 0, failed: 0 };
+    for (let index = 0; index < translatedItems.length; index++) lruSet(hotTranslations, keyed[index].key, {
+      kind: translatedItems[index].kind,
+      translation: translatedItems[index].translation,
+    }, 2048);
+    if (producer.retired || producer.cancelled) return { translated: 0, failed: 0 };
     for (const item of translatedItems) applyTranslation(producer, item);
+    producer.page.manifest_ids = orderedBlocks
+      .filter((block) => producer.page.blocks.find((row) => row.block_id === block.block_id)?.kind === "text")
+      .map((block) => block.block_id);
     return { translated: orderedBlocks.length, failed: 0 };
   } catch (error) {
     if (isRateLimited(error)) producer.counters.rate_limited++;
-    if (producer.retired) return { translated: 0, failed: 0 };
+    if (producer.retired || producer.cancelled) return { translated: 0, failed: 0 };
     producer.page.last_error = String(error);
     for (const block of orderedBlocks) {
       const stored = producer.page.blocks.find((row) => row.block_id === block.block_id);
@@ -942,8 +1073,17 @@ async function runProducer(producer) {
       const stored = producer.page.blocks.find((row) => row.block_id === block.block_id);
       if (stored) stored.reading_order = readingOrder;
     });
-    const summary = await translateFullPage(producer, ordered.blocks);
+    producer.renderReady = fetchRenderArtifact(producer).catch((error) => {
+      producer.cancelled = true;
+      throw error;
+    });
+    producer.translationReady = Object.hasOwn(producer.page, "manifest_ids")
+      ? Promise.resolve({ translated: producer.page.blocks.length, failed: 0 })
+      : translateFullPage(producer, ordered.blocks);
+    const [artifact, summary] = await Promise.all([producer.renderReady, producer.translationReady]);
     if (producer.retired) return;
+    producer.renderArtifact = artifact;
+    for (const event of renderableTranslationEvents(producer.page, artifact)) emit(producer, "translation", event);
     await finishProducer(producer, summary);
   } catch (error) {
     if (!producer.retired) await failProducer(producer, error);
