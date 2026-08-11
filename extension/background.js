@@ -775,6 +775,7 @@ function renderableTranslationEvents(page, artifact) {
       text: translation.trans_text,
       image_w: page.image_w,
       image_h: page.image_h,
+      render_artifact_key: artifact.render_artifact_key,
       patch_id: render.patch_id,
       patch_rgba: render.patch_rgba,
       patch_mime: render.patch_mime,

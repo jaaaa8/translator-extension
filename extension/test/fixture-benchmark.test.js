@@ -9,12 +9,15 @@ const controller = fs.existsSync("extension/test/fixture-benchmark.js")
 function createApp(hostname, search = "?benchmark=cold") {
   const status = { hidden: true, textContent: "" };
   const sourceChanges = [];
-  let source = "http://127.0.0.1:8000/ja_page.png", overlay = null, bubble = null, observer;
+  let source = "http://127.0.0.1:8000/ja_page.png", overlay = null, translatedText = null, observer;
   const image = { get src() { return source; }, set src(value) { source = value; sourceChanges.push(value); } };
   const document = {
     body: {},
     getElementById(id) { return id === "benchmarkStatus" ? status : image; },
-    querySelector(selector) { return selector === ".mt-overlay" ? overlay : bubble; },
+    querySelector(selector) {
+      if (selector === ".mt-overlay") return overlay;
+      return selector === ".mt-translated-text" ? translatedText : null;
+    },
   };
   class MutationObserver {
     constructor(callback) { this.callback = callback; this.disconnected = false; observer = this; }
@@ -28,9 +31,9 @@ function createApp(hostname, search = "?benchmark=cold") {
   return {
     status, sourceChanges,
     get observer() { return observer; },
-    render(text) { overlay = {}; bubble = { textContent: text }; observer.callback(); },
+    render(text) { overlay = {}; translatedText = { textContent: text }; observer.callback(); },
     fire() { observer.callback(); },
-    removeOverlay() { overlay = null; bubble = null; observer.callback(); },
+    removeOverlay() { overlay = null; translatedText = null; observer.callback(); },
   };
 }
 
@@ -48,6 +51,7 @@ assert.strictEqual(app.sourceChanges.length, 0);
 app.removeOverlay();
 
 app.render("vi:warm-up");
+// Mutation caught: restoring the removed legacy bubble selector stalls the observable cold-sample source advance.
 assert.strictEqual(app.sourceChanges[0], "http://127.0.0.1:8000/ja_page.png?benchmark=1");
 app.fire();
 app.fire();

@@ -15,8 +15,8 @@
       status.textContent = `COLD ${cold + 1}/20`;
       return;
     }
-    const bubble = document.querySelector(".mt-bubble");
-    if (!bubble || !bubble.textContent.trim()) return;
+    const translatedText = document.querySelector(".mt-translated-text");
+    if (!translatedText || !translatedText.textContent.trim()) return;
     armed = false;
     if (!warmup) cold++;
     warmup = false;

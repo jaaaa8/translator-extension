@@ -26,7 +26,9 @@ function portPair() {
   const left = { name: "translation", onMessage: leftMessages, onDisconnect: disconnected,
     postMessage(message) { if (!active) return; trace.push(["content", structuredClone(message)]); queueMicrotask(() => { if (active) rightMessages.emit(pair.toBackground(message)); }); } };
   const right = { name: "translation", onMessage: rightMessages, onDisconnect: disconnected,
-    postMessage(message) { if (!active) return; trace.push(["background", structuredClone(message)]); queueMicrotask(() => { if (active) leftMessages.emit(pair.toContent(message)); }); } };
+    // Mutation caught by the integration assertions: collapsing distinct Port
+    // deliveries into one microtask drain lets scope_done beat resolved decode().
+    postMessage(message) { if (!active) return; trace.push(["background", structuredClone(message)]); setImmediate(() => { if (active) leftMessages.emit(pair.toContent(message)); }); } };
   return Object.assign(pair, {
     content: left, background: right, trace,
     disconnect: () => disconnected.emit(),
@@ -254,13 +256,34 @@ function createIntegration({ server = createServer(), session = storageSession()
     naturalWidth: 1000, naturalHeight: 1600, isConnected: true, baseURI: "https://reader/", parentElement: null,
     rect: page.rect, getAttribute: () => "", getBoundingClientRect() { return this.rect; }, getClientRects() { return [this.rect]; } }));
   const rendered = [];
+  const createElement = (tagName) => {
+    const element = {
+      tagName: String(tagName).toUpperCase(), className: "", textContent: "", style: {}, children: [], appendCalls: [], removed: false, parentElement: null,
+      appendChild(node) { node.parentElement = this; this.children.push(node); this.appendCalls.push(node); return node; },
+      remove() { this.removed = true; if (this.parentElement) this.parentElement.children = this.parentElement.children.filter((child) => child !== this); this.children.forEach((child) => child.remove()); },
+    };
+    Object.defineProperties(element, {
+      clientWidth: { get() { return Number.parseFloat(this.style.width) || 0; } },
+      clientHeight: { get() { return Number.parseFloat(this.style.height) || 0; } },
+      scrollWidth: { get() { return this.clientWidth; } },
+      scrollHeight: { get() { return this.clientHeight; } },
+    });
+    if (element.tagName === "IMG") element.decode = async () => {};
+    return element;
+  };
+  const descendants = () => {
+    const found = [];
+    const visit = (node) => { found.push(node); node.children.forEach(visit); };
+    rendered.filter((node) => !node.removed).forEach(visit);
+    return found;
+  };
   const content = {
     console, URL, Promise, Map, WeakMap, Set, performance: clock, queueMicrotask,
     crypto: { randomUUID: () => `id-${++id}` }, innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0,
     requestAnimationFrame(fn) { fn(); return 1; },
     document: {
       body: { appendChild(node) { rendered.push(node); } }, documentElement: {}, querySelectorAll: () => images,
-      createElement: () => ({ style: {}, children: [], appendChild(node) { this.children.push(node); }, remove() { this.removed = true; } }),
+      createElement,
     },
     window: { addEventListener() {} }, MutationObserver: class { observe() {} },
     ResizeObserver: class { observe() {} disconnect() {} },
@@ -286,7 +309,7 @@ function createIntegration({ server = createServer(), session = storageSession()
     click: () => content.translatePage("visible", "ja", "vi"),
     clickLoaded: () => content.translatePage("loaded", "ja", "vi"),
     navigate(source, nextRect = images[0].rect) { images[0].src = `https://reader/${source}.jpg`; images[0].rect = nextRect; content.pruneOverlays(); },
-    text: () => rendered.flatMap((node) => node.children).filter((node) => !node.removed).map((node) => node.textContent).join(" "),
+    text: () => descendants().filter((node) => !node.removed && node.className === "mt-translated-text").map((node) => node.textContent).join(" "),
     summary: () => new Promise((resolve) => runtimeMessages.emit({ type: "benchmarkSummary" }, {}, resolve)),
     pageStatus: () => new Promise((resolve) => runtimeMessages.emit({ type: "pageStatus" }, {}, resolve)),
     legacyOcr(name) { return new Promise((resolve) => runtimeMessages.emit({ type: "ocrImage", url: `https://reader/${name}.jpg`, srcLang: "ja" }, {}, resolve)); },
@@ -309,6 +332,9 @@ test("progressive integration", { timeout: 10000 }, async () => {
   assert.deepStrictEqual(app.server.events.slice(0, 2), [["image_done", "A"], ["translate", "A"]]);
   const coldStart = app.trace.find(([side, event]) => side === "content" && event.type === "start_scope")[1];
   const coldRequestId = coldStart.request_id;
+  const coldTranslation = app.trace.find(([side, event]) => side === "background" && event.type === "translation")[1];
+  // Mutation caught: dropping render_artifact_key from any renderable translation prevents content from posting an identity-complete render_metric.
+  assert.strictEqual(coldTranslation.render_artifact_key, app.server.ocrForms[0].get("render_artifact_key"));
   assert.strictEqual(app.text(), "A translated");
   assert.ok(Number.isFinite(result.first_overlay_ms));
   assert.strictEqual(result.firstOverlayMs, undefined);

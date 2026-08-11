@@ -11,6 +11,7 @@ const imageRequests = new WeakMap();
 const jobBindings = new Map();
 const pendingScopes = new Map();
 const activeScopeMessages = new Map();
+const completedScopeIds = new Set();
 
 function uiDirection(value) {
   return value === "ltr" ? "ltr" : "rtl";
@@ -46,6 +47,8 @@ function cleanupRequest(requestId, result) {
   const pending = pendingScopes.get(requestId);
   pendingScopes.delete(requestId);
   activeScopeMessages.delete(requestId);
+  if (result?.ok === true) completedScopeIds.add(requestId);
+  else completedScopeIds.delete(requestId);
   for (const [jobId, binding] of jobBindings) if (binding.requestId === requestId) jobBindings.delete(jobId);
   if (pending && result) pending.resolve(result);
 }
@@ -103,8 +106,8 @@ function translatePage(scope, requestSrcLang = srcLang, requestDstLang = dstLang
   return done;
 }
 
-function validBinding(event) {
-  const binding = jobBindings.get(event.job_id);
+function validBinding(event, completedBinding = null) {
+  const binding = jobBindings.get(event.job_id) || (completedScopeIds.has(event.request_id) ? completedBinding : null);
   if (!binding || binding.requestId !== event.request_id) return null;
   if (imageRequests.get(binding.img) !== event.request_id || !binding.img.isConnected) return null;
   if (!isCurrentSource(binding.img, binding.source, binding.scope) || sourceSignature(binding.img) !== binding.sourceSignature) return null;
@@ -112,7 +115,7 @@ function validBinding(event) {
 }
 
 function handleEvent(event) {
-  if (event.type === "translation") { const binding = validBinding(event); if (binding) upsertOverlayBlock(binding.img, binding, event); return; }
+  if (event.type === "translation") { const binding = validBinding(event); if (binding) void upsertOverlayBlock(binding.img, binding, event).catch((error) => console.error("[MangaTranslator] overlay render failed", { request_id: event.request_id, job_id: event.job_id, block_id: event.block_id }, error)); return; }
   if (event.type === "image_done") { const binding = validBinding(event); if (binding && event.translated === 0) removeOverlay(binding.img); return; }
   if (event.type === "scope_error") return cleanupRequest(event.request_id, { ok: false, error: event.code || event.error });
   if (event.type === "scope_done") {
@@ -142,29 +145,129 @@ function ensureOverlay(img, binding, event) {
   return overlay;
 }
 
-function upsertOverlayBlock(img, binding, event) {
+function boxStyle(bbox, scaleX, scaleY, originX = 0, originY = 0) {
+  const [x, y, width, height] = bbox;
+  return { left: (x - originX) * scaleX + "px", top: (y - originY) * scaleY + "px", width: width * scaleX + "px", height: height * scaleY + "px" };
+}
+
+function renderBlockGeometry(rect, imageW, imageH, patchBbox, fitBbox) {
+  const scaleX = rect.width / imageW;
+  const scaleY = rect.height / imageH;
+  const [patchX, patchY] = patchBbox;
+  return {
+    wrapper: boxStyle(patchBbox, scaleX, scaleY),
+    patch: boxStyle(patchBbox, scaleX, scaleY, patchX, patchY),
+    text: boxStyle(fitBbox, scaleX, scaleY, patchX, patchY),
+  };
+}
+
+function applyBlockGeometry(block, geometry) {
+  Object.assign(block.element.style, geometry.wrapper);
+  Object.assign(block.patch.style, geometry.patch);
+  Object.assign(block.text.style, geometry.text);
+}
+
+function validLayoutHint(hint) {
+  return hint && Number.isInteger(hint.font_px) && hint.font_px >= 10 && hint.font_px <= 18 && Number.isFinite(hint.line_height) && hint.line_height > 0;
+}
+
+function fitText(element, hint = null) {
+  const cached = validLayoutHint(hint) ? hint : null;
+  const lineHeight = cached?.line_height ?? 1.2;
+  element.style.lineHeight = String(lineHeight);
+  for (let size = cached?.font_px ?? 18; size >= 10; size--) {
+    element.style.fontSize = size + "px";
+    if (element.scrollHeight <= element.clientHeight && element.scrollWidth <= element.clientWidth) return { font_px: size, line_height: lineHeight };
+  }
+  return null;
+}
+
+function measureTextProfile(element, hint) {
+  const probe = document.createElement("div");
+  probe.className = element.className;
+  probe.textContent = element.textContent;
+  Object.assign(probe.style, {
+    position: "fixed", left: "-100000px", top: "0", width: element.style.width, height: element.style.height,
+    visibility: "hidden", pointerEvents: "none", writingMode: element.style.writingMode,
+  });
+  document.body.appendChild(probe);
+  let profile;
+  try { profile = fitText(probe, hint); }
+  finally { probe.remove(); }
+  if (profile) Object.assign(element.style, { fontSize: profile.font_px + "px", lineHeight: String(profile.line_height) });
+  return profile;
+}
+
+function postRenderMetric(binding, event, painted, reason, layoutProfile, firstOverlayMs = null) {
+  const metric = {
+    type: "render_metric", request_id: binding.requestId, job_id: event.job_id,
+    page_artifact_key: event.page_artifact_key, render_artifact_key: event.render_artifact_key,
+    layout_fit_version: event.layout_fit_version, block_id: event.block_id,
+    painted, reason, layout_profile: layoutProfile,
+  };
+  if (firstOverlayMs != null) metric.first_overlay_ms = firstOverlayMs;
+  try { translationPort().postMessage(metric); } catch {}
+}
+
+function positionOverlay(img, overlay) {
+  const rect = renderedImageRect(img);
+  Object.assign(overlay.container.style, { left: rect.left + scrollX + "px", top: rect.top + scrollY + "px", width: rect.width + "px", height: rect.height + "px" });
+  return rect;
+}
+
+async function upsertOverlayBlock(img, binding, event) {
   const overlay = ensureOverlay(img, binding, event);
   overlay.imageW = event.image_w;
   overlay.imageH = event.image_h;
-  let block = overlay.blocks.get(event.block_id);
-  if (!block) { const element = document.createElement("div"); element.className = "mt-bubble"; overlay.container.appendChild(element); block = { element, bbox: event.bbox }; overlay.blocks.set(event.block_id, block); }
-  block.bbox = event.bbox;
-  block.element.textContent = event.trans_text;
-  position(img);
+  const element = document.createElement("div");
+  element.className = "mt-render-block";
+  const patch = document.createElement("img");
+  patch.className = "mt-clean-patch";
+  patch.src = `data:${event.patch_mime};base64,${event.patch_rgba}`;
+  const text = document.createElement("div");
+  text.className = "mt-translated-text";
+  text.textContent = event.trans_text;
+  text.style.writingMode = event.vertical === true ? "vertical-rl" : "horizontal-tb";
+  element.appendChild(patch);
+  element.appendChild(text);
+  try { await patch.decode(); }
+  catch { return; }
+  const geometry = renderBlockGeometry(positionOverlay(img, overlay), overlay.imageW, overlay.imageH, event.patch_bbox, event.fit_bbox);
+  const block = { element, patch, text, patchBbox: [...event.patch_bbox], fitBbox: [...event.fit_bbox], profile: null, binding, event };
+  applyBlockGeometry(block, geometry);
+  const profile = measureTextProfile(text, event.layout_hint);
+  if (!validBinding(event, binding)) return;
+  if (!profile) { postRenderMetric(binding, event, false, "fit_failed", null); return; }
+  block.profile = profile;
+  overlay.blocks.get(event.block_id)?.element.remove();
+  overlay.container.appendChild(element);
+  overlay.blocks.set(event.block_id, block);
   const pending = pendingScopes.get(binding.requestId);
+  let firstOverlayMs = null;
   if (pending && !pending.firstOverlayByJob.has(event.job_id)) {
-    const firstOverlayMs = Math.round(performance.now() - pending.startedAt);
+    firstOverlayMs = Math.round(performance.now() - pending.startedAt);
     pending.firstOverlayByJob.set(event.job_id, firstOverlayMs);
     if (pending.firstOverlayMs == null || firstOverlayMs < pending.firstOverlayMs) pending.firstOverlayMs = firstOverlayMs;
-    translationPort().postMessage({ type: "render_metric", request_id: binding.requestId, job_id: event.job_id, first_overlay_ms: firstOverlayMs });
   }
+  postRenderMetric(binding, event, true, null, profile, firstOverlayMs);
 }
 
 function removeOverlay(img) { const overlay = overlays.get(img); if (!overlay) return; overlay.resizeObserver.disconnect(); overlay.container.remove(); overlays.delete(img); }
 function pruneOverlays() { for (const [img, overlay] of overlays) if (!img.isConnected || sourceSignature(img) !== overlay.sourceSignature || !isCurrentSource(img, overlay.source, overlay.scope)) removeOverlay(img); }
 function schedulePrune() { if (!pruneFrame) pruneFrame = requestAnimationFrame(() => { pruneFrame = 0; pruneOverlays(); }); }
-function position(img) { const overlay = overlays.get(img); if (!overlay) return; const rect = renderedImageRect(img); Object.assign(overlay.container.style, { left: rect.left + scrollX + "px", top: rect.top + scrollY + "px", width: rect.width + "px", height: rect.height + "px" }); for (const block of overlay.blocks.values()) { const [x, y, w, h] = block.bbox; Object.assign(block.element.style, { left: x * rect.width / overlay.imageW + "px", top: y * rect.height / overlay.imageH + "px", width: w * rect.width / overlay.imageW + "px", height: h * rect.height / overlay.imageH + "px" }); fitText(block.element); } }
-function fitText(element) { let size = 18; element.style.fontSize = size + "px"; while (size > 10 && (element.scrollHeight > element.clientHeight || element.scrollWidth > element.clientWidth)) element.style.fontSize = --size + "px"; }
+function position(img) {
+  const overlay = overlays.get(img);
+  if (!overlay) return;
+  const rect = positionOverlay(img, overlay);
+  for (const [blockId, block] of overlay.blocks) {
+    applyBlockGeometry(block, renderBlockGeometry(rect, overlay.imageW, overlay.imageH, block.patchBbox, block.fitBbox));
+    const profile = fitText(block.text, block.profile);
+    if (profile) { block.profile = profile; continue; }
+    block.element.remove();
+    overlay.blocks.delete(blockId);
+    if (validBinding(block.event, block.binding)) postRenderMetric(block.binding, block.event, false, "fit_failed", null);
+  }
+}
 function repositionOverlays() { schedulePrune(); for (const img of overlays.keys()) position(img); }
 async function prewarmPage(requestSrcLang) { if (typeof location !== "undefined" && (location.hostname === "127.0.0.1" || location.hostname === "localhost") && location.port === "8910" && new URL(location.href).searchParams.has("acceptance")) return; try { const jobs = selectCandidates(document.querySelectorAll("img"), "visible", innerWidth, innerHeight, MIN_SIZE); const selected = jobs.sort((a, b) => visibleArea(b.img, innerWidth, innerHeight) - visibleArea(a.img, innerWidth, innerHeight))[0]; if (selected) await chrome.runtime.sendMessage({ type: "prewarmJob", source_url: selected.source, crop: selected.crop, natural_width: selected.natural_width, natural_height: selected.natural_height, src_lang: requestSrcLang }); } catch (error) { console.warn("[MangaTranslator] prewarm:", error); } }
 new MutationObserver(schedulePrune).observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["src", "srcset", "sizes", "media", "type"] });
