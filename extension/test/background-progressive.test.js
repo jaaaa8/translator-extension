@@ -2056,6 +2056,56 @@ test("background progressive transport", { timeout: 30000 }, async () => {
     );
   });
 
+  await scenario("partial OCR replay breaker releases its source and job ledger", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const bootstrap = createBackgroundApp({ storage, server });
+    await bootstrap.ready();
+    const job = bootstrap.job("partial-breaker-job", "https://x/partial-breaker.jpg");
+    const keys = await bootstrap.keysFor({ ...job, reading_direction: "rtl" });
+    storage.rows[`mt:page:${keys.pageArtifactKey}`] = cachedIncompleteOcrPage({
+      keys, server, job, mismatchCount: 1,
+    });
+    server.primeRender(keys.renderArtifactKey, "partial-breaker");
+    server.setRenderRows("partial-breaker", []);
+
+    const app = bootstrap.restart();
+    await app.ready();
+    const first = app.connect();
+    first.receive(app.startScope("partial-breaker", "visible", job));
+    await app.waitFor("scope_done", first);
+    await waitUntil(() => app.storedJob(job.job_id) === undefined, "partial breaker job cleanup");
+
+    assert.deepStrictEqual(
+      { source: server.counts.source, render: server.counts.render, ocr: server.counts.ocr, text: server.counts.translate },
+      { source: 1, render: 1, ocr: 0, text: 0 },
+    );
+    assert.deepStrictEqual(app.page(keys.pageArtifactKey).render, {
+      schema_version: "render-page-v1",
+      render_artifact_key: keys.renderArtifactKey,
+      patch_versions: server.patchVersions,
+      layout_fit_version: "dom-fit-10px-v1",
+      breaker_open: true,
+      blocks: [],
+    });
+
+    const beforeRevisit = structuredClone(server.counts);
+    const revisitJob = app.job("partial-breaker-revisit-job", job.source_url);
+    const revisit = app.connect();
+    revisit.receive(app.startScope("partial-breaker-revisit", "visible", revisitJob));
+    await app.waitFor("scope_done", revisit);
+    await waitUntil(() => app.storedJob(revisitJob.job_id) === undefined, "partial breaker revisit job cleanup");
+    assert.deepStrictEqual(
+      {
+        source: server.counts.source - beforeRevisit.source,
+        render: server.counts.render - beforeRevisit.render,
+        ocr: server.counts.ocr - beforeRevisit.ocr,
+        text: server.counts.translate - beforeRevisit.translate,
+      },
+      { source: 1, render: 0, ocr: 0, text: 0 },
+    );
+  });
+
   await scenario("missing and stale renders rebuild without spending the mismatch claim", async () => {
     for (const kind of ["missing", "stale"]) {
       const storage = fakeStorage();
