@@ -216,9 +216,6 @@ function positionOverlay(img, overlay) {
 }
 
 async function upsertOverlayBlock(img, binding, event) {
-  const overlay = ensureOverlay(img, binding, event);
-  overlay.imageW = event.image_w;
-  overlay.imageH = event.image_h;
   const element = document.createElement("div");
   element.className = "mt-render-block";
   const patch = document.createElement("img");
@@ -232,6 +229,10 @@ async function upsertOverlayBlock(img, binding, event) {
   element.appendChild(text);
   try { await patch.decode(); }
   catch { return; }
+  if (!validBinding(event, binding)) return;
+  const overlay = ensureOverlay(img, binding, event);
+  overlay.imageW = event.image_w;
+  overlay.imageH = event.image_h;
   const geometry = renderBlockGeometry(positionOverlay(img, overlay), overlay.imageW, overlay.imageH, event.patch_bbox, event.fit_bbox);
   const block = { element, patch, text, patchBbox: [...event.patch_bbox], fitBbox: [...event.fit_bbox], profile: null, binding, event };
   applyBlockGeometry(block, geometry);

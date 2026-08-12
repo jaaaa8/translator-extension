@@ -5,4 +5,10 @@
 }
 .mt-render-block { position: absolute; overflow: visible; background: transparent; }
 .mt-clean-patch { position: absolute; pointer-events: none; }
-.mt-translated-text { position: absolute; overflow: visible; background: transparent; }
+.mt-translated-text {
+  position: absolute;
+  overflow: visible;
+  background: transparent;
+  color: #111;
+  font-family: "Segoe UI", Arial, sans-serif;
+}

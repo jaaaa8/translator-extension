@@ -75,6 +75,10 @@ async function unchanged(app, event) {
 }
 
 (async () => {
+  const overlayCss = fs.readFileSync("extension/overlay.css", "utf8");
+  assert.match(overlayCss, /\.mt-translated-text\s*\{[^}]*color\s*:\s*#111\s*;/s);
+  assert.match(overlayCss, /\.mt-translated-text\s*\{[^}]*font-family\s*:\s*"Segoe UI",\s*Arial,\s*sans-serif\s*;/s);
+
   const decodeGate = deferred();
   const atomic = createApp([image()], { decode: () => decodeGate.promise });
   atomic.context.translatePage("visible");
@@ -161,6 +165,7 @@ async function unchanged(app, event) {
   decodeRejected.ports()[0].emit(translation(rejectedStart, "rejected"));
   await settle();
   // Mutation caught: coercing decode rejection into a permanent render outcome would complete Task 11's collector incorrectly.
+  assert.strictEqual(decodeRejected.live().length, 0, "decode rejection must not leave an empty overlay root");
   assert.strictEqual(decodeRejected.blocks().length, 0);
   assert.strictEqual(decodeRejected.messages.some((message) => message.type === "render_metric"), false);
   assert.strictEqual(renderErrors.length, 0, "patch decode rejection must remain a silent transient outcome");
