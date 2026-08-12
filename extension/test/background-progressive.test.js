@@ -583,6 +583,8 @@ test("background progressive transport", { timeout: 30000 }, async () => {
   });
 
   await scenario("render outcomes persist only as a full canonical manifest without patch bytes", async () => {
+    const storage = fakeStorage();
+    storage.cloneForRead = structuredClone;
     const server = createFakeServer();
     server.setOcrRows("render-outcomes", [
       { type: "analysis_ready", image_w: 300, image_h: 500 },
@@ -608,7 +610,7 @@ test("background progressive transport", { timeout: 30000 }, async () => {
       { id: "left", kind: "text", translation: "vi:left" },
       { id: "right", kind: "text", translation: "vi:right" },
     ] });
-    const app = createBackgroundApp({ server });
+    const app = createBackgroundApp({ storage, server });
     await app.ready();
     const job = app.job("render-outcomes-job", "https://x/render-outcomes.jpg");
     const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
@@ -646,7 +648,26 @@ test("background progressive transport", { timeout: 30000 }, async () => {
     await flush();
     assert.strictEqual(app.page(keys.pageArtifactKey).render, undefined);
 
+    let failedReadyWrites = 0;
+    storage.beforeSet = async (values) => {
+      const row = values[`mt:page:${keys.pageArtifactKey}`];
+      if (failedReadyWrites < 2 && row?.render?.blocks?.length === 2) {
+        failedReadyWrites++;
+        throw new Error("transient render persistence failure");
+      }
+    };
     port.receive(outcome("left", { font_px: 14, line_height: 1.1 }));
+    await waitUntil(() => failedReadyWrites === 2, "transient full render persistence failure");
+    await flush();
+    assert.strictEqual(app.page(keys.pageArtifactKey).render, undefined);
+
+    const retry = app.connect();
+    retry.receive(app.startScope(
+      "render-outcomes-retry",
+      "visible",
+      app.job("render-outcomes-retry-job", job.source_url),
+    ));
+    await app.waitFor("scope_done", retry);
     await waitUntil(() => app.page(keys.pageArtifactKey).render !== undefined, "full render subrecord persistence");
     const render = app.page(keys.pageArtifactKey).render;
     assert.deepStrictEqual(render.blocks.map((block) => block.block_id), ["right", "left"]);
@@ -1676,13 +1697,18 @@ test("background progressive transport", { timeout: 30000 }, async () => {
     server.setOcrRows("mixed-render-skips", [
       { type: "analysis_ready", image_w: 300, image_h: 500 },
       { type: "ocr_block", block_id: "left", bbox: [10, 10, 20, 20], src_text: "left" },
+      { type: "ocr_block", block_id: "invalid", bbox: [100, 10, 20, 20], src_text: "invalid" },
       { type: "ocr_block", block_id: "right", bbox: [200, 10, 20, 20], src_text: "right" },
-      { type: "image_done", recognized: 2, failed: 0 },
+      { type: "image_done", recognized: 3, failed: 0 },
     ]);
     server.setRenderRows("mixed-render-skips", [
       {
         block_id: "left", patch_id: null, patch_bbox: null, clean_region: null,
         fit_bbox: null, patch_mime: null, patch_rgba: null, reason: "clean_failed",
+      },
+      {
+        block_id: "invalid", patch_id: "patch-invalid", patch_bbox: [100, 10, 0, 20], clean_region: [100, 10, 20, 20],
+        fit_bbox: [100, 10, 20, 20], patch_mime: "image/png", patch_rgba: Buffer.from("patch:invalid").toString("base64"), reason: null,
       },
       {
         block_id: "right", patch_id: "patch-right", patch_bbox: [200, 10, 20, 20], clean_region: [200, 10, 20, 20],
@@ -1717,6 +1743,10 @@ test("background progressive transport", { timeout: 30000 }, async () => {
       {
         block_id: "right", render_mode: "skip", patch_id: null, patch_bbox: null,
         fit_bbox: [200, 10, 20, 20], layout_profile: null, reason: "fit_failed",
+      },
+      {
+        block_id: "invalid", render_mode: "skip", patch_id: null, patch_bbox: null,
+        fit_bbox: [100, 10, 20, 20], layout_profile: null, reason: "layout_failed",
       },
       {
         block_id: "left", render_mode: "skip", patch_id: null, patch_bbox: null,
@@ -1782,7 +1812,28 @@ test("background progressive transport", { timeout: 30000 }, async () => {
     mismatchPort.receive(mismatchApp.startScope("manifest-mismatch", "visible", mismatchJob));
     await mismatchApp.waitFor("scope_done", mismatchPort);
     assert.strictEqual(mismatchPort.sent.some((event) => event.type === "translation"), false);
-    assert.strictEqual(mismatchApp.page(mismatchKeys.pageArtifactKey).manifest_mismatch_count, 1);
+    const breakerPage = mismatchApp.page(mismatchKeys.pageArtifactKey);
+    assert.strictEqual(breakerPage.manifest_mismatch_count, 1);
+    assert.strictEqual(breakerPage.ocr_done, true);
+    assert.deepStrictEqual(breakerPage.manifest_ids, ["b1"]);
+    assert.strictEqual(breakerPage.blocks[0].trans_text.startsWith("vi:"), true);
+
+    const beforeRevisit = structuredClone(mismatchServer.counts);
+    const revisit = mismatchApp.connect();
+    revisit.receive(mismatchApp.startScope(
+      "manifest-mismatch-revisit",
+      "visible",
+      mismatchApp.job("manifest-mismatch-revisit-job", mismatchJob.source_url),
+    ));
+    await mismatchApp.waitFor("scope_done", revisit);
+    assert.deepStrictEqual(
+      {
+        render: mismatchServer.counts.render - beforeRevisit.render,
+        ocr: mismatchServer.counts.ocr - beforeRevisit.ocr,
+        text: mismatchServer.counts.translate - beforeRevisit.translate,
+      },
+      { render: 0, ocr: 0, text: 0 },
+    );
   });
 
   await scenario("first fresh manifest mismatch claims before one paid recovery and preserves the claim", async () => {

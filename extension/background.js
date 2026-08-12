@@ -564,18 +564,20 @@ async function attachDescriptor(request, descriptor, ledger, sourceIdentity, sou
     });
   }
   if (request.cancelledSourceJobs.has(descriptor.job_id)) { releasePendingSource(request, descriptor.job_id); return; }
+  if (page && freshBreakerSentinel(page)) {
+    request.sourceAcquisitions.delete(descriptor.job_id);
+    request.sourceDescriptors.delete(descriptor.job_id);
+    request.port?.postMessage({ type: "page_job_accepted", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, state: "complete" });
+    completeJob(request, descriptor.job_id, page.blocks.length, 0, true, { recognized: page.blocks.length, failed: 0 }, null, null, { pageKey: page.page_artifact_key });
+    sourceAcquisition.release();
+    await pageCache?.removeJob(descriptor.job_id);
+    return;
+  }
   const hasManifest = page != null && Object.hasOwn(page, "manifest_ids");
   const terminalHit = hasManifest && page.state === "complete" && page.ocr_done === true;
   if (terminalHit) {
     request.sourceAcquisitions.delete(descriptor.job_id);
     request.sourceDescriptors.delete(descriptor.job_id);
-    if (freshBreakerSentinel(page)) {
-      request.port?.postMessage({ type: "page_job_accepted", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, state: "complete" });
-      completeJob(request, descriptor.job_id, page.blocks.length, 0, true, { recognized: page.blocks.length, failed: 0 }, null, null, { pageKey: page.page_artifact_key });
-      sourceAcquisition.release();
-      await pageCache?.removeJob(descriptor.job_id);
-      return;
-    }
     const producer = createProducer(descriptor, keys, page, sourceIdentity, sourceAcquisition);
     producer.translationReady = Promise.resolve({ translated: page.blocks.length, failed: 0 });
     request.port?.postMessage({ type: "page_job_accepted", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, state: "complete" });
@@ -873,18 +875,26 @@ function readyRenderFromCollector(collector) {
 function persistCompletedRender(collector) {
   if (collector.persisting || collector.blocks.size !== collector.manifestIds.length) return;
   collector.persisting = true;
+  let removeCollector = false;
   void serializePageWrite(collector.pageKey, async () => {
     if (renderOutcomeCollectors.get(collector.key) !== collector) return;
     const activeProducer = collector.producer && producers.get(collector.pageKey) === collector.producer
       ? collector.producer : null;
     const page = await pageCache?.getPage(collector.pageKey);
-    if (renderOutcomeCollectors.get(collector.key) !== collector || !page || !renderCollectorMatchesPage(collector, page)) return;
+    if (renderOutcomeCollectors.get(collector.key) !== collector) return;
+    if (!page || !renderCollectorMatchesPage(collector, page)) {
+      removeCollector = true;
+      return;
+    }
     const render = readyRenderFromCollector(collector);
     page.render = render;
     await pageCache?.putPage(page);
     if (activeProducer && renderCollectorMatchesPage(collector, activeProducer.page)) activeProducer.page.render = render;
-  }).catch(() => {}).finally(() => {
-    if (renderOutcomeCollectors.get(collector.key) === collector) renderOutcomeCollectors.delete(collector.key);
+    removeCollector = true;
+  }).catch(() => {
+    if (renderOutcomeCollectors.get(collector.key) === collector) collector.persisting = false;
+  }).finally(() => {
+    if (removeCollector && renderOutcomeCollectors.get(collector.key) === collector) renderOutcomeCollectors.delete(collector.key);
   });
 }
 function prepareRenderOutcomeCollector(page, artifact, consumers, producer = null) {
@@ -911,7 +921,11 @@ function prepareRenderOutcomeCollector(page, artifact, consumers, producer = nul
     };
     for (const blockId of collector.manifestIds) {
       const block = artifactById.get(blockId);
-      if (!RENDER_CAPABILITY_REASONS.has(block?.reason)) continue;
+      const reason = block?.reason === null &&
+        (!validRenderBbox(block.patch_bbox) || !validRenderBbox(block.fit_bbox))
+        ? "layout_failed"
+        : block?.reason;
+      if (!RENDER_CAPABILITY_REASONS.has(reason)) continue;
       collector.blocks.set(blockId, {
         block_id: blockId,
         render_mode: "skip",
@@ -919,7 +933,7 @@ function prepareRenderOutcomeCollector(page, artifact, consumers, producer = nul
         patch_bbox: null,
         fit_bbox: validRenderBbox(block.fit_bbox) ? [...block.fit_bbox] : null,
         layout_profile: null,
-        reason: block.reason,
+        reason,
       });
     }
     lruSet(renderOutcomeCollectors, key, collector, 128);
@@ -1320,7 +1334,8 @@ async function handleManifestMismatch(producer) {
       resetProducerForManifestRecovery(producer);
       return "recover";
     }
-    page.render = {
+    producer.page.manifest_mismatch_count = page.manifest_mismatch_count;
+    producer.page.render = {
       schema_version: "render-page-v1",
       render_artifact_key: producer.renderArtifactKey,
       patch_versions: serverPatchVersions,
@@ -1328,9 +1343,8 @@ async function handleManifestMismatch(producer) {
       breaker_open: true,
       blocks: [],
     };
-    await pageCache.putPage(page);
+    await pageCache.putPage(producer.page);
     invalidateRenderOutcomePage(page.page_artifact_key);
-    producer.page = page;
     return "breaker";
   });
 }
