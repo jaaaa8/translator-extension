@@ -262,7 +262,7 @@ function position(img) {
   const rect = positionOverlay(img, overlay);
   for (const [blockId, block] of overlay.blocks) {
     applyBlockGeometry(block, renderBlockGeometry(rect, overlay.imageW, overlay.imageH, block.patchBbox, block.fitBbox));
-    const profile = fitText(block.text, block.profile);
+    const profile = fitText(block.text, block.profile ? { font_px: 18, line_height: block.profile.line_height } : null);
     if (profile) { block.profile = profile; continue; }
     block.element.remove();
     overlay.blocks.delete(blockId);

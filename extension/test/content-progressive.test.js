@@ -193,6 +193,26 @@ function done(app, request) { app.port.emit({ type: "scope_done", request_id: re
     block_id: "b1", painted: false, reason: "fit_failed", layout_profile: null,
   });
 
+  const resizeRecovery = createContentVm(fakePort(), "https://x/", {
+    measureText: (element) => {
+      const maxFont = element.clientWidth >= 15 ? 18 : 12;
+      return {
+        width: Number.parseFloat(element.style.fontSize) <= maxFont ? element.clientWidth : element.clientWidth + 1,
+        height: element.clientHeight,
+      };
+    },
+  });
+  const resizeRecoveryStart = start(resizeRecovery);
+  resizeRecovery.port.emit(event(resizeRecoveryStart, "recovers after resize"));
+  await settle();
+  assert.strictEqual(resizeRecovery.liveTexts()[0].style.fontSize, "18px");
+  resizeRecovery.resize({ left: 0, top: 0, right: 250, bottom: 400, width: 250, height: 400 });
+  resizeRecovery.context.repositionOverlays();
+  assert.strictEqual(resizeRecovery.liveTexts()[0].style.fontSize, "12px");
+  resizeRecovery.resize({ left: 0, top: 0, right: 500, bottom: 800, width: 500, height: 800 });
+  resizeRecovery.context.repositionOverlays();
+  assert.strictEqual(resizeRecovery.liveTexts()[0].style.fontSize, "18px", "font must recover when the fit box grows");
+
   let tick = 0;
   const perJob = createContentVm(fakePort(), "https://x/", { clock: { now: () => tick }, imageCount: 2 });
   const result = perJob.context.translatePage("loaded");
