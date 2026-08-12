@@ -460,9 +460,7 @@ class PageCache {
 
   async putPage(record) {
     const value = storedPage(record, this.now());
-    const stored = await this._put(pageStorageKey(record.page_artifact_key), value);
-    await this._gcOcrRecoveryLedgers();
-    return stored;
+    return this._put(pageStorageKey(record.page_artifact_key), value);
   }
 
   async putJob(record) {

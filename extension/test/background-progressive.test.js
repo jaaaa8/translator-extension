@@ -1972,6 +1972,90 @@ test("background progressive transport", { timeout: 30000 }, async () => {
     assert.strictEqual(app.page(keys.pageArtifactKey).manifest_mismatch_count, 1);
   });
 
+  await scenario("partial OCR replay uses the durable manifest mismatch breaker", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const bootstrap = createBackgroundApp({ storage, server });
+    await bootstrap.ready();
+    const job = bootstrap.job("partial-mismatch-job", "https://x/partial-mismatch.jpg");
+    const keys = await bootstrap.keysFor({ ...job, reading_direction: "rtl" });
+    const pageStorageKey = `mt:page:${keys.pageArtifactKey}`;
+    storage.rows[pageStorageKey] = cachedIncompleteOcrPage({ keys, server, job });
+    server.primeRender(keys.renderArtifactKey, "partial-mismatch");
+    server.setRenderRows("partial-mismatch", []);
+    server.setOcrRows("partial-mismatch", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "ocr_block", block_id: "new", bbox: [5, 6, 7, 8], src_text: "new" },
+      { type: "image_done", recognized: 1, failed: 0 },
+    ]);
+    server.queueTranslationResult({ items: [{ id: "new", kind: "text", translation: "vi:new" }] });
+    let recoverySnapshot = null;
+    server.beforeNextOcr(() => {
+      recoverySnapshot = structuredClone(storage.rows[pageStorageKey]);
+      server.setRenderRows("partial-mismatch", [{
+        block_id: "new", patch_id: "patch-new", patch_bbox: [5, 6, 7, 8], clean_region: [5, 6, 7, 8],
+        fit_bbox: [5, 6, 7, 8], patch_mime: "image/png", patch_rgba: Buffer.from("patch:new").toString("base64"), reason: null,
+      }]);
+    });
+
+    const app = bootstrap.restart();
+    await app.ready();
+    const first = app.connect();
+    first.receive(app.startScope("partial-mismatch", "visible", job));
+    await app.waitFor("scope_done", first);
+
+    assert.strictEqual(recoverySnapshot?.manifest_mismatch_count, 1);
+    assert.strictEqual(storage.rows[`mt:ocr-recovery:${keys.ocrKey}`], undefined);
+    assert.deepStrictEqual(
+      { render: server.counts.render, ocr: server.counts.ocr, text: server.counts.translate },
+      { render: 2, ocr: 1, text: 1 },
+    );
+    assert.deepStrictEqual({
+      state: app.page(keys.pageArtifactKey).state,
+      manifest_mismatch_count: app.page(keys.pageArtifactKey).manifest_mismatch_count,
+      manifest_ids: app.page(keys.pageArtifactKey).manifest_ids,
+    }, {
+      state: "complete",
+      manifest_mismatch_count: 1,
+      manifest_ids: ["new"],
+    });
+
+    server.setRenderRows("partial-mismatch", []);
+    const beforeRepeat = structuredClone(server.counts);
+    const repeat = app.connect();
+    repeat.receive(app.startScope("partial-mismatch-repeat", "visible", app.job("partial-mismatch-repeat-job", job.source_url)));
+    await app.waitFor("scope_done", repeat);
+    assert.deepStrictEqual(app.page(keys.pageArtifactKey).render, {
+      schema_version: "render-page-v1",
+      render_artifact_key: keys.renderArtifactKey,
+      patch_versions: server.patchVersions,
+      layout_fit_version: "dom-fit-10px-v1",
+      breaker_open: true,
+      blocks: [],
+    });
+    assert.deepStrictEqual(
+      {
+        render: server.counts.render - beforeRepeat.render,
+        ocr: server.counts.ocr - beforeRepeat.ocr,
+        text: server.counts.translate - beforeRepeat.translate,
+      },
+      { render: 1, ocr: 0, text: 0 },
+    );
+
+    const beforeSentinel = structuredClone(server.counts);
+    const sentinel = app.connect();
+    sentinel.receive(app.startScope("partial-mismatch-sentinel", "visible", app.job("partial-mismatch-sentinel-job", job.source_url)));
+    await app.waitFor("scope_done", sentinel);
+    assert.deepStrictEqual(
+      {
+        render: server.counts.render - beforeSentinel.render,
+        ocr: server.counts.ocr - beforeSentinel.ocr,
+        text: server.counts.translate - beforeSentinel.translate,
+      },
+      { render: 0, ocr: 0, text: 0 },
+    );
+  });
+
   await scenario("missing and stale renders rebuild without spending the mismatch claim", async () => {
     for (const kind of ["missing", "stale"]) {
       const storage = fakeStorage();
@@ -2979,6 +3063,83 @@ test("background progressive transport", { timeout: 30000 }, async () => {
     assert.deepStrictEqual(app.page(keys.pageArtifactKey).manifest_ids, ["new"]);
   });
 
+  await scenario("target replacement cannot persist an OCR recovery scratch page", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const bootstrap = createBackgroundApp({ storage, server });
+    await bootstrap.ready();
+    const source = "https://x/ocr-recovery-replaced.jpg";
+    const oldJob = bootstrap.job("ocr-recovery-replaced-old-job", source);
+    const keys = await bootstrap.keysFor({ ...oldJob, reading_direction: "rtl" });
+    const authoritative = cachedIncompleteOcrPage({ keys, server, job: oldJob });
+    authoritative.render = {
+      schema_version: "render-page-v1",
+      render_artifact_key: keys.renderArtifactKey,
+      patch_versions: structuredClone(server.patchVersions),
+      layout_fit_version: "dom-fit-old",
+      breaker_open: false,
+      blocks: [{
+        block_id: "old", render_mode: "in_place", patch_id: "old-patch",
+        patch_bbox: [1, 2, 3, 4], fit_bbox: [1, 2, 3, 4],
+        layout_profile: { font_px: 16, line_height: 1.2 }, reason: null,
+      }],
+    };
+    storage.rows[`mt:page:${keys.pageArtifactKey}`] = authoritative;
+    server.primeRender(keys.renderArtifactKey, "ocr-recovery-replaced");
+    server.setRenderRows("ocr-recovery-replaced", [{
+      block_id: "old", patch_id: "old-patch", patch_bbox: [1, 2, 3, 4], clean_region: [1, 2, 3, 4],
+      fit_bbox: [1, 2, 3, 4], patch_mime: "image/png", patch_rgba: Buffer.from("patch:old").toString("base64"), reason: null,
+    }]);
+    server.setOcrRows("ocr-recovery-replaced", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "ocr_block", block_id: "new", bbox: [5, 6, 7, 8], src_text: "new" },
+      { type: "image_done", recognized: 1, failed: 0 },
+    ]);
+    server.holdOcrAfterFirst("ocr-recovery-replaced");
+
+    const app = bootstrap.restart();
+    await app.ready();
+    const port = app.connect();
+    port.receive(app.startScope("ocr-recovery-replaced-old", "visible", oldJob));
+    await waitUntil(
+      () => app.producer(keys.pageArtifactKey)?.page.blocks.some((block) => block.block_id === "new"),
+      "OCR recovery scratch block",
+    );
+
+    port.receive({
+      ...app.startScope(
+        "ocr-recovery-replaced-new",
+        "visible",
+        app.job("ocr-recovery-replaced-new-job", source),
+        "ocr-recovery-replaced-old",
+      ),
+      dst_lang: "en",
+    });
+    await waitUntil(
+      () => port.sent.some((event) => event.type === "page_job_accepted" && event.request_id === "ocr-recovery-replaced-new"),
+      "replacement acceptance",
+    );
+    await flush();
+
+    const stored = app.page(keys.pageArtifactKey);
+    assert.deepStrictEqual({
+      state: stored.state,
+      ocr_done: stored.ocr_done,
+      block_ids: stored.blocks.map((block) => block.block_id),
+      manifest_ids: stored.manifest_ids,
+      render_block_ids: stored.render?.blocks.map((block) => block.block_id),
+    }, {
+      state: "partial",
+      ocr_done: false,
+      block_ids: ["old"],
+      manifest_ids: ["old"],
+      render_block_ids: ["old"],
+    });
+
+    server.releaseOcr("ocr-recovery-replaced");
+    await app.waitFor("scope_done", port);
+  });
+
   await scenario("unchanged OCR recovery reuses the authoritative manifest without Gemini", async () => {
     const storage = fakeStorage();
     const server = createFakeServer();
@@ -3032,6 +3193,61 @@ test("background progressive transport", { timeout: 30000 }, async () => {
     assert.strictEqual(app.page(keys.pageArtifactKey).ocr_done, true);
     assert.deepStrictEqual(app.page(keys.pageArtifactKey).manifest_ids, ["old"]);
     assert.strictEqual(storage.rows[`mt:page:${keys.pageArtifactKey}`].render, undefined);
+  });
+
+  await scenario("reordered unchanged OCR blocks reuse kinds by block identity without Gemini", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const bootstrap = createBackgroundApp({ storage, server });
+    await bootstrap.ready();
+    const job = bootstrap.job("ocr-recovery-reordered-job", "https://x/ocr-recovery-reordered.jpg");
+    const keys = await bootstrap.keysFor({ ...job, reading_direction: "rtl" });
+    const page = cachedIncompleteOcrPage({ keys, server, job });
+    page.blocks = [
+      {
+        ...page.blocks[0], block_id: "text", src_text: "hello", trans_text: "vi:hello",
+        kind: "text", reading_order: 0,
+      },
+      {
+        block_id: "sfx", bbox: [5, 6, 7, 8], src_text: "boom", trans_text: null,
+        kind: "sfx", vertical: false, reading_order: 1, state: "translated",
+      },
+    ];
+    page.manifest_ids = ["text"];
+    storage.rows[`mt:page:${keys.pageArtifactKey}`] = page;
+    server.primeRender(keys.renderArtifactKey, "ocr-recovery-reordered");
+    server.setRenderRows("ocr-recovery-reordered", [
+      {
+        block_id: "text", patch_id: "patch-text", patch_bbox: [1, 2, 3, 4], clean_region: [1, 2, 3, 4],
+        fit_bbox: [1, 2, 3, 4], patch_mime: "image/png", patch_rgba: Buffer.from("patch:text").toString("base64"), reason: null,
+      },
+      {
+        block_id: "sfx", patch_id: null, patch_bbox: null, clean_region: null,
+        fit_bbox: null, patch_mime: null, patch_rgba: null, reason: "unsupported_region",
+      },
+    ]);
+    server.setOcrRows("ocr-recovery-reordered", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "ocr_block", block_id: "sfx", bbox: [5, 6, 7, 8], src_text: "boom" },
+      { type: "ocr_block", block_id: "text", bbox: [1, 2, 3, 4], src_text: "hello" },
+      { type: "image_done", recognized: 2, failed: 0 },
+    ]);
+
+    const app = bootstrap.restart();
+    await app.ready();
+    const port = app.connect();
+    port.receive(app.startScope("ocr-recovery-reordered", "visible", job));
+    await app.waitFor("scope_done", port);
+
+    assert.deepStrictEqual(
+      { ocr: server.counts.ocr, text: server.counts.translate },
+      { ocr: 1, text: 0 },
+    );
+    assert.deepStrictEqual(
+      app.page(keys.pageArtifactKey).blocks.map((block) => ({ id: block.block_id, kind: block.kind })),
+      [{ id: "text", kind: "text" }, { id: "sfx", kind: "sfx" }],
+    );
+    assert.deepStrictEqual(app.page(keys.pageArtifactKey).manifest_ids, ["text"]);
   });
 
   await scenario("OCR kind transitions force exact full-page translation in both directions", async () => {

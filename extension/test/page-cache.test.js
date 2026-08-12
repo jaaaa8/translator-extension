@@ -6,8 +6,12 @@ function fakeStorage(seed = {}) {
   const rows = { ...seed };
   return {
     rows,
+    getAllCalls: 0,
     async get(key) {
-      if (key === null) return { ...rows };
+      if (key === null) {
+        this.getAllCalls++;
+        return { ...rows };
+      }
       if (typeof key === "string") return key in rows ? { [key]: rows[key] } : {};
       return Object.fromEntries(key.filter((name) => name in rows).map((name) => [name, rows[name]]));
     },
@@ -387,6 +391,22 @@ test("OCR recovery claim is durable, exact, and succeeds once under concurrency"
     await new PageCache(storage).claimOcrRecovery("ocr-shared", "protected"),
     false,
   );
+});
+
+test("ordinary PageRow rewrites do not scan storage again for orphan-ledger GC", async () => {
+  const row = { ...page("same-page", "partial", 1), ocr_key: "same-ocr" };
+  const storage = fakeStorage({
+    "mt:page:same-page": row,
+    "mt:ocr-recovery:same-ocr": { schema_version: "ocr-recovery-v1" },
+  });
+  const cache = new PageCache(storage);
+
+  await cache.putPage({ ...row, last_error: "ocr_incomplete" });
+
+  assert.strictEqual(storage.getAllCalls, 1);
+  assert.deepStrictEqual(storage.rows["mt:ocr-recovery:same-ocr"], {
+    schema_version: "ocr-recovery-v1",
+  });
 });
 
 test("rehydrate purges malformed OCR recovery ledgers but retains the exact schema", async () => {

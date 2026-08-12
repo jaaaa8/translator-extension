@@ -603,9 +603,32 @@ async function attachDescriptor(request, descriptor, ledger, sourceIdentity, sou
   const incompleteOcrReplay = hasManifest && page.state === "partial" && page.ocr_done === false;
   if (incompleteOcrReplay) {
     const producer = createProducer(descriptor, keys, page, sourceIdentity, sourceAcquisition);
-    const artifact = await fetchRenderArtifact(producer);
-    request.port?.postMessage({ type: "page_job_accepted", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, state: page.state });
-    const delivered = replayPage(request, descriptor.job_id, page, true, artifact);
+    let artifact;
+    let delivered;
+    try {
+      artifact = await fetchRenderArtifact(producer);
+      request.port?.postMessage({ type: "page_job_accepted", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, state: page.state });
+      delivered = replayPage(request, descriptor.job_id, page, true, artifact);
+    } catch (error) {
+      if (error?.errorCode !== "manifest_mismatch") throw error;
+      const action = await handleManifestMismatch(producer);
+      request.sourceAcquisitions.delete(descriptor.job_id);
+      request.sourceDescriptors.delete(descriptor.job_id);
+      if (action === "recover") {
+        producer.persistUntilDone = true;
+        producer.prewarmOnly = false;
+        producer.consumers.set(consumerKey(request.requestId, descriptor.job_id), { requestId: request.requestId, jobId: descriptor.job_id, port: request.port });
+        producer.jobIds.add(descriptor.job_id);
+        request.jobs.set(descriptor.job_id, producer);
+        request.pendingJobs.push(producer);
+        producers.set(producer.pageKey, producer);
+        return;
+      }
+      completeJob(request, descriptor.job_id, page.blocks.length, 0, true, { recognized: page.blocks.length, failed: 0 }, null, null, { pageKey: page.page_artifact_key });
+      releaseProducerSource(producer);
+      await pageCache.removeJob(descriptor.job_id);
+      return;
+    }
     const claimed = await pageCache.claimOcrRecovery(keys.ocrKey, keys.pageArtifactKey);
     request.sourceAcquisitions.delete(descriptor.job_id);
     request.sourceDescriptors.delete(descriptor.job_id);
@@ -1212,14 +1235,15 @@ async function consumeOcr(producer) {
 }
 function ocrBlockFromEvent(event) { return { block_id: event.block_id, bbox: event.bbox, src_text: event.src_text ?? event.text, trans_text: null, kind: event.kind ?? null, vertical: event.vertical === true, reading_order: null, state: "ocr_complete" }; }
 function sameOcrSnapshot(left, right) {
-  const snapshot = (blocks, fallback = []) => blocks.map((block, index) => ({
+  const fallbackKinds = new Map(left.map((block) => [block.block_id, block.kind ?? null]));
+  const snapshot = (blocks) => blocks.map((block) => ({
     block_id: block.block_id,
     bbox: block.bbox,
     src_text: block.src_text,
-    kind: block.kind ?? fallback[index]?.kind ?? null,
+    kind: block.kind ?? fallbackKinds.get(block.block_id) ?? null,
     vertical: block.vertical === true,
-  }));
-  return JSON.stringify(snapshot(left)) === JSON.stringify(snapshot(right, left));
+  })).sort((a, b) => a.block_id < b.block_id ? -1 : a.block_id > b.block_id ? 1 : 0);
+  return JSON.stringify(snapshot(left)) === JSON.stringify(snapshot(right));
 }
 async function applyOcrBlock(producer, event) { const block = ocrBlockFromEvent(event); mark(producer, "first_ocr"); if (!producer.page.blocks.some((row) => row.block_id === block.block_id)) producer.page.blocks.push(block); await persist(producer); }
 async function translationKeyForBatch(producer, blocks, block) {
@@ -1592,7 +1616,7 @@ function retireProducer(producer) {
   releaseProducerStages(producer);
   releaseProducerSource(producer);
   if (producers.get(producer.pageKey) === producer) producers.delete(producer.pageKey);
-  if (pageCache && persistArtifact) {
+  if (pageCache && persistArtifact && !producer.ocrRecovery) {
     const page = producer.page;
     const useful = page.analysis_known || page.blocks.length;
     void producer.persistChain.then(() => serializePageWrite(producer.pageKey, async () => {
