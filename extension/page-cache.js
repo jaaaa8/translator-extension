@@ -1,6 +1,8 @@
 const PAGE_SCHEMA = "page-v2";
 const PAGE_PREFIX = "mt:page:";
 const JOB_PREFIX = "mt:job:";
+const OCR_RECOVERY_SCHEMA = "ocr-recovery-v1";
+const OCR_RECOVERY_PREFIX = "mt:ocr-recovery:";
 const ACTIVE_STATES = new Set(["queued", "running"]);
 const TERMINAL_STATES = new Set(["partial", "complete", "failed"]);
 const PAGE_STATES = new Set([...ACTIVE_STATES, ...TERMINAL_STATES]);
@@ -10,6 +12,7 @@ class CacheFullError extends Error {}
 
 function pageStorageKey(key) { return PAGE_PREFIX + key; }
 function jobStorageKey(key) { return JOB_PREFIX + key; }
+function ocrRecoveryStorageKey(key) { return OCR_RECOVERY_PREFIX + key; }
 function recordBytes(key, value) {
   return new TextEncoder().encode(JSON.stringify({ [key]: value })).byteLength;
 }
@@ -276,6 +279,14 @@ function storedJob(record) {
   return value;
 }
 
+function storedOcrRecovery(record) {
+  if (!record || Object.getPrototypeOf(record) !== Object.prototype ||
+      Object.keys(record).length !== 1 || record.schema_version !== OCR_RECOVERY_SCHEMA) {
+    throw new TypeError(`OCR recovery schema_version must be ${OCR_RECOVERY_SCHEMA}`);
+  }
+  return { schema_version: OCR_RECOVERY_SCHEMA };
+}
+
 function pageVersionsEqual(rowVersions, liveVersions, srcLang) {
   if (!rowVersions || !liveVersions || Object.getPrototypeOf(rowVersions) !== Object.prototype ||
     Object.getPrototypeOf(liveVersions) !== Object.prototype) return false;
@@ -309,6 +320,7 @@ class PageCache {
     this.budgetBytes = budgetBytes;
     this.now = now;
     this.layoutFitVersion = undefined;
+    this.ocrRecoveryClaimTail = Promise.resolve();
   }
 
   async _all() {
@@ -362,16 +374,38 @@ class PageCache {
       }
     }
     if (remove.length) await this.storage.remove(remove);
+    await this._gcOcrRecoveryLedgers();
     return remove.length;
   }
 
-  async _evictFor(key, value) {
+  async _gcOcrRecoveryLedgers() {
     const rows = await this._all();
+    const referenced = new Set(Object.entries(rows)
+      .filter(([key, row]) => key.startsWith(PAGE_PREFIX) && row.schema_version === PAGE_SCHEMA && typeof row.ocr_key === "string")
+      .map(([, row]) => row.ocr_key));
+    const remove = [];
+    for (const [key, row] of Object.entries(rows)) {
+      if (!key.startsWith(OCR_RECOVERY_PREFIX)) continue;
+      const ocrKey = key.slice(OCR_RECOVERY_PREFIX.length);
+      try {
+        storedOcrRecovery(row);
+      } catch {
+        remove.push(key);
+        continue;
+      }
+      if (!referenced.has(ocrKey)) remove.push(key);
+    }
+    if (remove.length) await this.storage.remove(remove);
+  }
+
+  async _evictFor(key, value, protectedPageKey) {
+    const rows = await this._all();
+    const protectedKey = protectedPageKey === undefined ? null : pageStorageKey(protectedPageKey);
     const stale = [];
     const complete = [];
     const otherTerminal = [];
     for (const [name, row] of Object.entries(rows)) {
-      if (!name.startsWith(PAGE_PREFIX) || name === key) continue;
+      if (!name.startsWith(PAGE_PREFIX) || name === key || name === protectedKey) continue;
       if (!TERMINAL_STATES.has(row.state)) continue;
       if (row.schema_version !== PAGE_SCHEMA) stale.push([name, row]);
       else if (row.state === "complete") complete.push([name, row]);
@@ -386,28 +420,35 @@ class PageCache {
     while (bytes > this.budgetBytes && candidates.length) {
       const [removeKey, removeValue] = candidates.shift();
       await this.storage.remove(removeKey);
-      bytes -= recordBytes(removeKey, removeValue);
+      await this._gcOcrRecoveryLedgers();
+      const current = await this._all();
+      bytes = await this.storage.getBytesInUse(null);
+      bytes = bytes - (current[key] ? recordBytes(key, current[key]) : 0) + recordBytes(key, value);
     }
     if (bytes > this.budgetBytes) throw new CacheFullError("session cache full");
   }
 
-  async _evictOneTerminal(excludeKey) {
+  async _evictOneTerminal(excludeKey, protectedPageKey) {
+    const protectedKey = protectedPageKey === undefined ? null : pageStorageKey(protectedPageKey);
     const candidates = Object.entries(await this._all())
-      .filter(([key, row]) => key !== excludeKey && key.startsWith(PAGE_PREFIX) && TERMINAL_STATES.has(row.state))
+      .filter(([key, row]) => key !== excludeKey && key !== protectedKey && key.startsWith(PAGE_PREFIX) && TERMINAL_STATES.has(row.state))
       .sort((a, b) => {
         const tier = (row) => row.schema_version !== PAGE_SCHEMA ? 0 : row.state === "complete" ? 1 : 2;
         return tier(a[1]) - tier(b[1]) || (a[1].last_accessed_at || 0) - (b[1].last_accessed_at || 0);
       });
-    if (candidates.length) await this.storage.remove(candidates[0][0]);
+    if (candidates.length) {
+      await this.storage.remove(candidates[0][0]);
+      await this._gcOcrRecoveryLedgers();
+    }
   }
 
-  async _put(key, value) {
-    await this._evictFor(key, value);
+  async _put(key, value, protectedPageKey) {
+    await this._evictFor(key, value, protectedPageKey);
     try {
       await this.storage.set({ [key]: value });
     } catch (firstError) {
-      await this._evictOneTerminal(key);
-      await this._evictFor(key, value);
+      await this._evictOneTerminal(key, protectedPageKey);
+      await this._evictFor(key, value, protectedPageKey);
       try {
         await this.storage.set({ [key]: value });
       } catch {
@@ -419,7 +460,9 @@ class PageCache {
 
   async putPage(record) {
     const value = storedPage(record, this.now());
-    return this._put(pageStorageKey(record.page_artifact_key), value);
+    const stored = await this._put(pageStorageKey(record.page_artifact_key), value);
+    await this._gcOcrRecoveryLedgers();
+    return stored;
   }
 
   async putJob(record) {
@@ -432,6 +475,29 @@ class PageCache {
 
   async removePage(pageKey) {
     await this.storage.remove(pageStorageKey(pageKey));
+    await this._gcOcrRecoveryLedgers();
+  }
+
+  claimOcrRecovery(ocrKey, protectedPageKey) {
+    if (typeof ocrKey !== "string" || typeof protectedPageKey !== "string") {
+      return Promise.reject(new TypeError("ocrKey and protectedPageKey must be strings"));
+    }
+    const claim = this.ocrRecoveryClaimTail.then(async () => {
+      const key = ocrRecoveryStorageKey(ocrKey);
+      const existing = (await this.storage.get(key))[key];
+      if (existing !== undefined) {
+        try {
+          storedOcrRecovery(existing);
+          return false;
+        } catch {
+          await this.storage.remove(key);
+        }
+      }
+      await this._put(key, storedOcrRecovery({ schema_version: OCR_RECOVERY_SCHEMA }), protectedPageKey);
+      return true;
+    });
+    this.ocrRecoveryClaimTail = claim.catch(() => {});
+    return claim;
   }
 
   async rehydrate() {
@@ -451,8 +517,15 @@ class PageCache {
         const job = row.state === "running" ? { ...row, state: "queued" } : row;
         jobs.push(job);
         if (job !== row) await this.storage.set({ [key]: job });
+      } else if (key.startsWith(OCR_RECOVERY_PREFIX)) {
+        try {
+          storedOcrRecovery(row);
+        } catch {
+          await this.storage.remove(key);
+        }
       }
     }
+    await this._gcOcrRecoveryLedgers();
     return { pages, jobs };
   }
 

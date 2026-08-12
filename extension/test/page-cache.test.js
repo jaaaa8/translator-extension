@@ -369,6 +369,133 @@ test("catches version-domain mutations: purge only the stale domain", async (t) 
   });
 });
 
+test("OCR recovery claim is durable, exact, and succeeds once under concurrency", async () => {
+  const storage = fakeStorage();
+  const cache = new PageCache(storage);
+  await cache.putPage({ ...page("protected", "partial", 1), ocr_key: "ocr-shared" });
+
+  const claims = await Promise.all([
+    cache.claimOcrRecovery("ocr-shared", "protected"),
+    cache.claimOcrRecovery("ocr-shared", "protected"),
+  ]);
+
+  assert.deepStrictEqual(claims, [true, false]);
+  assert.deepStrictEqual(storage.rows["mt:ocr-recovery:ocr-shared"], {
+    schema_version: "ocr-recovery-v1",
+  });
+  assert.strictEqual(
+    await new PageCache(storage).claimOcrRecovery("ocr-shared", "protected"),
+    false,
+  );
+});
+
+test("rehydrate purges malformed OCR recovery ledgers but retains the exact schema", async () => {
+  const storage = fakeStorage({
+    "mt:page:valid-ledger-page": { ...page("valid-ledger-page", "partial", 1), ocr_key: "valid-ledger" },
+    "mt:page:wrong-ledger-page": { ...page("wrong-ledger-page", "partial", 2), ocr_key: "wrong-ledger" },
+    "mt:page:extra-ledger-page": { ...page("extra-ledger-page", "partial", 3), ocr_key: "extra-ledger" },
+    "mt:ocr-recovery:valid-ledger": { schema_version: "ocr-recovery-v1" },
+    "mt:ocr-recovery:wrong-ledger": { schema_version: "ocr-recovery-v0" },
+    "mt:ocr-recovery:extra-ledger": { schema_version: "ocr-recovery-v1", extra: true },
+  });
+
+  await new PageCache(storage).rehydrate();
+
+  assert.deepStrictEqual(storage.rows["mt:ocr-recovery:valid-ledger"], {
+    schema_version: "ocr-recovery-v1",
+  });
+  assert.strictEqual(storage.rows["mt:ocr-recovery:wrong-ledger"], undefined);
+  assert.strictEqual(storage.rows["mt:ocr-recovery:extra-ledger"], undefined);
+});
+
+test("OCR recovery ledgers count toward budget without becoming eviction candidates", async () => {
+  const budgetBytes = 8 * 1024 * 1024;
+  const seed = {
+    "mt:page:protected": { ...page("protected", "partial", 1, "p".repeat(120)), ocr_key: "ocr-new" },
+    "mt:page:evictable": { ...page("evictable", "complete", 2, "e".repeat(120)), ocr_key: "ocr-evictable" },
+    "mt:page:active": { ...page("active", "running", 3, "a".repeat(120)), ocr_key: "ocr-existing" },
+    "mt:ocr-recovery:ocr-existing": { schema_version: "ocr-recovery-v1" },
+  };
+  const seededBytes = new TextEncoder().encode(JSON.stringify(seed)).byteLength;
+  seed["mt:page:evictable"].blocks[0].trans_text += "e".repeat(budgetBytes - seededBytes - 32);
+  const storage = fakeStorage(seed);
+  const cache = new PageCache(storage);
+
+  assert.strictEqual(await cache.claimOcrRecovery("ocr-new", "protected"), true);
+
+  assert.ok(storage.rows["mt:page:protected"]);
+  assert.ok(storage.rows["mt:page:active"]);
+  assert.strictEqual(storage.rows["mt:page:evictable"], undefined);
+  assert.deepStrictEqual(storage.rows["mt:ocr-recovery:ocr-existing"], {
+    schema_version: "ocr-recovery-v1",
+  });
+  assert.deepStrictEqual(storage.rows["mt:ocr-recovery:ocr-new"], {
+    schema_version: "ocr-recovery-v1",
+  });
+});
+
+test("OCR recovery claim fails without evicting its protected page", async () => {
+  const seed = {
+    "mt:page:protected-only": {
+      ...page("protected-only", "partial", 1, "p".repeat(120)),
+      ocr_key: "ocr-protected-only",
+    },
+  };
+  const storage = fakeStorage(seed);
+  const cache = new PageCache(storage, {
+    budgetBytes: new TextEncoder().encode(JSON.stringify(seed)).byteLength,
+  });
+
+  await assert.rejects(
+    cache.claimOcrRecovery("ocr-protected-only", "protected-only"),
+    CacheFullError,
+  );
+  assert.ok(storage.rows["mt:page:protected-only"]);
+  assert.strictEqual(storage.rows["mt:ocr-recovery:ocr-protected-only"], undefined);
+});
+
+test("OCR recovery ledger is collected only after its last PageRow disappears", async (t) => {
+  await t.test("explicit removal keeps a shared ledger until the second page is removed", async () => {
+    const storage = fakeStorage();
+    const cache = new PageCache(storage);
+    await cache.putPage({ ...page("shared-a", "partial", 1), ocr_key: "ocr-shared" });
+    await cache.putPage({ ...page("shared-b", "partial", 2), ocr_key: "ocr-shared" });
+    await cache.claimOcrRecovery("ocr-shared", "shared-a");
+
+    await cache.removePage("shared-a");
+    assert.ok(storage.rows["mt:ocr-recovery:ocr-shared"]);
+    await cache.removePage("shared-b");
+    assert.strictEqual(storage.rows["mt:ocr-recovery:ocr-shared"], undefined);
+  });
+
+  await t.test("version purge removes the ledger orphaned by its last stale page", async () => {
+    const storage = fakeStorage();
+    const cache = new PageCache(storage);
+    await cache.putPage({ ...page("stale", "partial", 1), ocr_key: "ocr-stale", versions: { prompt: "v1" } });
+    await cache.claimOcrRecovery("ocr-stale", "stale");
+
+    assert.strictEqual(await cache.purgeIncompatible({ prompt: "v2" }), 1);
+    assert.strictEqual(storage.rows["mt:ocr-recovery:ocr-stale"], undefined);
+  });
+
+  await t.test("budget eviction also collects the evicted page's orphan ledger", async () => {
+    const seed = {
+      "mt:page:protected": { ...page("protected", "partial", 2, "p".repeat(120)), ocr_key: "ocr-new" },
+      "mt:page:old": { ...page("old", "complete", 1, "o".repeat(120)), ocr_key: "ocr-old" },
+      "mt:ocr-recovery:ocr-old": { schema_version: "ocr-recovery-v1" },
+    };
+    const storage = fakeStorage(seed);
+    const cache = new PageCache(storage, {
+      budgetBytes: new TextEncoder().encode(JSON.stringify(seed)).byteLength,
+    });
+
+    await cache.claimOcrRecovery("ocr-new", "protected");
+
+    assert.strictEqual(storage.rows["mt:page:old"], undefined);
+    assert.strictEqual(storage.rows["mt:ocr-recovery:ocr-old"], undefined);
+  });
+});
+
 (async () => {
   const storage = fakeStorage();
   const cache = new PageCache(storage, { budgetBytes: 1300, now: () => 10 });

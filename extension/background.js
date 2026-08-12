@@ -455,10 +455,21 @@ function emit(producer, type, extra = {}) {
 }
 function persist(producer) {
   if (!producer.persistUntilDone || !pageCache) return Promise.resolve();
+  if (producer.ocrRecovery && !producer.ocrRecovery.committing) return Promise.resolve();
   producer.persistChain = producer.persistChain.then(() => serializePageWrite(producer.pageKey, async () => {
     const current = await pageCache.getPage(producer.pageKey);
     if (current && (current.render_artifact_key !== producer.page.render_artifact_key ||
         !metadataEqual(current.patch_versions, producer.page.patch_versions))) return;
+    if (producer.ocrRecovery) {
+      const currentRender = current?.render;
+      delete producer.page.render;
+      if (sameManifest(current?.manifest_ids, producer.page.manifest_ids) &&
+          currentRender?.render_artifact_key === producer.page.render_artifact_key &&
+          currentRender.layout_fit_version === LAYOUT_FIT_VERSION &&
+          metadataEqual(currentRender.patch_versions, producer.page.patch_versions)) {
+        producer.page.render = currentRender;
+      }
+    }
     await pageCache.putPage(producer.page);
   })).catch(() => { producer.page.last_error = "cache_failed"; });
   return producer.persistChain;
@@ -472,6 +483,21 @@ function createProducer(descriptor, keys, page, sourceIdentity, sourceAcquisitio
   const createdAt = Date.now();
   const record = page || { schema_version: serverVersions.page_schema, page_artifact_key: keys.pageArtifactKey, analysis_key: keys.analysisKey, ocr_key: keys.ocrKey, render_artifact_key: keys.renderArtifactKey, source_content_hash: keys.sourceContentHash, source_url: descriptor.source_url, crop: keys.crop, natural_width: descriptor.natural_width, natural_height: descriptor.natural_height, src_lang: descriptor.src_lang, dst_lang: descriptor.dst_lang, reading_direction: descriptor.reading_direction, versions: serverVersions, patch_versions: serverPatchVersions, state: "queued", analysis_known: false, ocr_done: false, image_w: null, image_h: null, blocks: [], manifest_mismatch_count: 0, created_at: createdAt, updated_at: createdAt, last_accessed_at: createdAt, last_error: null };
   return { pageKey: keys.pageArtifactKey, analysisKey: keys.analysisKey, ocrKey: keys.ocrKey, ocrStageKey: keys.ocrKey, renderArtifactKey: keys.renderArtifactKey, sourceIdentity, sourceAcquisition, descriptor, page: record, consumers: new Map(), jobIds: new Set(), persistUntilDone: false, prewarmOnly: descriptor.scope === "prewarm", state: "queued", translationReady: null, renderReady: null, renderArtifact: null, translationBatchTrace: [], persistChain: Promise.resolve(), cancelled: false, retired: false, timings: { accepted: now() }, durations: { fetch_ms: descriptor.source_fetch_ms ?? null, analysis_ms: null }, analysisCacheHit: null, ocrSummary: null, counters: { translation_calls: 0, rate_limited: 0, stale_work: 0 } };
+}
+function resetProducerForOcrRecovery(producer, artifact, delivered) {
+  const baseline = JSON.parse(JSON.stringify(producer.page));
+  producer.ocrRecovery = { baseline, artifact, delivered, committing: false };
+  producer.page = JSON.parse(JSON.stringify(baseline));
+  producer.page.state = "queued";
+  producer.page.ocr_done = false;
+  producer.page.blocks = [];
+  producer.page.last_error = null;
+  delete producer.page.manifest_ids;
+  delete producer.page.render;
+  producer.translationReady = null;
+  producer.renderReady = null;
+  producer.renderArtifact = null;
+  producer.forceTranslationNetwork = true;
 }
 function reusableProducer(producer, keys, page = null) {
   return producer && !producer.cancelled && !producer.retired &&
@@ -574,6 +600,34 @@ async function attachDescriptor(request, descriptor, ledger, sourceIdentity, sou
     return;
   }
   const hasManifest = page != null && Object.hasOwn(page, "manifest_ids");
+  const incompleteOcrReplay = hasManifest && page.state === "partial" && page.ocr_done === false;
+  if (incompleteOcrReplay) {
+    const producer = createProducer(descriptor, keys, page, sourceIdentity, sourceAcquisition);
+    const artifact = await fetchRenderArtifact(producer);
+    request.port?.postMessage({ type: "page_job_accepted", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, state: page.state });
+    const delivered = replayPage(request, descriptor.job_id, page, true, artifact);
+    const claimed = await pageCache.claimOcrRecovery(keys.ocrKey, keys.pageArtifactKey);
+    request.sourceAcquisitions.delete(descriptor.job_id);
+    request.sourceDescriptors.delete(descriptor.job_id);
+    if (!claimed) {
+      request.port?.postMessage({ type: "image_done", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, translated: delivered, failed: 0 });
+      completeJob(request, descriptor.job_id, delivered, 0, true, { recognized: page.blocks.length, failed: 0 }, null, null, { pageKey: page.page_artifact_key });
+      releaseProducerSource(producer);
+      await pageCache.removeJob(descriptor.job_id);
+      return;
+    }
+    resetProducerForOcrRecovery(producer, artifact, delivered);
+    producer.ocrStage = attachStage(ocrStages, producer.ocrStageKey, producer);
+    producer.analysisStage = attachStage(analysisStages, producer.analysisKey, producer);
+    producer.persistUntilDone = true;
+    producer.prewarmOnly = false;
+    producer.consumers.set(consumerKey(request.requestId, descriptor.job_id), { requestId: request.requestId, jobId: descriptor.job_id, port: request.port });
+    producer.jobIds.add(descriptor.job_id);
+    request.jobs.set(descriptor.job_id, producer);
+    request.pendingJobs.push(producer);
+    producers.set(producer.pageKey, producer);
+    return;
+  }
   const terminalHit = hasManifest && page.state === "complete" && page.ocr_done === true;
   if (terminalHit) {
     request.sourceAcquisitions.delete(descriptor.job_id);
@@ -642,12 +696,13 @@ function accepted(request, descriptor, page, cacheHit, artifact = null) {
 }
 function replayPage(request, jobId, page, cacheHit, artifact = null) {
   if (page.image_w) request.port?.postMessage({ type: "progress", request_id: request.requestId, job_id: jobId, image_w: page.image_w, image_h: page.image_h });
-  if (!artifact || !Object.hasOwn(page, "manifest_ids")) return;
+  if (!artifact || !Object.hasOwn(page, "manifest_ids")) return 0;
   const events = renderableTranslationEvents(page, artifact);
   prepareRenderOutcomeCollector(page, artifact, [{ requestId: request.requestId, jobId, port: request.port }]);
   for (const event of events) {
     request.port?.postMessage({ ...event, type: "translation", request_id: request.requestId, job_id: jobId, page_artifact_key: page.page_artifact_key, cache_hit: cacheHit === true });
   }
+  return events.length;
 }
 async function acceptScope(port, message) {
   await ready;
@@ -1096,7 +1151,7 @@ async function consumeOcr(producer) {
     let includeImage = await needsAnalysisImage(producer, analysis);
     try {
       let response = await openOcrStream(producer, includeImage);
-      if (response.status === 409 && !producer.retriedAnalysis) {
+      if (response.status === 409 && !producer.ocrRecovery && !producer.retriedAnalysis) {
         producer.retriedAnalysis = true;
         if (!analysis.owner) {
           if (analysis.failed) resetAnalysisDeferred(analysis);
@@ -1156,6 +1211,16 @@ async function consumeOcr(producer) {
   return stage.promise;
 }
 function ocrBlockFromEvent(event) { return { block_id: event.block_id, bbox: event.bbox, src_text: event.src_text ?? event.text, trans_text: null, kind: event.kind ?? null, vertical: event.vertical === true, reading_order: null, state: "ocr_complete" }; }
+function sameOcrSnapshot(left, right) {
+  const snapshot = (blocks, fallback = []) => blocks.map((block, index) => ({
+    block_id: block.block_id,
+    bbox: block.bbox,
+    src_text: block.src_text,
+    kind: block.kind ?? fallback[index]?.kind ?? null,
+    vertical: block.vertical === true,
+  }));
+  return JSON.stringify(snapshot(left)) === JSON.stringify(snapshot(right, left));
+}
 async function applyOcrBlock(producer, event) { const block = ocrBlockFromEvent(event); mark(producer, "first_ocr"); if (!producer.page.blocks.some((row) => row.block_id === block.block_id)) producer.page.blocks.push(block); await persist(producer); }
 async function translationKeyForBatch(producer, blocks, block) {
   const contextHash = await hashValue(blocks.map((block, reading_order) => ({
@@ -1354,6 +1419,12 @@ async function runProducer(producer) {
   try {
     if (!producer.page.ocr_done) await consumeOcr(producer);
     if (producer.retired) return;
+    if (producer.ocrRecovery &&
+        (!producer.page.ocr_done || (producer.blockErrors || 0) > 0 || (producer.ocrSummary?.failed || 0) > 0)) {
+      const error = new Error("OCR recovery incomplete");
+      error.errorCode = "ocr_incomplete";
+      throw error;
+    }
     if (producer.prewarmOnly) {
       releaseProducerStages(producer);
       producers.delete(producer.pageKey);
@@ -1379,6 +1450,18 @@ async function runProducer(producer) {
       error.errorCode ||= "reading_order_failed";
       throw error;
     }
+    if (producer.ocrRecovery && sameOcrSnapshot(producer.ocrRecovery.baseline.blocks, producer.page.blocks)) {
+      const recovered = producer.page;
+      producer.page = JSON.parse(JSON.stringify(producer.ocrRecovery.baseline));
+      producer.page.analysis_known = recovered.analysis_known;
+      producer.page.ocr_done = true;
+      producer.page.image_w = recovered.image_w;
+      producer.page.image_h = recovered.image_h;
+      producer.page.last_error = null;
+      producer.renderArtifact = producer.ocrRecovery.artifact;
+      await finishProducer(producer, { translated: producer.ocrRecovery.delivered, failed: 0 });
+      return;
+    }
     ordered.blocks.forEach((block, readingOrder) => {
       const stored = producer.page.blocks.find((row) => row.block_id === block.block_id);
       if (stored) stored.reading_order = readingOrder;
@@ -1398,7 +1481,7 @@ async function runProducer(producer) {
     for (const event of events) emit(producer, "translation", event);
     await finishProducer(producer, summary);
   } catch (error) {
-    if (!producer.retired && error?.errorCode === "manifest_mismatch") {
+    if (!producer.retired && !producer.ocrRecovery && error?.errorCode === "manifest_mismatch") {
       try {
         const action = await handleManifestMismatch(producer);
         if (action === "recover") {
@@ -1423,7 +1506,12 @@ async function removeProducerJobs(producer) {
 }
 async function finishProducer(producer, summary) {
   const failed = summary.failed + (producer.blockErrors || 0);
+  if (producer.ocrRecovery && failed) {
+    await failOcrRecovery(producer, new Error("OCR recovery incomplete"));
+    return;
+  }
   producer.page.state = failed ? "partial" : "complete";
+  if (producer.ocrRecovery) producer.ocrRecovery.committing = true;
   await persist(producer);
   await producer.persistChain;
   if (producer.retired) return;
@@ -1435,7 +1523,24 @@ async function finishProducer(producer, summary) {
   releaseProducerSource(producer);
   await removeProducerJobs(producer);
 }
+async function failOcrRecovery(producer, error) {
+  const recovery = producer.ocrRecovery;
+  producer.page = recovery.baseline;
+  if (producer.retired) return;
+  emit(producer, "image_done", { translated: recovery.delivered, failed: 1 });
+  const metrics = producerMetrics(producer);
+  const errorCode = error?.errorCode || "request_failed";
+  for (const consumer of producer.consumers.values()) completeJob(requests.get(consumer.requestId), consumer.jobId, recovery.delivered, 1, false, metrics, producer.counters, producer, { pageKey: producer.pageKey, errorCode, acceptedAt: producer.timings.accepted });
+  releaseProducerStages(producer);
+  if (producers.get(producer.pageKey) === producer) producers.delete(producer.pageKey);
+  releaseProducerSource(producer);
+  await removeProducerJobs(producer);
+}
 async function failProducer(producer, error) {
+  if (producer.ocrRecovery) {
+    await failOcrRecovery(producer, error);
+    return;
+  }
   producer.page.last_error = String(error);
   producer.page.state = producer.page.analysis_known || producer.page.blocks.length ? "partial" : "failed";
   await persist(producer);
