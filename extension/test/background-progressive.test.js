@@ -1895,9 +1895,20 @@ test("background progressive transport", { timeout: 30000 }, async () => {
       port.sent.filter((event) => event.type === "image_done").map((event) => ({
         translated: event.translated, recognized: event.recognized, failed: event.failed,
       })),
-      [{ translated: 1, recognized: 2, failed: 1 }],
+      [{ translated: 1, recognized: 2, failed: 0 }],
     );
-    assert.deepStrictEqual({ translated: done.translated, failed: done.failed }, { translated: 1, failed: 1 });
+    assert.deepStrictEqual(
+      { translated: done.translated, failed: done.failed, cache_hit: done.cache_hit },
+      { translated: 1, failed: 0, cache_hit: true },
+    );
+    assert.deepStrictEqual(
+      { state: app.page(keys.pageArtifactKey).state, last_error: app.page(keys.pageArtifactKey).last_error },
+      { state: "complete", last_error: null },
+    );
+    assert.deepStrictEqual(
+      done.page_metrics.map((row) => ({ cache_hit: row.cache_hit, error_code: row.error_code })),
+      [{ cache_hit: true, error_code: null }],
+    );
   });
 
   await scenario("disconnected consumers receive no delivery or terminal", async () => {

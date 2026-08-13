@@ -734,8 +734,10 @@ function replayPage(request, jobId, page, cacheHit, artifact = null) {
   const events = renderableTranslationEvents(page, artifact);
   prepareRenderOutcomeCollector(page, artifact, [{ requestId: request.requestId, jobId, port: request.port }]);
   for (const event of events) {
-    if (!request.connected || request.done.has(jobId) || !request.port) continue;
-    request.port.postMessage({ ...event, type: "translation", request_id: request.requestId, job_id: jobId, page_artifact_key: page.page_artifact_key, cache_hit: cacheHit === true });
+    if (!request.connected || request.done.has(jobId) || !request.port) break;
+    try {
+      request.port.postMessage({ ...event, type: "translation", request_id: request.requestId, job_id: jobId, page_artifact_key: page.page_artifact_key, cache_hit: cacheHit === true });
+    } catch { break; }
     request.deliveredByJob.get(jobId)?.add(event.block_id);
   }
   return request.deliveredByJob.get(jobId)?.size ?? 0;
