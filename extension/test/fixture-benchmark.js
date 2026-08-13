@@ -15,7 +15,8 @@
       status.textContent = `COLD ${cold + 1}/20`;
       return;
     }
-    const translatedText = document.querySelector(".mt-translated-text");
+    const renderedBlock = document.querySelector(".mt-render-block");
+    const translatedText = renderedBlock?.querySelector?.(".mt-translated-text");
     if (!translatedText || !translatedText.textContent.trim()) return;
     armed = false;
     if (!warmup) cold++;

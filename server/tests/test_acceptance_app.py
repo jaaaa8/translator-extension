@@ -1,7 +1,11 @@
 import asyncio
+import base64
 import json
+import struct
 import time
+import zlib
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -16,6 +20,16 @@ from server.acceptance_app import (
     page_png,
     state,
     wait_gate,
+)
+
+EXPECTED_LONG_TRANSLATION = (
+    "vi:long acceptance translation long acceptance translation "
+    "long acceptance translation long acceptance translation long acceptance translation "
+    "long acceptance translation long acceptance translation long acceptance translation "
+    "long acceptance translation long acceptance translation long acceptance translation "
+    "long acceptance translation long acceptance translation long acceptance translation "
+    "long acceptance translation long acceptance translation long acceptance translation "
+    "long acceptance translation long acceptance translation long acceptance translation"
 )
 
 
@@ -99,6 +113,33 @@ def ndjson(response):
     return [json.loads(line) for line in response.text.splitlines() if line.strip()]
 
 
+def decode_rgba_png(encoded: str) -> tuple[int, int, int, bytes]:
+    payload = base64.b64decode(encoded, validate=True)
+    assert payload.startswith(b"\x89PNG\r\n\x1a\n")
+    offset = 8
+    chunks = []
+    while offset < len(payload):
+        length = struct.unpack(">I", payload[offset:offset + 4])[0]
+        kind = payload[offset + 4:offset + 8]
+        data = payload[offset + 8:offset + 8 + length]
+        crc = struct.unpack(">I", payload[offset + 8 + length:offset + 12 + length])[0]
+        assert zlib.crc32(kind + data) & 0xFFFFFFFF == crc
+        chunks.append((kind, data))
+        offset += 12 + length
+        if kind == b"IEND":
+            break
+    assert offset == len(payload)
+    assert [kind for kind, _ in chunks] == [b"IHDR", b"IDAT", b"IEND"]
+    width, height, bit_depth, color_type, compression, filtering, interlace = (
+        struct.unpack(">IIBBBBB", chunks[0][1])
+    )
+    assert (bit_depth, compression, filtering, interlace) == (8, 0, 0, 0)
+    scanline = zlib.decompress(chunks[1][1])
+    assert len(scanline) == 1 + width * height * 4
+    assert scanline[0] == 0
+    return width, height, color_type, scanline[1:]
+
+
 def test_health_exposes_complete_fixed_versions_for_extension_keys():
     with client() as http:
         payload = http.get("/health").json()
@@ -109,27 +150,8 @@ def test_health_exposes_complete_fixed_versions_for_extension_keys():
             config.PIPELINE_VERSIONS["recognizers"]
         )
         assert payload["versions"]["layout_order"] == "reading-order-v1"
-        assert payload["versions"] == {
-            "detector": "acceptance-detector-v1",
-            "dedupe": "acceptance-dedupe-v1",
-            "prep": "acceptance-prep-v1",
-            "region_resolver": "acceptance-region-resolver-v1",
-            "recognizers": {
-                "ja": "acceptance-recognizer-ja-v1",
-                "es": "acceptance-recognizer-es-v1",
-                "pt": "acceptance-recognizer-pt-v1",
-            },
-            "translator_model": "acceptance-translator-v1",
-            "prompt": "acceptance-prompt-v1",
-            "policy": "acceptance-policy-v1",
-            "layout_order": "reading-order-v1",
-            "page_schema": "page-v2",
-        }
-        assert payload["patch_versions"] == {
-            "cleaner": "acceptance-cleaner-v1",
-            "render_encoding": "png-rgba-v1",
-            "render_schema": "render-v1",
-        }
+        assert payload["versions"] == config.PIPELINE_VERSIONS
+        assert payload["patch_versions"] == config.PATCH_VERSIONS
 
 
 def test_health_fixture_and_assets_are_isolated_and_deterministic():
@@ -145,6 +167,8 @@ def test_health_fixture_and_assets_are_isolated_and_deterministic():
         assert all(response.headers["cache-control"] == "no-store" for response in payloads)
         assert len({response.content for response in payloads}) == 4
         assert [response.content for response in payloads] == [page_png(page) for page in "ABCD"]
+        benchmark = http.get("/assets/A.png?benchmark=1")
+        assert benchmark.headers["cache-control"] == "public, max-age=31536000, immutable"
 
 
 def test_control_validation_reset_release_and_snapshot():
@@ -338,6 +362,7 @@ def test_ocr_stream_holds_releases_and_preserves_good_block_on_fault():
         assert events[-1] == {
             "type": "image_done", "recognized": 1, "failed": 1
         }
+        assert events[1]["vertical"] is False
 
 
 def test_ocr_stream_requires_or_reuses_analysis_image_mapping():
@@ -363,6 +388,8 @@ def test_ocr_stream_requires_or_reuses_analysis_image_mapping():
 
         cold = http.post("/ocr-stream", **ocr_form("A", "analysis-A", "ocr-cold"))
         assert cold.status_code == 200
+        assert ndjson(cold)[0]["analysis_cache_hit"] is False
+        assert ndjson(cold)[0]["analysis_ms"] == 0
         warm = http.post("/ocr-stream", data={
             "analysis_key": "analysis-A",
             "ocr_key": "ocr-warm",
@@ -370,6 +397,7 @@ def test_ocr_stream_requires_or_reuses_analysis_image_mapping():
             "render_artifact_key": "render-A",
         })
         assert warm.status_code == 200
+        assert ndjson(warm)[0]["analysis_cache_hit"] is True
         assert ndjson(warm)[1]["block_id"] == "A-1"
         assert ndjson(warm)[1]["src_text"] == "A:block-1"
 
@@ -411,9 +439,168 @@ def test_translation_batch_fault_is_consumed_once_and_ids_stay_exact():
             {"id": "D-4", "text": "D:block-4", "reading_order": 0, "bbox": [13, 14, 15, 16]},
         ], src_lang="ja"))
         assert second.status_code == 200
-        assert second.json() == {
-            "items": [{"id": "D-4", "translation": "vi:D:block-4"}]
+        row = second.json()["items"][0]
+        assert row == {
+            "id": "D-4",
+            "kind": "text",
+            "translation": EXPECTED_LONG_TRANSLATION,
         }
+
+
+def test_synthetic_pages_freeze_translation_manifest_and_render_candidates():
+    expected = {
+        "A": {
+            "translation_row": {
+                "id": "A-1", "kind": "text", "translation": "vi:A:block-1",
+            },
+            "fit_bbox": [80, 80, 240, 120],
+            "manifest": {"A-1"}, "rendered": {"A-1"}, "skips": {}, "coverage": 1.0,
+        },
+        "B": {
+            "translation_row": {"id": "B-1", "kind": "sfx", "translation": None},
+            "fit_bbox": [80, 80, 240, 120],
+            "manifest": set(), "rendered": set(), "skips": {}, "coverage": None,
+        },
+        "C": {
+            "translation_row": {
+                "id": "C-1", "kind": "text", "translation": "vi:C:block-1",
+            },
+            "fit_bbox": [80, 80, 240, 120],
+            "manifest": {"C-1"}, "rendered": set(),
+            "skips": {"C-1": "unsupported_region"}, "coverage": 0.0,
+        },
+        "D": {
+            "translation_row": {
+                "id": "D-1", "kind": "text",
+                "translation": EXPECTED_LONG_TRANSLATION,
+            },
+            "fit_bbox": [80, 80, 12, 12],
+            "manifest": {"D-1"}, "rendered": set(),
+            "skips": {"D-1": "fit_failed"}, "coverage": 0.0,
+        },
+    }
+    with client() as http:
+        post_json(http, "/__acceptance/reset")
+        for page, golden in expected.items():
+            analysis_key = f"analysis-{page}"
+            render_key = f"render-{page}"
+            events = ndjson(http.post(
+                "/ocr-stream",
+                **ocr_form(page, analysis_key, f"ocr-{page}"),
+            ))
+            block = next(row for row in events if row["type"] == "ocr_block")
+            translated = http.post("/translate-items", json=translate_body([
+                {
+                    "id": block["block_id"],
+                    "text": block["src_text"],
+                    "reading_order": 0,
+                    "bbox": block["bbox"],
+                }
+            ], src_lang="ja")).json()["items"]
+            assert translated == [golden["translation_row"]]
+            assert all(set(row) == {"id", "kind", "translation"} for row in translated)
+            manifest = {row["id"] for row in translated if row["kind"] == "text"}
+            assert manifest == golden["manifest"]
+
+            artifact = http.post("/render-artifact", data={
+                "analysis_key": analysis_key,
+                "render_artifact_key": render_key,
+                "source_content_hash": "unused-on-key-hit",
+            })
+            assert artifact.status_code == 200
+            payload = artifact.json()
+            assert payload["render_artifact_key"] == render_key
+            for row in payload["blocks"]:
+                if row["reason"] is None:
+                    assert row["patch_mime"] == "image/png"
+                    width, height, color_type, pixels = decode_rgba_png(row["patch_rgba"])
+                    assert (width, height, color_type, len(pixels)) == (1, 1, 6, 4)
+                    repeated = http.post("/render-artifact", data={
+                        "analysis_key": "ignored-on-key-hit",
+                        "render_artifact_key": render_key,
+                        "source_content_hash": "ignored-on-key-hit",
+                    }).json()
+                    repeated_row = next(
+                        item for item in repeated["blocks"]
+                        if item["block_id"] == row["block_id"]
+                    )
+                    assert repeated_row["patch_rgba"] == row["patch_rgba"]
+            candidates = {row["block_id"]: row for row in payload["blocks"]}
+            assert {tuple(row["fit_bbox"]) for row in payload["blocks"]} == {
+                tuple(golden["fit_bbox"])
+            }
+            candidate_reasons = {
+                block_id: (
+                    row["reason"]
+                    if row["reason"] is not None
+                    else "fit_failed"
+                    if row["fit_bbox"] == [80, 80, 12, 12]
+                    else None
+                )
+                for block_id, row in candidates.items()
+            }
+            rendered = {
+                block_id for block_id in manifest
+                if candidate_reasons[block_id] is None
+            }
+            skips = {
+                block_id: candidate_reasons[block_id]
+                for block_id in manifest
+                if candidate_reasons[block_id] is not None
+            }
+            coverage = len(rendered) / len(manifest) if manifest else None
+            assert rendered == golden["rendered"]
+            assert skips == golden["skips"]
+            assert coverage == golden["coverage"]
+
+        missing = http.post("/render-artifact", data={
+            "analysis_key": "missing-analysis",
+            "render_artifact_key": "missing-render",
+            "source_content_hash": "unused",
+        })
+        assert missing.status_code == 409
+        assert missing.json() == {"error": "artifact_missing"}
+
+
+def test_render_artifact_is_key_first_but_validates_source_on_a_key_miss():
+    with client() as http:
+        post_json(http, "/__acceptance/reset")
+        assert http.post(
+            "/ocr-stream", **ocr_form("A", "analysis-A", "render-source-A")
+        ).status_code == 200
+
+        key_hit = http.post("/render-artifact", data={
+            "analysis_key": "ignored-analysis",
+            "render_artifact_key": "render-A",
+            "source_content_hash": "ignored-on-key-hit",
+        }, files={"image": ("B.png", page_png("B"), "image/png")})
+        assert key_hit.status_code == 200
+        assert key_hit.json()["analysis_key"] == "analysis-A"
+        assert [row["block_id"] for row in key_hit.json()["blocks"]] == ["A-1"]
+
+        key_miss = http.post("/render-artifact", data={
+            "analysis_key": "fresh-analysis-A",
+            "render_artifact_key": "render-key-miss-valid",
+            "source_content_hash": sha256(page_png("A")).hexdigest(),
+        }, files={"image": ("A.png", page_png("A"), "image/png")})
+        assert key_miss.status_code == 200
+        assert {
+            "render_artifact_key": key_miss.json()["render_artifact_key"],
+            "analysis_key": key_miss.json()["analysis_key"],
+            "block_ids": [row["block_id"] for row in key_miss.json()["blocks"]],
+        } == {
+            "render_artifact_key": "render-key-miss-valid",
+            "analysis_key": "fresh-analysis-A",
+            "block_ids": ["A-1"],
+        }
+
+        mismatch = http.post("/render-artifact", data={
+            "analysis_key": "analysis-A",
+            "render_artifact_key": "render-key-miss",
+            "source_content_hash": sha256(page_png("A")).hexdigest(),
+        }, files={"image": ("B.png", page_png("B"), "image/png")})
+        assert mismatch.status_code == 409
+        assert mismatch.json() == {"error": "source_identity_mismatch"}
 
 
 def test_translation_holds_then_returns_each_input_id_once():

@@ -2200,6 +2200,45 @@ test("background progressive transport", { timeout: 30000 }, async () => {
     );
   });
 
+  await scenario("manifest recovery measures render wait from the recovery run", async () => {
+    let tick = 0;
+    const server = createFakeServer();
+    server.setRenderRows("manifest-recovery-timing", []);
+    server.holdRender("manifest-recovery-timing");
+    const app = createBackgroundApp({ server, clock: { now: () => tick } });
+    await app.ready();
+    const job = app.job("manifest-recovery-timing-job", "https://x/manifest-recovery-timing.jpg");
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const port = app.connect();
+    port.receive(app.startScope("manifest-recovery-timing", "visible", job));
+    await waitUntil(
+      () => server.counts.ocr === 1 && server.counts.translate === 1 && server.counts.render === 1,
+      "initial manifest-mismatch run",
+    );
+    server.beforeNextOcr(() => {
+      tick = 20;
+      server.setRenderRows("manifest-recovery-timing", [{
+        block_id: "b1", patch_id: "patch-b1", patch_bbox: [1, 2, 3, 4], clean_region: [1, 2, 3, 4],
+        fit_bbox: [1, 2, 3, 4], patch_mime: "image/png", patch_rgba: Buffer.from("patch:b1").toString("base64"), reason: null,
+      }]);
+      server.holdTranslation("vi");
+      server.holdRender("manifest-recovery-timing");
+    });
+    tick = 10;
+    server.releaseRender("manifest-recovery-timing");
+    await waitUntil(() => server.counts.translate === 2, "recovery translation request");
+    server.releaseTranslation("vi");
+    await waitUntil(
+      () => app.producer(keys.pageArtifactKey)?.timings.final_translation === 20,
+      "recovery final translation timing",
+    );
+    tick = 37;
+    server.releaseRender("manifest-recovery-timing");
+    const done = await app.waitFor("scope_done", port);
+    assert.strictEqual(done.page_metrics[0].manifest_mismatch, true);
+    assert.strictEqual(done.page_metrics[0].render_wait_after_translation_ms, 17);
+  });
+
   await scenario("first fresh manifest mismatch claims before one paid recovery and preserves the claim", async () => {
     const storage = fakeStorage();
     const server = createFakeServer();
@@ -3590,6 +3629,7 @@ test("background progressive transport", { timeout: 30000 }, async () => {
     );
     assert.strictEqual(app.page(keys.pageArtifactKey).ocr_done, true);
     assert.deepStrictEqual(app.page(keys.pageArtifactKey).manifest_ids, ["new"]);
+    assert.strictEqual(done.page_metrics[0].partial_replay, true);
   });
 
   await scenario("target replacement cannot persist an OCR recovery scratch page", async () => {
@@ -4255,6 +4295,29 @@ test("background progressive transport", { timeout: 30000 }, async () => {
     assert.strictEqual(row.job_id, "job-1");
     assert.strictEqual(row.analysis_ms, 0);
     assert.strictEqual(row.analysis_cache_hit, false);
+    assert.deepStrictEqual({
+      overlay_semantics: row.overlay_semantics,
+      partial_replay: row.partial_replay,
+      cache_hit: row.cache_hit,
+      render_coverage: row.render_coverage,
+      render_reason_counts: row.render_reason_counts,
+      manifest_mismatch: row.manifest_mismatch,
+      source_unavailable: row.source_unavailable,
+      painted: row.painted,
+      error_code: row.error_code,
+    }, {
+      overlay_semantics: "atomic_patch_v1",
+      partial_replay: false,
+      cache_hit: false,
+      render_coverage: null,
+      render_reason_counts: {},
+      manifest_mismatch: false,
+      source_unavailable: false,
+      painted: null,
+      error_code: null,
+    });
+    assert.ok(Number.isFinite(row.render_wait_after_translation_ms));
+    assert.strictEqual(Object.hasOwn(row, "render_ready_ms"), false);
     assert.ok(Number.isFinite(row.ocr_done_ms));
     assert.ok(Number.isFinite(row.final_translation_ms));
     assert.deepStrictEqual(row.translation_batches[0].block_ids, ["b1", "b2", "b3"]);
@@ -4288,11 +4351,51 @@ test("background progressive transport", { timeout: 30000 }, async () => {
     const lateJob = app.job("late-job", "https://x/late.jpg");
     port.receive(app.startScope("late-metrics", "visible", lateJob));
     await waitUntil(() => port.sent.some((event) => event.type === "scope_done" && event.request_id === "late-metrics"), "late metric scope completion");
-    port.receive({ type: "render_metric", request_id: "late-metrics", job_id: "late-job", first_overlay_ms: 7 });
+    port.receive({ type: "render_metric", request_id: "late-metrics", job_id: "late-job", first_overlay_ms: 7, cache_hit: true, partial_replay: true, analysis_cache_hit: true });
     port.receive({ type: "render_metric", request_id: "late-metrics", job_id: "stale-job", first_overlay_ms: 0 });
     const lateSample = JSON.parse(vm.runInContext("JSON.stringify(metricSamplesByRequest.get('late-metrics'))", app.context));
     assert.strictEqual(lateSample.first_overlay_ms, 7);
     assert.deepStrictEqual(lateSample.page_metrics.map((row) => [row.job_id, row.first_overlay_ms]), [["late-job", 7]]);
+    assert.deepStrictEqual(
+      lateSample.page_metrics.map((row) => [row.cache_hit, row.partial_replay, row.analysis_cache_hit]),
+      [[false, false, null]],
+    );
+  });
+
+  await scenario("atomic benchmark summary flattens only strict page metric cohorts", async () => {
+    const app = createBackgroundApp();
+    await app.ready();
+    app.context.__samples = [
+      { first_overlay_ms: 1, page_metrics: [
+        { overlay_semantics: "atomic_patch_v1", cache_hit: false, partial_replay: false, analysis_cache_hit: false, first_overlay_ms: 40, render_wait_after_translation_ms: 9 },
+        { overlay_semantics: "atomic_patch_v1", cache_hit: false, partial_replay: false, analysis_cache_hit: false, first_overlay_ms: null, render_wait_after_translation_ms: 99 },
+        { overlay_semantics: "atomic_patch_v1", cache_hit: null, partial_replay: false, analysis_cache_hit: false, first_overlay_ms: 1, render_wait_after_translation_ms: 1 },
+      ] },
+      { first_overlay_ms: 2, page_metrics: [
+        { overlay_semantics: "atomic_patch_v1", cache_hit: true, partial_replay: false, analysis_cache_hit: false, first_overlay_ms: 8, render_wait_after_translation_ms: null },
+        { overlay_semantics: "atomic_patch_v1", cache_hit: false, partial_replay: true, analysis_cache_hit: false, first_overlay_ms: 2, render_wait_after_translation_ms: 2 },
+        { overlay_semantics: "atomic_patch_v1", cache_hit: false, partial_replay: false, analysis_cache_hit: true, first_overlay_ms: 3, render_wait_after_translation_ms: 3 },
+        { cache_hit: false, partial_replay: false, analysis_cache_hit: false, first_overlay_ms: 4, render_wait_after_translation_ms: 4 },
+      ] },
+    ];
+    vm.runInContext("metricSamples.length = 0; metricSamples.push(...__samples)", app.context);
+    const summary = JSON.parse(JSON.stringify(await app.message({ type: "benchmarkSummary" })));
+    assert.deepStrictEqual(summary.atomic_patch_v1, {
+      warm: { sample_count: 1, first_overlay_ms: { p50: 8, p95: 8 } },
+      cold: {
+        sample_count: 1,
+        first_overlay_ms: { p50: 40, p95: 40 },
+        render_wait_after_translation_ms: { p50: 9, p95: 9 },
+      },
+    });
+
+    vm.runInContext("metricSamples.length = 0; metricSamples.push({ page_metrics: [{ overlay_semantics: 'atomic_patch_v1', cache_hit: null, partial_replay: false, analysis_cache_hit: false, first_overlay_ms: 1 }] })", app.context);
+    const empty = JSON.parse(JSON.stringify(await app.message({ type: "benchmarkSummary" }))).atomic_patch_v1.cold;
+    assert.deepStrictEqual(empty, {
+      sample_count: 0,
+      first_overlay_ms: { p50: null, p95: null },
+      render_wait_after_translation_ms: { p50: null, p95: null },
+    });
   });
 
   await scenario("producer accepted offsets preserve zero and shared negative values", async () => {

@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import ipaddress
 import json
 import struct
@@ -13,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .contracts import TranslateItemsBody, translate_items_validation_error
+from . import config
 
 PAGES = frozenset("ABCD")
 STAGES = frozenset({"source", "ocr", "translation"})
@@ -21,7 +23,9 @@ EVENT_LIMIT = 500
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "extension" / "test" / "fixture.html"
 BASE_PNG = (ROOT / "extension" / "test" / "ja_page.png").read_bytes()
-ASSET_HEADERS = {"Cache-Control": "no-store"}
+NO_STORE_HEADERS = {"Cache-Control": "no-store"}
+IMMUTABLE_HEADERS = {"Cache-Control": "public, max-age=31536000, immutable"}
+LONG_TRANSLATION = " ".join(["long acceptance translation"] * 20)
 
 COUNTER_KEYS = (
     "page_load",
@@ -94,6 +98,30 @@ def page_png(page: str) -> bytes:
     return BASE_PNG[:iend] + chunk + BASE_PNG[iend:]
 
 
+def patch_png(page: str) -> bytes:
+    rgba = {
+        "A": b"\xff\xff\xff\xff",
+        "B": b"\xff\xff\xff\x00",
+        "C": b"\x00\x00\x00\x00",
+        "D": b"\xff\xff\xff\xff",
+    }[page]
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + kind
+            + data
+            + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+        )
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(b"\x00" + rgba))
+        + chunk(b"IEND", b"")
+    )
+
+
 PAGE_BY_DIGEST = {sha256(page_png(page)).hexdigest(): page for page in PAGES}
 
 
@@ -106,6 +134,7 @@ class AcceptanceState:
         self.events: deque[dict[str, object]] = deque(maxlen=EVENT_LIMIT)
         self.sequence = 0
         self.analysis_pages: dict[str, str] = {}
+        self.render_pages: dict[str, tuple[str, str]] = {}
         self.consumed_translation_faults: set[str] = set()
         self.generation = 0
 
@@ -138,6 +167,7 @@ class AcceptanceState:
             self.events.clear()
             self.sequence = 0
             self.analysis_pages.clear()
+            self.render_pages.clear()
             self.consumed_translation_faults.clear()
 
     async def snapshot(self) -> dict[str, object]:
@@ -195,6 +225,16 @@ class AcceptanceState:
     async def analysis_page(self, analysis_key: str) -> str | None:
         async with self.lock:
             return self.analysis_pages.get(analysis_key)
+
+    async def remember_render(
+        self, render_key: str, page: str, analysis_key: str
+    ) -> None:
+        async with self.lock:
+            self.render_pages[render_key] = (page, analysis_key)
+
+    async def render_page(self, render_key: str) -> tuple[str, str] | None:
+        async with self.lock:
+            return self.render_pages.get(render_key)
 
     async def block_count(self, page: str) -> int:
         async with self.lock:
@@ -285,27 +325,8 @@ async def wait_gate(
 async def health():
     return {
         "status": "ok",
-        "versions": {
-            "detector": "acceptance-detector-v1",
-            "dedupe": "acceptance-dedupe-v1",
-            "prep": "acceptance-prep-v1",
-            "region_resolver": "acceptance-region-resolver-v1",
-            "recognizers": {
-                "ja": "acceptance-recognizer-ja-v1",
-                "es": "acceptance-recognizer-es-v1",
-                "pt": "acceptance-recognizer-pt-v1",
-            },
-            "translator_model": "acceptance-translator-v1",
-            "prompt": "acceptance-prompt-v1",
-            "policy": "acceptance-policy-v1",
-            "layout_order": "reading-order-v1",
-            "page_schema": "page-v2",
-        },
-        "patch_versions": {
-            "cleaner": "acceptance-cleaner-v1",
-            "render_encoding": "png-rgba-v1",
-            "render_schema": "render-v1",
-        },
+        "versions": config.PIPELINE_VERSIONS,
+        "patch_versions": config.PATCH_VERSIONS,
     }
 
 
@@ -324,17 +345,21 @@ async def asset(page: str, request: Request):
         generation = await state.entered("source", page)
         try:
             if not await wait_gate("source", page, request, generation=generation):
-                return Response(status_code=499, headers=ASSET_HEADERS)
+                return Response(status_code=499, headers=NO_STORE_HEADERS)
             if await state.fails("source_after_load", page):
                 await state.record("source", page, "failed", generation)
-                return Response(status_code=500, headers=ASSET_HEADERS)
+                return Response(status_code=500, headers=NO_STORE_HEADERS)
             await state.record("source", page, "completed", generation)
         finally:
             await state.leave_source(generation)
     return Response(
         content=page_png(page),
         media_type="image/png",
-        headers=ASSET_HEADERS,
+        headers=(
+            IMMUTABLE_HEADERS
+            if request.query_params.get("benchmark") is not None
+            else NO_STORE_HEADERS
+        ),
     )
 
 
@@ -349,15 +374,19 @@ async def ocr_stream(
 ):
     if src_lang not in {"ja", "es", "pt"}:
         return JSONResponse(status_code=422, content={"error": "unsupported src_lang"})
+    cached_page = await state.analysis_page(analysis_key)
     if image is None:
-        page = await state.analysis_page(analysis_key)
+        page = cached_page
         if page is None:
             return JSONResponse(status_code=409, content={"error": "analysis_missing"})
+        analysis_cache_hit = True
     else:
         page = PAGE_BY_DIGEST.get(sha256(await image.read()).hexdigest())
         if page is None:
             return JSONResponse(status_code=422, content={"error": "unknown synthetic image"})
+        analysis_cache_hit = cached_page == page
         await state.remember_analysis(analysis_key, page)
+    await state.remember_render(render_artifact_key, page, analysis_key)
 
     block_count = await state.block_count(page)
     block_fault = await state.fails("ocr_block", page)
@@ -370,6 +399,8 @@ async def ocr_stream(
             "image_w": 800,
             "image_h": 1200,
             "regions": block_count,
+            "analysis_ms": 0,
+            "analysis_cache_hit": analysis_cache_hit,
         }) + "\n"
         if not await wait_gate("ocr", page, request, generation=generation):
             return
@@ -403,6 +434,59 @@ async def ocr_stream(
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
 
+@app.post("/render-artifact")
+async def render_artifact(
+    analysis_key: str = Form(...),
+    render_artifact_key: str = Form(...),
+    source_content_hash: str = Form(...),
+    image: UploadFile | None = File(None),
+):
+    cached = await state.render_page(render_artifact_key)
+    if cached is not None:
+        page, artifact_analysis_key = cached
+    else:
+        artifact_analysis_key = analysis_key
+        if image is None:
+            page = await state.analysis_page(analysis_key)
+        else:
+            data = await image.read()
+            digest = sha256(data).hexdigest()
+            if digest != source_content_hash:
+                return JSONResponse(
+                    status_code=409,
+                    content={"error": "source_identity_mismatch"},
+                )
+            page = PAGE_BY_DIGEST.get(digest)
+    if page is None:
+        return JSONResponse(status_code=409, content={"error": "artifact_missing"})
+    await state.remember_analysis(artifact_analysis_key, page)
+    await state.remember_render(render_artifact_key, page, artifact_analysis_key)
+    block_count = await state.block_count(page)
+    reason = "unsupported_region" if page == "C" else None
+    blocks = []
+    for index in range(1, block_count + 1):
+        block_id = f"{page}-{index}"
+        blocks.append({
+            "block_id": block_id,
+            "patch_id": None if reason else f"patch-{block_id}",
+            "patch_bbox": None if reason else [80, 80, 240, 120],
+            "clean_region": None if reason else [80, 80, 240, 120],
+            "fit_bbox": [80, 80, 12, 12] if page == "D" else [80, 80, 240, 120],
+            "patch_mime": None if reason else "image/png",
+            "patch_rgba": None if reason else base64.b64encode(patch_png(page)).decode("ascii"),
+            "reason": reason,
+        })
+    return {
+        "schema_version": config.PATCH_VERSIONS["render_schema"],
+        "render_artifact_key": render_artifact_key,
+        "analysis_key": artifact_analysis_key,
+        "image_w": 800,
+        "image_h": 1200,
+        "blocks": blocks,
+        "byte_size": sum(len(patch_png(page)) for row in blocks if row["patch_rgba"]),
+    }
+
+
 @app.post("/translate-items")
 async def translate_items(body: TranslateItemsBody, request: Request):
     if body.src_lang not in {"ja", "es", "pt"}:
@@ -421,7 +505,19 @@ async def translate_items(body: TranslateItemsBody, request: Request):
     await state.record("translation", page, "completed", generation)
     return {
         "items": [
-            {"id": item.id, "translation": f"{body.dst_lang}:{item.text}"}
+            {
+                "id": item.id,
+                "kind": "sfx" if page == "B" else "text",
+                "translation": (
+                    None
+                    if page == "B"
+                    else (
+                        f"{body.dst_lang}:{LONG_TRANSLATION}"
+                        if page == "D"
+                        else f"{body.dst_lang}:{item.text}"
+                    )
+                ),
+            }
             for item in body.items
         ]
     }

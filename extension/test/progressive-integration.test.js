@@ -16,6 +16,13 @@ function eventTarget() {
   return { addListener(fn) { listeners.push(fn); }, emit(...values) { for (const fn of listeners) fn(...values); } };
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
 function portPair() {
   const trace = [];
   let active = true;
@@ -87,12 +94,12 @@ function createServer() {
         renderPages.set(options.body.get("render_artifact_key"), name);
         if (held.has(name)) await held.get(name).promise;
         if (faults.ocr.has(name)) return ndjson([
-          { type: "analysis_ready", image_w: 1000, image_h: 1600, analysis_ms: 7 },
+          { type: "analysis_ready", image_w: 1000, image_h: 1600, analysis_ms: 7, analysis_cache_hit: false },
           { type: "ocr_block_error", block_id: `${name}-bad`, stage: "ocr", code: "injected_ocr" },
           { type: "image_done" },
         ], () => events.push(["image_done", name]));
         return ndjson([
-          { type: "analysis_ready", image_w: 1000, image_h: 1600, analysis_ms: 7 },
+          { type: "analysis_ready", image_w: 1000, image_h: 1600, analysis_ms: 7, analysis_cache_hit: false },
           { type: "ocr_block", block_id: `${name}-b1`, bbox: [10, 20, 100, 40], src_text: name, kind: "text", vertical: false },
           { type: "image_done" },
         ], () => events.push(["image_done", name]));
@@ -205,7 +212,7 @@ async function eventually(predicate, label) {
   throw new Error(`timed out: ${label}`);
 }
 
-function createIntegration({ server = createServer(), session = storageSession(), clock = performance, idStart = 0, pages = [{ name: "A", rect: { left: 0, top: 0, right: 500, bottom: 600, width: 500, height: 600 } }] } = {}) {
+function createIntegration({ server = createServer(), session = storageSession(), clock = performance, decode = async () => {}, onAppend = () => {}, idStart = 0, pages = [{ name: "A", rect: { left: 0, top: 0, right: 500, bottom: 600, width: 500, height: 600 } }] } = {}) {
   const pair = portPair();
   let workerAlive = true;
   let cloneStorageRead = (value) => value;
@@ -259,7 +266,7 @@ function createIntegration({ server = createServer(), session = storageSession()
   const createElement = (tagName) => {
     const element = {
       tagName: String(tagName).toUpperCase(), className: "", textContent: "", style: {}, children: [], appendCalls: [], removed: false, parentElement: null,
-      appendChild(node) { node.parentElement = this; this.children.push(node); this.appendCalls.push(node); return node; },
+      appendChild(node) { node.parentElement = this; this.children.push(node); this.appendCalls.push(node); if (node.className === "mt-render-block") onAppend(node); return node; },
       remove() { this.removed = true; if (this.parentElement) this.parentElement.children = this.parentElement.children.filter((child) => child !== this); this.children.forEach((child) => child.remove()); },
     };
     Object.defineProperties(element, {
@@ -268,7 +275,7 @@ function createIntegration({ server = createServer(), session = storageSession()
       scrollWidth: { get() { return this.clientWidth; } },
       scrollHeight: { get() { return this.clientHeight; } },
     });
-    if (element.tagName === "IMG") element.decode = async () => {};
+    if (element.tagName === "IMG") element.decode = () => decode(element);
     return element;
   };
   const descendants = () => {
@@ -310,12 +317,68 @@ function createIntegration({ server = createServer(), session = storageSession()
     clickLoaded: () => content.translatePage("loaded", "ja", "vi"),
     navigate(source, nextRect = images[0].rect) { images[0].src = `https://reader/${source}.jpg`; images[0].rect = nextRect; content.pruneOverlays(); },
     text: () => descendants().filter((node) => !node.removed && node.className === "mt-translated-text").map((node) => node.textContent).join(" "),
+    renderBlocks: () => descendants().filter((node) => !node.removed && node.className === "mt-render-block"),
+    renderMetrics: () => pair.trace.filter(([side, event]) => side === "content" && event.type === "render_metric").map(([, event]) => event),
+    startAtomicRender() {
+      content.__atomicImage = images[0];
+      return vm.runInContext(`(() => {
+        const img = __atomicImage;
+        const event = {
+          type: "translation", request_id: "atomic-request", job_id: "atomic-job",
+          page_artifact_key: "atomic-page", render_artifact_key: "atomic-render",
+          layout_fit_version: "dom-fit-10px-v1", block_id: "atomic-block",
+          image_w: 1000, image_h: 1600, patch_id: "atomic-patch",
+          patch_bbox: [10, 20, 100, 40], fit_bbox: [10, 20, 100, 40],
+          patch_mime: "image/png", patch_rgba: "cG5n", trans_text: "atomic text",
+          vertical: false, layout_hint: null,
+        };
+        const binding = {
+          requestId: event.request_id, img, source: sourceForScope(img, "visible"),
+          sourceSignature: sourceSignature(img), cropSignature: "null", scope: "visible",
+          srcLang: "ja", dstLang: "vi",
+        };
+        imageRequests.set(img, event.request_id);
+        jobBindings.set(event.job_id, binding);
+        pendingScopes.set(event.request_id, {
+          startedAt: performance.now(), firstOverlayByJob: new Map(), firstOverlayMs: null,
+        });
+        return upsertOverlayBlock(img, binding, event);
+      })()`, content);
+    },
     summary: () => new Promise((resolve) => runtimeMessages.emit({ type: "benchmarkSummary" }, {}, resolve)),
+    metricSample(requestId) {
+      background.__metricRequestId = requestId;
+      return JSON.parse(vm.runInContext("JSON.stringify(metricSamplesByRequest.get(__metricRequestId) || null)", background));
+    },
     pageStatus: () => new Promise((resolve) => runtimeMessages.emit({ type: "pageStatus" }, {}, resolve)),
     legacyOcr(name) { return new Promise((resolve) => runtimeMessages.emit({ type: "ocrImage", url: `https://reader/${name}.jpg`, srcLang: "ja" }, {}, resolve)); },
     sendRenderMetric(requestId, jobId, value) { pair.content.postMessage({ type: "render_metric", request_id: requestId, job_id: jobId, first_overlay_ms: value }); },
   };
 }
+
+test("first overlay timing starts at scope acceptance and waits for atomic patch commit", async () => {
+  let now = 100;
+  const patchDecode = deferred();
+  const app = createIntegration({
+    clock: { now: () => now },
+    decode: () => patchDecode.promise,
+    onAppend: () => { now = 137; },
+  });
+
+  const render = app.startAtomicRender();
+  await Promise.resolve();
+  assert.strictEqual(app.renderBlocks().length, 0);
+  assert.strictEqual(app.renderMetrics().length, 0);
+
+  now = 120;
+  patchDecode.resolve();
+  await render;
+  assert.strictEqual(app.renderBlocks().length, 1);
+  assert.deepStrictEqual(
+    { painted: app.renderMetrics()[0].painted, first_overlay_ms: app.renderMetrics()[0].first_overlay_ms },
+    { painted: true, first_overlay_ms: 37 },
+  );
+});
 
 test("progressive integration", { timeout: 10000 }, async () => {
   const app = createIntegration();
@@ -343,10 +406,28 @@ test("progressive integration", { timeout: 10000 }, async () => {
   ]);
   assert.ok(Object.values(result.metrics).every((value) => value === null || Number.isFinite(value)));
   assert.deepEqual(result.page_metrics.map((row) => [row.job_id, row.first_overlay_ms]), [[coldStart.jobs[0].job_id, result.first_overlay_ms]]);
+  const coldPageMetric = result.page_metrics[0];
+  assert.strictEqual(coldPageMetric.overlay_semantics, "atomic_patch_v1");
+  assert.strictEqual(coldPageMetric.cache_hit, false);
+  assert.strictEqual(coldPageMetric.partial_replay, false);
+  assert.strictEqual(coldPageMetric.analysis_cache_hit, false);
+  assert.ok(Number.isFinite(coldPageMetric.render_wait_after_translation_ms));
+  assert.strictEqual(coldPageMetric.render_coverage, null);
+  assert.deepStrictEqual(Object.keys(coldPageMetric.render_reason_counts), []);
+  assert.strictEqual(coldPageMetric.manifest_mismatch, false);
+  assert.strictEqual(coldPageMetric.source_unavailable, false);
+  assert.strictEqual(coldPageMetric.painted, null);
+  assert.strictEqual(coldPageMetric.error_code, null);
+  const completedColdMetric = await eventually(() => {
+    const row = app.metricSample(coldRequestId)?.page_metrics?.[0];
+    return row?.painted === true ? row : null;
+  }, "cold atomic render metric");
+  assert.strictEqual(completedColdMetric.render_coverage, 1);
+  assert.deepStrictEqual(completedColdMetric.render_reason_counts, {});
 
   const summary = await app.summary();
   assert.deepStrictEqual(Object.keys(summary).sort(), [
-    "cancel_latency_ms", "counters", "first_overlay_ms", "first_translation_ms", "total_ms",
+    "atomic_patch_v1", "cancel_latency_ms", "counters", "first_overlay_ms", "first_translation_ms", "total_ms",
   ]);
   assert.ok(Number.isFinite(summary.first_overlay_ms.p50));
   assert.ok(summary.counters.translation_calls <= 100);
