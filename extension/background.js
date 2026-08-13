@@ -451,19 +451,18 @@ function releaseMatchingPendingSources(request, replacement) {
     void pageCache?.removeJob(jobId);
   }
 }
+function postTo(request, jobId, port, payload) {
+  if (!request?.connected || request.done.has(jobId) || !port) return false;
+  try { port.postMessage(payload); return true; } catch { return false; }
+}
 function emit(producer, type, extra = {}) {
   for (const consumer of producer.consumers.values()) {
     const request = requests.get(consumer.requestId);
     if (!request?.connected || request.done.has(consumer.jobId) || !consumer.port) continue;
     const payload = { ...extra, type, request_id: consumer.requestId, job_id: consumer.jobId, page_artifact_key: producer.pageKey };
-    if (type !== "translation") {
-      consumer.port.postMessage(payload);
-      continue;
+    if (postTo(request, consumer.jobId, consumer.port, payload) && type === "translation") {
+      request.deliveredByJob.get(consumer.jobId).add(extra.block_id);
     }
-    try {
-      consumer.port.postMessage(payload);
-      request.deliveredByJob.get(consumer.jobId)?.add(extra.block_id);
-    } catch {}
   }
 }
 function persist(producer) {
@@ -606,7 +605,7 @@ async function attachDescriptor(request, descriptor, ledger, sourceIdentity, sou
   if (page && freshBreakerSentinel(page)) {
     request.sourceAcquisitions.delete(descriptor.job_id);
     request.sourceDescriptors.delete(descriptor.job_id);
-    request.port?.postMessage({ type: "page_job_accepted", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, state: "complete" });
+    postTo(request, descriptor.job_id, request.port, { type: "page_job_accepted", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, state: "complete" });
     terminalJob(request, descriptor.job_id, request.port, 0, true, page.blocks.length, { recognized: page.blocks.length, failed: 0 }, null, null, { pageKey: page.page_artifact_key });
     sourceAcquisition.release();
     await pageCache?.removeJob(descriptor.job_id);
@@ -620,7 +619,7 @@ async function attachDescriptor(request, descriptor, ledger, sourceIdentity, sou
     let delivered;
     try {
       artifact = await fetchRenderArtifact(producer);
-      request.port?.postMessage({ type: "page_job_accepted", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, state: page.state });
+      postTo(request, descriptor.job_id, request.port, { type: "page_job_accepted", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, state: page.state });
       delivered = replayPage(request, descriptor.job_id, page, true, artifact);
     } catch (error) {
       if (error?.errorCode !== "manifest_mismatch") throw error;
@@ -669,7 +668,7 @@ async function attachDescriptor(request, descriptor, ledger, sourceIdentity, sou
     request.sourceDescriptors.delete(descriptor.job_id);
     const producer = createProducer(descriptor, keys, page, sourceIdentity, sourceAcquisition);
     producer.translationReady = Promise.resolve({ translated: page.blocks.length, failed: 0 });
-    request.port?.postMessage({ type: "page_job_accepted", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, state: "complete" });
+    postTo(request, descriptor.job_id, request.port, { type: "page_job_accepted", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, state: "complete" });
     let recoveryQueued = false;
     try {
       producer.renderReady = fetchRenderArtifact(producer);
@@ -725,22 +724,19 @@ async function attachDescriptor(request, descriptor, ledger, sourceIdentity, sou
   await attachProducerConsumer(request, descriptor, ledger, producer, sourceAcquisition, joinsProducer);
 }
 function accepted(request, descriptor, page, cacheHit, artifact = null) {
-  request.port?.postMessage({ type: "page_job_accepted", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, state: cacheHit ? "complete" : page.state });
+  postTo(request, descriptor.job_id, request.port, { type: "page_job_accepted", request_id: request.requestId, job_id: descriptor.job_id, page_artifact_key: page.page_artifact_key, state: cacheHit ? "complete" : page.state });
   replayPage(request, descriptor.job_id, page, cacheHit, artifact);
 }
 function replayPage(request, jobId, page, cacheHit, artifact = null) {
-  if (page.image_w && request.connected && !request.done.has(jobId) && request.port) request.port.postMessage({ type: "progress", request_id: request.requestId, job_id: jobId, image_w: page.image_w, image_h: page.image_h });
+  if (page.image_w) postTo(request, jobId, request.port, { type: "progress", request_id: request.requestId, job_id: jobId, image_w: page.image_w, image_h: page.image_h });
   if (!artifact || !Object.hasOwn(page, "manifest_ids")) return 0;
   const events = renderableTranslationEvents(page, artifact);
   prepareRenderOutcomeCollector(page, artifact, [{ requestId: request.requestId, jobId, port: request.port }]);
   for (const event of events) {
-    if (!request.connected || request.done.has(jobId) || !request.port) break;
-    try {
-      request.port.postMessage({ ...event, type: "translation", request_id: request.requestId, job_id: jobId, page_artifact_key: page.page_artifact_key, cache_hit: cacheHit === true });
-    } catch { break; }
-    request.deliveredByJob.get(jobId)?.add(event.block_id);
+    if (!postTo(request, jobId, request.port, { ...event, type: "translation", request_id: request.requestId, job_id: jobId, page_artifact_key: page.page_artifact_key, cache_hit: cacheHit === true })) break;
+    request.deliveredByJob.get(jobId).add(event.block_id);
   }
-  return request.deliveredByJob.get(jobId)?.size ?? 0;
+  return request.deliveredByJob.get(jobId).size;
 }
 async function acceptScope(port, message) {
   await ready;
@@ -824,17 +820,13 @@ async function acceptScope(port, message) {
 }
 function terminalJob(request, jobId, port, failed, hit, recognized, metrics = null, counters = null, counterProducer = null, meta = {}) {
   if (!request || request.done.has(jobId)) return;
-  const translated = request.deliveredByJob.get(jobId)?.size ?? 0;
-  if (request.connected && port) {
-    try {
-      port.postMessage({ type: "image_done", request_id: request.requestId, job_id: jobId, page_artifact_key: meta.pageKey ?? null, translated, recognized, failed });
-    } catch {}
-  }
+  const translated = request.deliveredByJob.get(jobId).size;
+  postTo(request, jobId, port, { type: "image_done", request_id: request.requestId, job_id: jobId, page_artifact_key: meta.pageKey ?? null, translated, recognized, failed });
   completeJob(request, jobId, translated, failed, hit, metrics, counters, counterProducer, meta);
 }
 function completeJob(request, jobId, translated, failed, hit, metrics = null, counters = null, counterProducer = null, meta = {}) {
   if (!request) return;
-  translated = request.deliveredByJob?.get(jobId)?.size ?? translated;
+  translated = request.deliveredByJob.get(jobId).size;
   if (request.done.has(jobId)) return; request.done.add(jobId); request.translated += translated; request.failed += failed; if (hit) request.hits++;
   request.metricRows.push({ job_id: jobId, page_artifact_key: meta.pageKey ?? null, cache_hit: hit, error_code: meta.errorCode ?? null, ...emptyPageMetrics(), ...(metrics || {}), first_overlay_ms: request.firstOverlayByJob.get(jobId) ?? null, accepted_offset_ms: Number.isFinite(meta.acceptedAt) ? Math.round(meta.acceptedAt - request.acceptedAt) : null });
   if (counters && !request.countedCounterProducers.has(counterProducer)) {

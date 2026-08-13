@@ -496,6 +496,21 @@ test("offline ledgers with one request ID merge their delivery ownership", async
   const observed = JSON.parse(vm.runInContext(`JSON.stringify((() => {
     const first = offlineLedger(__offlineLedgerA);
     const second = offlineLedger(__offlineLedgerB);
+    const invariant = createRequest(null, {
+      request_id: "missing-delivery-ledger",
+      scope: "visible",
+      src_lang: "ja",
+      dst_lang: "vi",
+      jobs: [__offlineLedgerA.descriptor],
+    });
+    invariant.connected = false;
+    invariant.deliveredByJob.delete(__offlineLedgerA.job_id);
+    let missingDeliveryRejected = false;
+    try {
+      terminalJob(invariant, __offlineLedgerA.job_id, null, 0, false, 0);
+    } catch {
+      missingDeliveryRejected = true;
+    }
     return {
       same_request: first.request === second.request,
       request_count: requests.size,
@@ -504,6 +519,7 @@ test("offline ledgers with one request ID merge their delivery ownership", async
         ? [...second.request.deliveredByJob].map(([jobId, ids]) => [jobId, ids.size]).sort()
         : null,
       source_crops: second.request.jobsBySourceCrop.size,
+      missing_delivery_rejected: missingDeliveryRejected,
     };
   })())`, app.context));
   assert.deepStrictEqual(observed, {
@@ -512,6 +528,7 @@ test("offline ledgers with one request ID merge their delivery ownership", async
     expected: ["offline-ledger-a", "offline-ledger-b"],
     delivered: [["offline-ledger-a", 0], ["offline-ledger-b", 0]],
     source_crops: 2,
+    missing_delivery_rejected: true,
   });
 });
 
@@ -1847,7 +1864,7 @@ test("background progressive transport", { timeout: 30000 }, async () => {
     );
   });
 
-  await scenario("direct replay counts only posts completed before a port failure", async () => {
+  await scenario("direct replay survives accepted, progress, and translation port failures", async () => {
     const storage = fakeStorage();
     const server = createFakeServer();
     const bootstrap = createBackgroundApp({ storage, server });
@@ -1873,42 +1890,114 @@ test("background progressive transport", { timeout: 30000 }, async () => {
       reason: null,
     })));
 
-    const app = bootstrap.restart();
-    await app.ready();
-    const port = app.connect();
-    const post = port.postMessage.bind(port);
-    let rejected = false;
-    port.postMessage = (message) => {
-      if (!rejected && message.type === "translation" && message.block_id === "second") {
-        rejected = true;
-        throw new Error("port failed after first replay");
-      }
-      post(message);
-    };
-    port.receive(app.startScope("delivery-replay", "visible", job));
-    const done = await app.waitFor("scope_done", port);
-    assert.deepStrictEqual(
-      port.sent.filter((event) => event.type === "translation").map((event) => event.block_id),
-      ["first"],
-    );
-    assert.deepStrictEqual(
-      port.sent.filter((event) => event.type === "image_done").map((event) => ({
-        translated: event.translated, recognized: event.recognized, failed: event.failed,
-      })),
-      [{ translated: 1, recognized: 2, failed: 0 }],
-    );
-    assert.deepStrictEqual(
-      { translated: done.translated, failed: done.failed, cache_hit: done.cache_hit },
-      { translated: 1, failed: 0, cache_hit: true },
-    );
-    assert.deepStrictEqual(
-      { state: app.page(keys.pageArtifactKey).state, last_error: app.page(keys.pageArtifactKey).last_error },
-      { state: "complete", last_error: null },
-    );
-    assert.deepStrictEqual(
-      done.page_metrics.map((row) => ({ cache_hit: row.cache_hit, error_code: row.error_code })),
-      [{ cache_hit: true, error_code: null }],
-    );
+    const observed = [];
+    for (const fixture of [
+      { name: "accepted", rejects: (message) => message.type === "page_job_accepted" },
+      { name: "progress", rejects: (message) => message.type === "progress" },
+      { name: "translation", rejects: (message) => message.type === "translation" && message.block_id === "second" },
+    ]) {
+      const app = bootstrap.restart();
+      await app.ready();
+      const port = app.connect();
+      const post = port.postMessage.bind(port);
+      let rejected = false;
+      port.postMessage = (message) => {
+        if (!rejected && fixture.rejects(message)) {
+          rejected = true;
+          throw new Error(`port failed on ${fixture.name}`);
+        }
+        post(message);
+      };
+      const replayJob = app.job(`delivery-replay-${fixture.name}-job`, job.source_url);
+      port.receive(app.startScope(`delivery-replay-${fixture.name}`, "visible", replayJob));
+      const done = await app.waitFor("scope_done", port);
+      observed.push({
+        name: fixture.name,
+        translated_events: port.sent.filter((event) => event.type === "translation").map((event) => event.block_id),
+        image_done: port.sent.filter((event) => event.type === "image_done").map((event) => ({
+          translated: event.translated, recognized: event.recognized, failed: event.failed,
+        })),
+        scope_done: { translated: done.translated, failed: done.failed, cache_hit: done.cache_hit },
+        page: { state: app.page(keys.pageArtifactKey).state, last_error: app.page(keys.pageArtifactKey).last_error },
+        metrics: done.page_metrics.map((row) => ({ cache_hit: row.cache_hit, error_code: row.error_code })),
+      });
+    }
+    assert.deepStrictEqual(observed, [
+      {
+        name: "accepted", translated_events: ["first", "second"],
+        image_done: [{ translated: 2, recognized: 2, failed: 0 }],
+        scope_done: { translated: 2, failed: 0, cache_hit: true },
+        page: { state: "complete", last_error: null },
+        metrics: [{ cache_hit: true, error_code: null }],
+      },
+      {
+        name: "progress", translated_events: ["first", "second"],
+        image_done: [{ translated: 2, recognized: 2, failed: 0 }],
+        scope_done: { translated: 2, failed: 0, cache_hit: true },
+        page: { state: "complete", last_error: null },
+        metrics: [{ cache_hit: true, error_code: null }],
+      },
+      {
+        name: "translation", translated_events: ["first"],
+        image_done: [{ translated: 1, recognized: 2, failed: 0 }],
+        scope_done: { translated: 1, failed: 0, cache_hit: true },
+        page: { state: "complete", last_error: null },
+        metrics: [{ cache_hit: true, error_code: null }],
+      },
+    ]);
+  });
+
+  await scenario("producer transport failures do not reject the OCR stage", async () => {
+    const observed = [];
+    for (const fixture of [
+      {
+        name: "progress",
+        rows: [
+          { type: "analysis_ready", image_w: 100, image_h: 200 },
+          { type: "ocr_block", block_id: "good", bbox: [1, 2, 3, 4], src_text: "good" },
+          { type: "image_done", recognized: 1, failed: 0 },
+        ],
+      },
+      {
+        name: "block_error",
+        rows: [
+          { type: "analysis_ready", image_w: 100, image_h: 200 },
+          { type: "ocr_block", block_id: "good", bbox: [1, 2, 3, 4], src_text: "good" },
+          { type: "ocr_block_error", block_id: "bad", code: "recognition_failed" },
+          { type: "image_done", recognized: 1, failed: 1 },
+        ],
+      },
+    ]) {
+      const server = createFakeServer();
+      server.setOcrRows(`delivery-${fixture.name}`, fixture.rows);
+      const app = createBackgroundApp({ server });
+      await app.ready();
+      const port = app.connect();
+      const post = port.postMessage.bind(port);
+      let rejected = false;
+      port.postMessage = (message) => {
+        if (!rejected && message.type === fixture.name) {
+          rejected = true;
+          throw new Error(`port failed on ${fixture.name}`);
+        }
+        post(message);
+      };
+      port.receive(app.startScope(
+        `delivery-${fixture.name}`,
+        "visible",
+        app.job(`delivery-${fixture.name}-job`, `https://x/delivery-${fixture.name}.jpg`),
+      ));
+      const done = await app.waitFor("scope_done", port);
+      observed.push({
+        name: fixture.name,
+        translated_events: port.sent.filter((event) => event.type === "translation").map((event) => event.block_id),
+        scope_done: { translated: done.translated, failed: done.failed },
+      });
+    }
+    assert.deepStrictEqual(observed, [
+      { name: "progress", translated_events: ["good"], scope_done: { translated: 1, failed: 0 } },
+      { name: "block_error", translated_events: ["good"], scope_done: { translated: 1, failed: 1 } },
+    ]);
   });
 
   await scenario("disconnected consumers receive no delivery or terminal", async () => {
