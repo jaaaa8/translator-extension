@@ -4,7 +4,7 @@
 
 **Nhánh:** `feat/v4`
 
-**Trạng thái:** brainstorming và phản biện thiết kế đã PASS; tài liệu này chờ người dùng review trước khi lập implementation plan
+**Trạng thái:** implemented/verified; Tasks 1–15 và Gate A–G PASS — xem [[2026-08-08-in-place-clean-overlay-rendering-worklog#2026-08-14 — Spec C Task 15: browser/manual acceptance và cold/warm benchmark]]
 
 ## 1. Kết quả cần đạt
 

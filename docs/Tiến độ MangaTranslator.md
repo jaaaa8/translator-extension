@@ -23,7 +23,7 @@ Spec: `docs/superpowers/specs/2026-07-21-manga-translator-design.md` · Plan: `d
 - Mỗi timeline link trỏ tới đúng H2 lịch sử trong worklog sở hữu.
 - Quan hệ spec/plan/artifact được khai báo dạng list vì thực tế có work item many-to-many.
 - Version được dựng theo Git topology, không sắp bằng author date.
-- `feat/v4` là checkpoint tài liệu; `feat/v5` và Spec C vẫn incomplete.
+- `feat/v4` là checkpoint tài liệu; Spec C đã PASS Tasks 1–15, còn `feat/v5` chờ tích hợp các thay đổi Task 15 vào Git history.
 
 ## Hành trình version
 
@@ -43,9 +43,9 @@ Bổ sung telemetry, quality gate trang thật, reading order và full-page tran
 
 Cả 8/8 commit là docs/chore: đây là design/documentation checkpoint, không phải product increment.
 
-### [[feat-v5|feat/v5]] — incomplete
+### [[feat-v5|feat/v5]] — incomplete (integration pending)
 
-Spec C đã tới Task 14; Task 15 browser/manual acceptance và visual QA vẫn mở.
+Spec C đã PASS Task 15, Gate A–G và cold/warm benchmark; code/spec/evidence Task 15 còn uncommitted nên version chưa đóng integration.
 
 ## Việc còn mở
 
@@ -53,8 +53,7 @@ Spec C đã tới Task 14; Task 15 browser/manual acceptance và visual QA vẫn
 > Focused gate hoặc version delta xanh không tự động đóng backlog khác.
 
 - [[2026-07-21-manga-translator-foundation-worklog|Foundation]]: Task 8 vẫn mở; chưa có evidence riêng để đổi trạng thái.
-- [[2026-08-08-in-place-clean-overlay-rendering-worklog|Spec C]]: Task 15 browser/manual acceptance và visual QA vẫn mở.
-- Task 14 telemetry xanh không đồng nghĩa toàn bộ Spec C PASS.
+- `feat/v5`: thay đổi code/spec/evidence Task 15 chưa được stage hoặc commit theo đúng yêu cầu scope control.
 
 ## Timeline
 
@@ -120,6 +119,7 @@ Mỗi dòng dưới đây tương ứng đúng một H2 của snapshot, giữ th
 - 2026-08-13 — OCR vùng lỗi được retry có giới hạn; Task 12 đóng sau review; [[2026-08-08-in-place-clean-overlay-rendering-worklog#2026-08-13 — Spec C Task 12: bounded OCR recovery hoàn tất review|xem mốc và bằng chứng]].
 - 2026-08-13 — Delivery accounting tách lỗi Port và bảo toàn kết quả; Task 13 hoàn tất; [[2026-08-08-in-place-clean-overlay-rendering-worklog#2026-08-13 — Spec C Task 13: delivery accounting và cô lập lỗi Port|xem mốc và bằng chứng]].
 - 2026-08-14 — Telemetry và atomic acceptance gate đạt Task 14; Task 15 browser/manual vẫn mở; [[2026-08-08-in-place-clean-overlay-rendering-worklog#2026-08-14 — Spec C Task 14: telemetry và acceptance gate|xem mốc và bằng chứng]].
+- 2026-08-14 — Fixture sai hình học và race telemetry làm Gate B/G thiếu tin cậy; sửa bằng patch xác định + binding-local timestamp, visual QA và cold/warm benchmark đạt Task 15; [[2026-08-08-in-place-clean-overlay-rendering-worklog#2026-08-14 — Spec C Task 15: browser/manual acceptance và cold/warm benchmark|xem mốc và bằng chứng]].
 
 ## Work items
 
@@ -206,5 +206,5 @@ Các work item là đơn vị ownership; spec, plan và artifact liên quan đư
 ### [[2026-08-08-in-place-clean-overlay-rendering-worklog|In-place clean overlay rendering]]
 
 - Phiên bản: [[feat-v4]], [[feat-v5]].
-- Trạng thái: `incomplete`.
-- Mạch chính: Spec C tới Task 14; Task 15 browser/manual acceptance vẫn mở.
+- Trạng thái: `done`.
+- Mạch chính: Spec C Tasks 1–15, Gate A–G, visual QA và cold/warm benchmark đã PASS; thay đổi Task 15 chờ Git integration riêng.

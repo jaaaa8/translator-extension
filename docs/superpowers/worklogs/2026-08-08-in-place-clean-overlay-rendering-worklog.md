@@ -4,7 +4,7 @@ note_type: worklog
 work_item: in-place-clean-overlay-rendering
 date_start: 2026-08-08
 date_end: 2026-08-14
-status: incomplete
+status: done
 versions:
   - "[[feat-v4]]"
   - "[[feat-v5]]"
@@ -24,7 +24,7 @@ tags:
 >
 > **Quyết định/fix:** Triển khai page-space artifacts, atomic overlay, bounded OCR recovery, delivery accounting và telemetry.
 >
-> **Kết quả:** Tasks 1–14 hoàn tất; Task 15 browser/manual acceptance còn mở nên worklog incomplete.
+> **Kết quả:** Tasks 1–15 và Gate A–G hoàn tất; browser/manual acceptance cùng cold/warm benchmark đã PASS.
 
 ## Liên kết
 
@@ -470,3 +470,48 @@ Nếu sau này cần trả lời câu hỏi chẩn đoán server “render artif
 - `node --check`: **6/6**; venv `py_compile`: **2/2**; `git diff --check`: PASS.
 - Browser/manual visual QA và Gate A–G tổng hợp thuộc Task 15; không dùng kết quả `/health` thay cho bằng chứng UI.
 - Nhánh `feat/v5` đã commit Task 14 tại `6770d74`; chưa push.
+
+## 2026-08-14 — Spec C Task 15: browser/manual acceptance và cold/warm benchmark
+
+### Verdict cuối
+
+> [!success] Task 15 và Gate A–G PASS
+> Acceptance fixture đã qua visual QA, cohort cold/warm đủ mẫu, warm cache không phát sinh request backend và final automated gates không có failure. Work item `in-place-clean-overlay-rendering` chuyển sang `done`.
+
+### Các lỗi acceptance được phát hiện và sửa
+
+1. **Extension ban đầu trỏ nhầm nguồn:** lần đầu Chrome nạp `D:\MangaTranslator\extension`, cho `1 ảnh, 0 thoại, 1 lỗi`. Chỉ kết quả sau khi người dùng xác nhận nạp `D:\MangaTranslator\.worktrees\spec-c-in-place-overlay-rendering\extension` mới được dùng làm gate evidence.
+2. **Fixture A không trung thực về hình học:** source cũ, bbox và patch trắng 1×1 kéo giãn làm chữ gốc còn hiện và lộ hình chữ nhật. Fixture được thay bằng raster speech-bubble xác định; patch RGBA 240×120 chỉ xóa exact ink envelope 3px. Pixel tests khóa source, patch, composite và vùng ngoài patch.
+3. **Fixture D cố tình tràn khỏi bubble:** visual case `fit_failed` cũ không đại diện production. Fit bbox được đổi thành 200×100 bên trong bubble và long text phải co tới đúng sàn 10px mà vẫn thỏa `scrollWidth <= clientWidth`, `scrollHeight <= clientHeight`; `fit_failed` chỉ còn là defensive unit case.
+4. **Hai ảnh demo trả 404:** `/ja_page.png` và `/es_page.png` có `naturalWidth=0`. Acceptance app phục vụ trực tiếp hai PNG hiện có với `image/png` và `Cache-Control: no-store`; browser xác nhận cả hai cùng reader benchmark là 800×1200.
+5. **Race telemetry warm:** 21 warm job đã render nhưng chỉ 14 row có `first_overlay_ms` hữu hạn. `scope_done` xóa `pendingScopes` trước khi `patch.decode()` hoàn tất, nên late visible commit mất timestamp. Fix nhỏ nhất giữ `startedAt` và marker first-overlay trên binding; không trì hoãn `scope_done`, không thêm queue/map. Regression hai block decode đồng thời khóa đúng một latency hữu hạn cho mỗi job.
+
+### Visual QA
+
+- Page A: `COMPLETE`, đúng một `.mt-overlay`, một `.mt-render-block`, text `vi:A:block-1`; người dùng xác nhận overlay xuất hiện và chữ gốc không còn nhìn thấy, không lộ patch chữ nhật hoặc seam.
+- Page B/C: không paint translated overlay; nội dung nguồn non-renderable được giữ nguyên.
+- Page D: long text nằm trong speech bubble tại sàn 10px, không overflow ngang hoặc dọc.
+- Partial replay + recovery failure: overlay đã mount vẫn còn.
+- All-SFX cache hit: không có translated text/patch, translated count bằng 0 và terminal accounting hoàn tất.
+- QA tọa độ bubble trên trang production thật được người dùng chủ động defer sang rollout QA; đây không phải acceptance fixture bắt buộc của Task 15.
+
+### Benchmark `atomic_patch_v1`
+
+- Cold: `sample_count=20`; `first_overlay_ms p50/p95=26/44ms`; `render_wait_after_translation_ms p50/p95=0/0ms`.
+- Warm: `sample_count=21`; `first_overlay_ms p50/p95=17/34ms`.
+- Warm backend sau reset: `page_load=0`, `source=0`, `ocr_stream=0`, `translation=0`, mọi abort/active counter bằng 0; DOM vẫn `COMPLETE` với đúng một overlay/block.
+- Gate yêu cầu warm p95 ≤100ms, cold render-wait p95 ≤100ms và cohort không rỗng; cả ba điều kiện đều PASS.
+
+### RED/GREEN và final gates
+
+- Telemetry race RED: late-render finite sample `0 != 1`; focused GREEN: **1 passed**. Full extension cuối: **50 passed, 0 failed** với `--test-concurrency=1`.
+- Missing fixture routes RED: `/ja_page.png` và `/es_page.png` trả 404; focused GREEN: **1 passed, 1 dependency warning**.
+- Full server bằng `D:\MangaTranslator\venv\Scripts\python.exe`, loại đúng `server/tests/test_ocr.py`: **273 passed, 2 dependency warnings**.
+- `git diff --check`: PASS; acceptance process do task tạo đã dừng và port 8910 đã được giải phóng.
+
+### Review và trạng thái Git
+
+- Review toàn diff và current CodeGraph call paths không có finding: mọi production binding đi qua `translatePage` nên có timestamp hữu hạn; late metric backfill được sau cleanup; hai block cùng job không phát trùng latency; route ảnh fixture không ghi acceptance counters và dùng `no-store`.
+- Evidence JSON: [Task 15 Gate A–G artifact](file:///D:/MangaTranslator/.worktrees/spec-c-in-place-overlay-rendering/docs/superpowers/worklogs/2026-08-09-in-place-clean-overlay-rendering.json).
+- Code, spec và evidence của Task 15 còn **uncommitted**; không stage, commit hoặc push khi chưa có yêu cầu người dùng.
+- Known late-consumer limitation giữ nguyên: consumer gắn giữa final `applyTranslation` và persist/finish có thể nhận `translated=0`; cache-hit visit kế tiếp phục hồi. Spec C không thêm ACK protocol.

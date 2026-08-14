@@ -14,7 +14,7 @@ tags:
 
 ## Kết luận
 
-25 non-merge commit triển khai Spec C tới Task 14; Task 15 browser/manual acceptance còn mở nên version incomplete.
+25 non-merge commit hiện có triển khai Spec C tới Task 14. Task 15, Gate A–G và cold/warm benchmark đã PASS trong worktree, nhưng code/spec/evidence còn uncommitted nên version vẫn incomplete tới khi Git integration hoàn tất.
 
 ## Git facts
 
@@ -30,14 +30,15 @@ tags:
 
 - **Vấn đề:** Overlay cần render artifact lossless, atomic paint, recovery và delivery accounting. **Cách giải quyết:** Thêm artifact primitives, page-space resolver, late join và atomic overlay.
 - **Vấn đề:** Telemetry phải phân biệt translation thành công với painted outcome. **Cách giải quyết:** Thêm bounded OCR recovery, per-job delivery và atomic overlay acceptance gate.
+- **Vấn đề:** Fixture sai hình học và cleanup sớm làm visual gate sai cùng warm telemetry thiếu mẫu. **Cách giải quyết:** Dùng source/patch xác định, giữ timestamp trên binding và khóa browser cold/warm bằng sample count.
 
 ## Verification
 
-Topology delta `feat/v4..feat/v5` có 25 non-merge commit; worklog ghi evidence tới Task 14. Task 15 không được báo PASS.
+Topology delta `feat/v4..feat/v5` vẫn có 25 non-merge commit. Canonical worklog ghi Task 15 PASS với server **273 passed**, extension **50 passed**, cold `20` mẫu và warm `21` mẫu; kết quả chưa thuộc Git topology vì chưa commit.
 
 ## Còn lại
 
-Task 15 browser/manual acceptance và visual QA vẫn mở.
+Stage/commit riêng code/spec/evidence Task 15 khi người dùng yêu cầu, rồi refresh Git facts trước khi chuyển version sang `done`.
 
 ## Key commits
 
