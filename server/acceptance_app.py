@@ -6,6 +6,7 @@ import struct
 import zlib
 from collections import deque
 from hashlib import sha256
+from math import isqrt
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -22,10 +23,28 @@ FAULTS = frozenset({"source_after_load", "ocr_block", "translation_batch"})
 EVENT_LIMIT = 500
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "extension" / "test" / "fixture.html"
-BASE_PNG = (ROOT / "extension" / "test" / "ja_page.png").read_bytes()
+BENCHMARK_CONTROLLER = ROOT / "extension" / "test" / "fixture-benchmark.js"
 NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 IMMUTABLE_HEADERS = {"Cache-Control": "public, max-age=31536000, immutable"}
+BENCHMARK_SAMPLES = ("warmup", *(str(index) for index in range(1, 21)))
 LONG_TRANSLATION = " ".join(["long acceptance translation"] * 20)
+PAGE_A_INK_RECTS = (
+    (104, 100, 48, 5),
+    (104, 100, 5, 80),
+    (147, 100, 5, 80),
+    (104, 137, 48, 5),
+    (104, 175, 48, 5),
+    (180, 100, 5, 80),
+    (164, 116, 37, 5),
+    (160, 140, 45, 5),
+    (168, 160, 5, 20),
+    (193, 160, 5, 20),
+    (232, 100, 48, 5),
+    (232, 100, 5, 80),
+    (275, 100, 5, 80),
+    (232, 175, 48, 5),
+)
+PAGE_A_ERASE_PADDING = 3
 
 COUNTER_KEYS = (
     "page_load",
@@ -81,48 +100,110 @@ class AcceptanceConfig(BaseModel):
         return self
 
 
-def page_png(page: str) -> bytes:
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(data))
+        + kind
+        + data
+        + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    )
+
+
+def _png(width: int, height: int, color_type: int, pixels: bytes) -> bytes:
+    channels = {2: 3, 6: 4}[color_type]
+    stride = width * channels
+    if len(pixels) != stride * height:
+        raise ValueError("pixel payload does not match PNG dimensions")
+    scanlines = b"".join(
+        b"\x00" + pixels[start:start + stride]
+        for start in range(0, len(pixels), stride)
+    )
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, color_type, 0, 0, 0))
+        + _png_chunk(b"IDAT", zlib.compress(scanlines))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def _page_a_source_png() -> bytes:
+    width, height = 800, 1200
+    pixels = bytearray(b"\xcc\xcc\xcc" * width * height)
+
+    def fill(rect: tuple[int, int, int, int], color: bytes) -> None:
+        left, top, rect_width, rect_height = rect
+        row = color * rect_width
+        for y in range(top, top + rect_height):
+            start = (y * width + left) * 3
+            pixels[start:start + len(row)] = row
+
+    def fill_ellipse(
+        center_x: int,
+        center_y: int,
+        radius_x: int,
+        radius_y: int,
+        color: bytes,
+    ) -> None:
+        radius_x_squared = radius_x * radius_x
+        radius_y_squared = radius_y * radius_y
+        for y in range(center_y - radius_y, center_y + radius_y + 1):
+            delta_y = y - center_y
+            half_width = isqrt(
+                radius_x_squared
+                * (radius_y_squared - delta_y * delta_y)
+                // radius_y_squared
+            )
+            fill((center_x - half_width, y, half_width * 2 + 1, 1), color)
+
+    fill_ellipse(200, 140, 152, 92, b"\x60\x60\x60")
+    fill_ellipse(200, 140, 140, 80, b"\xff\xff\xff")
+    for rect in PAGE_A_INK_RECTS:
+        fill(rect, b"\x00\x00\x00")
+    return _png(width, height, 2, bytes(pixels))
+
+
+PAGE_A_SOURCE_PNG = _page_a_source_png()
+
+
+def page_png(page: str, benchmark: str | None = None) -> bytes:
     if page not in PAGES:
         raise KeyError(page)
-    chunk_type = b"tEXt"
-    chunk_data = f"acceptance-page\0{page}".encode()
-    chunk = (
-        struct.pack(">I", len(chunk_data))
-        + chunk_type
-        + chunk_data
-        + struct.pack(">I", zlib.crc32(chunk_type + chunk_data) & 0xFFFFFFFF)
-    )
-    iend = BASE_PNG.rfind(b"\x00\x00\x00\x00IEND")
+    base_png = PAGE_A_SOURCE_PNG
+    chunks = [_png_chunk(b"tEXt", f"acceptance-page\0{page}".encode())]
+    if benchmark is not None:
+        chunks.append(_png_chunk(b"tEXt", f"acceptance-benchmark\0{benchmark}".encode()))
+    iend = base_png.rfind(b"\x00\x00\x00\x00IEND")
     if iend < 0:
         raise RuntimeError("fixture PNG has no IEND chunk")
-    return BASE_PNG[:iend] + chunk + BASE_PNG[iend:]
+    return base_png[:iend] + b"".join(chunks) + base_png[iend:]
 
 
 def patch_png(page: str) -> bytes:
+    if page in {"A", "D"}:
+        width, height = 240, 120
+        rgba = bytearray(b"\xff\xff\xff\x00" * width * height)
+        for left, top, rect_width, rect_height in PAGE_A_INK_RECTS:
+            left -= PAGE_A_ERASE_PADDING
+            top -= PAGE_A_ERASE_PADDING
+            rect_width += PAGE_A_ERASE_PADDING * 2
+            rect_height += PAGE_A_ERASE_PADDING * 2
+            row = b"\xff\xff\xff\xff" * rect_width
+            for y in range(top - 80, top - 80 + rect_height):
+                start = (y * width + left - 80) * 4
+                rgba[start:start + len(row)] = row
+        return _png(width, height, 6, bytes(rgba))
+
     rgba = {
-        "A": b"\xff\xff\xff\xff",
         "B": b"\xff\xff\xff\x00",
         "C": b"\x00\x00\x00\x00",
-        "D": b"\xff\xff\xff\xff",
     }[page]
-
-    def chunk(kind: bytes, data: bytes) -> bytes:
-        return (
-            struct.pack(">I", len(data))
-            + kind
-            + data
-            + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
-        )
-
-    return (
-        b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0))
-        + chunk(b"IDAT", zlib.compress(b"\x00" + rgba))
-        + chunk(b"IEND", b"")
-    )
+    return _png(1, 1, 6, rgba)
 
 
 PAGE_BY_DIGEST = {sha256(page_png(page)).hexdigest(): page for page in PAGES}
+PAGE_BY_DIGEST.update({
+    sha256(page_png("A", sample)).hexdigest(): "A" for sample in BENCHMARK_SAMPLES
+})
 
 
 class AcceptanceState:
@@ -335,6 +416,21 @@ async def fixture():
     return FileResponse(FIXTURE)
 
 
+@app.get("/fixture-benchmark.js")
+async def fixture_benchmark():
+    return FileResponse(BENCHMARK_CONTROLLER, media_type="application/javascript")
+
+
+@app.get("/ja_page.png")
+async def fixture_ja_page():
+    return FileResponse(FIXTURE.parent / "ja_page.png", media_type="image/png", headers=NO_STORE_HEADERS)
+
+
+@app.get("/es_page.png")
+async def fixture_es_page():
+    return FileResponse(FIXTURE.parent / "es_page.png", media_type="image/png", headers=NO_STORE_HEADERS)
+
+
 @app.get("/assets/{page}.png")
 async def asset(page: str, request: Request):
     if page not in PAGES:
@@ -353,7 +449,7 @@ async def asset(page: str, request: Request):
         finally:
             await state.leave_source(generation)
     return Response(
-        content=page_png(page),
+        content=page_png(page, request.query_params.get("benchmark")),
         media_type="image/png",
         headers=(
             IMMUTABLE_HEADERS
@@ -471,7 +567,7 @@ async def render_artifact(
             "patch_id": None if reason else f"patch-{block_id}",
             "patch_bbox": None if reason else [80, 80, 240, 120],
             "clean_region": None if reason else [80, 80, 240, 120],
-            "fit_bbox": [80, 80, 12, 12] if page == "D" else [80, 80, 240, 120],
+            "fit_bbox": [100, 90, 200, 100] if page == "D" else [80, 80, 240, 120],
             "patch_mime": None if reason else "image/png",
             "patch_rgba": None if reason else base64.b64encode(patch_png(page)).decode("ascii"),
             "reason": reason,

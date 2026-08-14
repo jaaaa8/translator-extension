@@ -1,14 +1,17 @@
 import asyncio
 import base64
 import json
+import math
 import struct
 import time
 import zlib
 from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
+from io import BytesIO
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from server import config
 from server.acceptance_app import (
@@ -113,8 +116,7 @@ def ndjson(response):
     return [json.loads(line) for line in response.text.splitlines() if line.strip()]
 
 
-def decode_rgba_png(encoded: str) -> tuple[int, int, int, bytes]:
-    payload = base64.b64decode(encoded, validate=True)
+def decode_png(payload: bytes) -> tuple[int, int, int, bytes]:
     assert payload.startswith(b"\x89PNG\r\n\x1a\n")
     offset = 8
     chunks = []
@@ -129,15 +131,31 @@ def decode_rgba_png(encoded: str) -> tuple[int, int, int, bytes]:
         if kind == b"IEND":
             break
     assert offset == len(payload)
-    assert [kind for kind, _ in chunks] == [b"IHDR", b"IDAT", b"IEND"]
+    assert chunks[0][0] == b"IHDR"
+    assert chunks[-1][0] == b"IEND"
     width, height, bit_depth, color_type, compression, filtering, interlace = (
         struct.unpack(">IIBBBBB", chunks[0][1])
     )
     assert (bit_depth, compression, filtering, interlace) == (8, 0, 0, 0)
-    scanline = zlib.decompress(chunks[1][1])
-    assert len(scanline) == 1 + width * height * 4
-    assert scanline[0] == 0
-    return width, height, color_type, scanline[1:]
+    channels = {2: 3, 6: 4}[color_type]
+    scanlines = zlib.decompress(b"".join(data for kind, data in chunks if kind == b"IDAT"))
+    stride = width * channels
+    assert len(scanlines) == height * (stride + 1)
+    pixels = bytearray()
+    for row in range(height):
+        start = row * (stride + 1)
+        assert scanlines[start] == 0
+        pixels.extend(scanlines[start + 1:start + 1 + stride])
+    return width, height, color_type, bytes(pixels)
+
+
+def decode_rgba_png(encoded: str) -> tuple[int, int, int, bytes]:
+    return decode_png(base64.b64decode(encoded, validate=True))
+
+
+def pixel_at(pixels: bytes, width: int, channels: int, x: int, y: int):
+    offset = (y * width + x) * channels
+    return tuple(pixels[offset:offset + channels])
 
 
 def test_health_exposes_complete_fixed_versions_for_extension_keys():
@@ -162,6 +180,11 @@ def test_health_fixture_and_assets_are_isolated_and_deterministic():
         fixture = http.get("/fixture.html?acceptance=reader")
         assert fixture.status_code == 200
         assert "MangaTranslator layout fixture" in fixture.text
+        fixture_images = [http.get(f"/{language}_page.png") for language in ("ja", "es")]
+        assert all(response.status_code == 200 for response in fixture_images)
+        assert all(response.headers["content-type"] == "image/png" for response in fixture_images)
+        assert all(response.headers["cache-control"] == "no-store" for response in fixture_images)
+        assert all(Image.open(BytesIO(response.content)).size[0] > 0 for response in fixture_images)
         payloads = [http.get(f"/assets/{page}.png") for page in "ABCD"]
         assert all(response.status_code == 200 for response in payloads)
         assert all(response.headers["cache-control"] == "no-store" for response in payloads)
@@ -169,6 +192,40 @@ def test_health_fixture_and_assets_are_isolated_and_deterministic():
         assert [response.content for response in payloads] == [page_png(page) for page in "ABCD"]
         benchmark = http.get("/assets/A.png?benchmark=1")
         assert benchmark.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+
+def test_benchmark_samples_are_unique_cold_sources_with_identical_raster():
+    with client() as http:
+        samples = {
+            name: http.get(f"/assets/A.png?benchmark={name}")
+            for name in ("1", "2")
+        }
+
+        assert samples["1"].content != samples["2"].content
+        assert decode_png(samples["1"].content)[3] == decode_png(samples["2"].content)[3]
+
+        for name, response in samples.items():
+            events = ndjson(http.post(
+                "/ocr-stream",
+                data={
+                    "analysis_key": f"analysis-benchmark-{name}",
+                    "ocr_key": f"ocr-benchmark-{name}",
+                    "src_lang": "ja",
+                    "render_artifact_key": f"render-benchmark-{name}",
+                },
+                files={"image": (f"A-{name}.png", response.content, "image/png")},
+            ))
+            block = next(row for row in events if row["type"] == "ocr_block")
+            assert block["block_id"] == "A-1"
+
+
+def test_benchmark_controller_is_served_by_acceptance_app():
+    with client() as http:
+        response = http.get("/fixture-benchmark.js")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/javascript")
+    assert response.content
 
 
 def test_control_validation_reset_release_and_snapshot():
@@ -447,6 +504,165 @@ def test_translation_batch_fault_is_consumed_once_and_ids_stay_exact():
         }
 
 
+def test_page_a_source_and_patch_are_visually_consistent():
+    expected_bbox = [80, 80, 240, 120]
+    known_raw_ink = {(106, 102), (182, 120), (234, 102)}
+
+    with client() as http:
+        post_json(http, "/__acceptance/reset")
+        source = http.get("/assets/A.png", headers={"sec-fetch-dest": "image"})
+        events = ndjson(http.post(
+            "/ocr-stream",
+            **ocr_form("A", "analysis-A", "ocr-A"),
+        ))
+        block = next(row for row in events if row["type"] == "ocr_block")
+        artifact = http.post("/render-artifact", data={
+            "analysis_key": "analysis-A",
+            "render_artifact_key": "render-A",
+            "source_content_hash": "unused-on-key-hit",
+        }).json()
+        candidate = artifact["blocks"][0]
+
+    assert source.status_code == 200
+    assert block["bbox"] == expected_bbox
+    assert candidate["patch_bbox"] == expected_bbox
+    assert candidate["clean_region"] == expected_bbox
+
+    patch_width, patch_height, patch_type, patch_pixels = decode_rgba_png(
+        candidate["patch_rgba"]
+    )
+    assert (patch_width, patch_height) == tuple(expected_bbox[2:])
+    assert patch_type == 6
+
+    source_width, source_height, source_type, source_pixels = decode_png(source.content)
+    assert (source_width, source_height, source_type) == (800, 1200, 2)
+    for point in ((50, 50), (350, 50), (50, 230), (350, 230)):
+        assert pixel_at(source_pixels, source_width, 3, *point) == (204, 204, 204)
+    for point in ((200, 48), (48, 140)):
+        assert pixel_at(source_pixels, source_width, 3, *point) == (96, 96, 96)
+    for point in ((200, 60), (60, 140)):
+        assert pixel_at(source_pixels, source_width, 3, *point) == (255, 255, 255)
+    raw_ink = {
+        (x, y)
+        for y in range(source_height)
+        for x in range(source_width)
+        if pixel_at(source_pixels, source_width, 3, x, y) == (0, 0, 0)
+    }
+    assert known_raw_ink <= raw_ink
+    left, top, width, height = expected_bbox
+    assert all(left <= x < left + width and top <= y < top + height for x, y in raw_ink)
+
+    raw_ink_mask = {(x - left, y - top) for x, y in raw_ink}
+    fixture_scale_range = (0.426, 0.464)
+    max_minification_footprint = 1 / min(fixture_scale_range)
+    dilation_radius = 3
+    assert dilation_radius == math.ceil(max_minification_footprint)
+    expected_erase_mask = {
+        (x + dx, y + dy)
+        for x, y in raw_ink_mask
+        for dx in range(-dilation_radius, dilation_radius + 1)
+        for dy in range(-dilation_radius, dilation_radius + 1)
+        if 0 <= x + dx < width and 0 <= y + dy < height
+    }
+    for x, y in expected_erase_mask - raw_ink_mask:
+        assert pixel_at(source_pixels, source_width, 3, left + x, top + y) == (
+            255, 255, 255
+        )
+    actual_erase_mask = set()
+    for y in range(patch_height):
+        for x in range(patch_width):
+            red, green, blue, alpha = pixel_at(
+                patch_pixels, patch_width, 4, x, y
+            )
+            assert alpha in {0, 255}
+            if alpha:
+                assert (red, green, blue) == (255, 255, 255)
+                actual_erase_mask.add((x, y))
+    assert raw_ink_mask <= actual_erase_mask
+    assert actual_erase_mask == expected_erase_mask
+
+    def composited_pixel(x: int, y: int):
+        source_pixel = pixel_at(source_pixels, source_width, 3, x, y)
+        if not (left <= x < left + width and top <= y < top + height):
+            return source_pixel
+        red, green, blue, alpha = pixel_at(
+            patch_pixels, patch_width, 4, x - left, y - top
+        )
+        patch_pixel = (red, green, blue)
+        return tuple(
+            (patch_channel * alpha + source_channel * (255 - alpha) + 127) // 255
+            for source_channel, patch_channel in zip(source_pixel, patch_pixel)
+        )
+
+    assert all(composited_pixel(x, y) == (255, 255, 255) for x, y in raw_ink)
+    for point in ((90, 90), (400, 400)):
+        assert composited_pixel(*point) == pixel_at(
+            source_pixels, source_width, 3, *point
+        )
+
+
+def test_page_d_long_text_uses_bubble_safe_render_geometry():
+    with client() as http:
+        post_json(http, "/__acceptance/reset")
+        source_a = http.get("/assets/A.png", headers={"sec-fetch-dest": "image"})
+        source_d = http.get("/assets/D.png", headers={"sec-fetch-dest": "image"})
+        events = ndjson(http.post(
+            "/ocr-stream",
+            **ocr_form("D", "analysis-D", "ocr-D"),
+        ))
+        block = next(row for row in events if row["type"] == "ocr_block")
+        candidate = http.post("/render-artifact", data={
+            "analysis_key": "analysis-D",
+            "render_artifact_key": "render-D",
+            "source_content_hash": "unused-on-key-hit",
+        }).json()["blocks"][0]
+
+    with Image.open(BytesIO(source_a.content)) as image:
+        source_a_pixels = image.convert("RGB").tobytes()
+    with Image.open(BytesIO(source_d.content)) as image:
+        source_d_pixels = image.convert("RGB").tobytes()
+    assert source_d_pixels == source_a_pixels
+    assert block["bbox"] == [80, 80, 240, 120]
+    assert candidate["patch_bbox"] == [80, 80, 240, 120]
+    assert candidate["fit_bbox"] == [100, 90, 200, 100]
+
+    for x, y in ((100, 90), (300, 90), (100, 190), (300, 190)):
+        assert (x - 200) ** 2 * 80 ** 2 + (y - 140) ** 2 * 140 ** 2 < (
+            140 ** 2 * 80 ** 2
+        )
+
+    width, height, color_type, pixels = decode_rgba_png(candidate["patch_rgba"])
+    assert (width, height, color_type) == (240, 120, 6)
+    assert pixel_at(pixels, width, 4, 106 - 80, 102 - 80) == (255, 255, 255, 255)
+    assert pixel_at(pixels, width, 4, 0, 0) == (255, 255, 255, 0)
+
+
+def test_non_rendered_pages_keep_source_ink_inside_speech_bubble():
+    with client() as http:
+        sources = {
+            page: http.get(f"/assets/{page}.png", headers={"sec-fetch-dest": "image"})
+            for page in ("B", "C")
+        }
+
+    for source in sources.values():
+        with Image.open(BytesIO(source.content)) as image:
+            width, height = image.size
+            pixels = image.convert("RGB").load()
+            black_ink = {
+                (x, y)
+                for y in range(height)
+                for x in range(width)
+                if pixels[x, y] == (0, 0, 0)
+            }
+
+        assert black_ink
+        assert all(
+            (x - 200) ** 2 * 80 ** 2 + (y - 140) ** 2 * 140 ** 2
+            < 140 ** 2 * 80 ** 2
+            for x, y in black_ink
+        )
+
+
 def test_synthetic_pages_freeze_translation_manifest_and_render_candidates():
     expected = {
         "A": {
@@ -474,9 +690,9 @@ def test_synthetic_pages_freeze_translation_manifest_and_render_candidates():
                 "id": "D-1", "kind": "text",
                 "translation": EXPECTED_LONG_TRANSLATION,
             },
-            "fit_bbox": [80, 80, 12, 12],
-            "manifest": {"D-1"}, "rendered": set(),
-            "skips": {"D-1": "fit_failed"}, "coverage": 0.0,
+            "fit_bbox": [100, 90, 200, 100],
+            "manifest": {"D-1"}, "rendered": {"D-1"},
+            "skips": {}, "coverage": 1.0,
         },
     }
     with client() as http:
@@ -514,7 +730,9 @@ def test_synthetic_pages_freeze_translation_manifest_and_render_candidates():
                 if row["reason"] is None:
                     assert row["patch_mime"] == "image/png"
                     width, height, color_type, pixels = decode_rgba_png(row["patch_rgba"])
-                    assert (width, height, color_type, len(pixels)) == (1, 1, 6, 4)
+                    assert color_type == 6
+                    assert width > 0 and height > 0
+                    assert len(pixels) == width * height * 4
                     repeated = http.post("/render-artifact", data={
                         "analysis_key": "ignored-on-key-hit",
                         "render_artifact_key": render_key,
@@ -530,13 +748,7 @@ def test_synthetic_pages_freeze_translation_manifest_and_render_candidates():
                 tuple(golden["fit_bbox"])
             }
             candidate_reasons = {
-                block_id: (
-                    row["reason"]
-                    if row["reason"] is not None
-                    else "fit_failed"
-                    if row["fit_bbox"] == [80, 80, 12, 12]
-                    else None
-                )
+                block_id: row["reason"]
                 for block_id, row in candidates.items()
             }
             rendered = {
