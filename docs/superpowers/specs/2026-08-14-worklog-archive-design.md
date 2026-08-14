@@ -2,7 +2,7 @@
 title: Thiết kế kho lưu trữ worklog MangaTranslator
 note_type: design-spec
 date: 2026-08-14
-status: approved-design-awaiting-spec-review
+status: approved
 branch: feat/worklog-archive
 tags:
   - mangatranslator
@@ -14,7 +14,7 @@ tags:
 
 **Nhánh thực hiện:** `feat/worklog-archive`, tách từ tip `feat/v5` tại `6770d74`
 
-**Trạng thái:** ba phần thiết kế đã được người dùng duyệt; tài liệu này chờ review trước khi lập implementation plan
+**Trạng thái:** review PASS ngày 2026-08-14; Minor mô tả L10–13 đã sửa; sẵn sàng lập implementation plan
 
 ## 1. Kết quả cần đạt
 
@@ -243,7 +243,7 @@ Frontmatter mới gồm `note_type: index`, `status: active` và alias `MangaTra
 
 Trong body:
 
-- Giữ nguyên byte nội dung bốn dòng gốc L10–13: H1, dòng mô tả dự án, dòng Spec/Plan/Nhánh và dòng trống kết thúc đoạn. Vị trí dòng trong file mới có thể thay đổi vì frontmatter mới.
+- Giữ nguyên byte nội dung bốn dòng gốc L10–13: H1, dòng trống, dòng mô tả dự án và dòng Spec/Plan/Nhánh. Vị trí dòng trong file mới có thể thay đổi vì frontmatter mới.
 - Thêm các section: tổng quan hiện tại, hành trình version, việc còn mở, timeline và danh sách 14 work item.
 - Mỗi H2 lịch sử trong snapshot sinh đúng một dòng timeline, theo thứ tự nguồn. Mỗi dòng tóm tắt ngắn “vấn đề → fix/quyết định → kết quả” và link tới H2 nguyên văn trong worklog sở hữu.
 - Nguồn hiện có 60 H2 và tất cả duy nhất. Index chỉ link tới H2; không link tới bốn nhóm H3 bị trùng.
