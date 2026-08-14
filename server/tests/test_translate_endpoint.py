@@ -43,7 +43,7 @@ class FakeTranslator:
         if self.item_reply is not None:
             return self.item_reply
         return [
-            {"id": item["id"], "translation": f"{dst}:{item['text']}"}
+            {"id": item["id"], "kind": "text", "translation": f"{dst}:{item['text']}"}
             for item in reversed(items)
         ]
 
@@ -188,7 +188,10 @@ def test_translate_items_ok(monkeypatch):
         ]),
     )
     assert r.status_code == 200
-    assert r.json() == {"items": [{"id": "b1", "translation": "vi:hola"}, {"id": "b2", "translation": "vi:adios"}]}
+    assert r.json() == {"items": [
+        {"id": "b1", "kind": "text", "translation": "vi:hola"},
+        {"id": "b2", "kind": "text", "translation": "vi:adios"},
+    ]}
     assert pipeline.translator.item_calls == [{
         "items": [
             {"id": "b1", "text": "hola", "reading_order": 0, "bbox": (1, 2, 3, 4)},
@@ -202,12 +205,25 @@ def test_translate_items_ok(monkeypatch):
     }]
 
 
+def test_translate_items_returns_sfx_as_json_null(monkeypatch):
+    monkeypatch.setattr(main, "_pipeline", FakePipeline(item_reply=[
+        {"id": "b1", "kind": "sfx", "translation": None},
+    ]))
+
+    response = TestClient(main.app).post("/translate-items", json=translate_body())
+
+    assert response.status_code == 200
+    assert response.json() == {"items": [{"id": "b1", "kind": "sfx", "translation": None}]}
+    assert b'"translation":null' in response.content
+    assert b"None" not in response.content
+
+
 @pytest.mark.parametrize(
     "item_reply",
     [
-        [{"id": "b1", "translation": "one"}],
-        [{"id": "b1", "translation": "one"}, {"id": "foreign", "translation": "two"}],
-        [{"id": "b1", "translation": "one"}, {"id": "b1", "translation": "two"}],
+        [{"id": "b1", "kind": "text", "translation": "one"}],
+        [{"id": "b1", "kind": "text", "translation": "one"}, {"id": "foreign", "kind": "text", "translation": "two"}],
+        [{"id": "b1", "kind": "text", "translation": "one"}, {"id": "b1", "kind": "text", "translation": "two"}],
     ],
 )
 def test_translate_items_rejects_invalid_translator_id_set(monkeypatch, item_reply):
@@ -220,6 +236,20 @@ def test_translate_items_rejects_invalid_translator_id_set(monkeypatch, item_rep
         ]),
     )
     assert r.status_code == 502
+
+
+def test_translate_items_maps_invalid_kind_to_existing_invalid_response(monkeypatch):
+    monkeypatch.setattr(main, "_pipeline", FakePipeline(item_reply=[
+        {"id": "b1", "kind": "sfx", "translation": "bam"},
+    ]))
+
+    response = TestClient(main.app).post("/translate-items", json=translate_body())
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "error": "gemini: sfx translation must be null",
+        "error_code": "invalid_response",
+    }
 
 
 def test_translate_items_returns_machine_readable_rate_limit(monkeypatch):

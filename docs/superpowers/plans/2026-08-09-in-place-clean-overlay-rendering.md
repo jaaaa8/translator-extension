@@ -12,8 +12,8 @@
 
 ## Ràng buộc toàn cục
 
-- Trước khi sửa code, đọc `GIT-RULES.md` và dùng `superpowers:using-git-worktrees`; không triển khai trực tiếp trên worktree đang có `ocr-manga-extension-roadmap.md` bị xóa và `manga-ocr-overlay-notes.md` chưa track.
-- Spec và plan đã duyệt hiện là file chưa track trong worktree chính. Worktree triển khai phải đọc chúng bằng hai đường dẫn tuyệt đối `D:\MangaTranslator\docs\superpowers\specs\2026-08-08-in-place-clean-overlay-rendering-design.md` và `D:\MangaTranslator\docs\superpowers\plans\2026-08-09-in-place-clean-overlay-rendering.md`; không tự copy, stage hay commit các file dirty/untracked của worktree chính.
+- Trước khi sửa code, đọc `GIT-RULES.md` và chỉ làm việc trong worktree triển khai hiện có trên nhánh `feat/v5`; dừng nếu kiểm tra branch/status bên dưới không khớp.
+- Spec và plan đã duyệt là file tracked trong worktree triển khai. Luôn đọc chúng bằng đường dẫn tương đối `docs/superpowers/specs/2026-08-08-in-place-clean-overlay-rendering-design.md` và `docs/superpowers/plans/2026-08-09-in-place-clean-overlay-rendering.md` của chính worktree này; không mở hoặc copy bản thứ hai từ worktree chính.
 - Không stage hoặc commit tự động. Mỗi task dừng ở review checkpoint; chỉ commit khi người dùng cấp quyền riêng cho checkpoint đó.
 - Mọi Python test dùng `D:\MangaTranslator\venv\Scripts\python.exe`; không dùng system Python/pytest.
 - Không chạy `server/tests/test_ocr.py`; test này tải model/fixture thật và chỉ chạy khi người dùng phê duyệt gate riêng.
@@ -57,12 +57,12 @@
 - No source modification
 
 **Interfaces:**
-- Consumes: current `feat/v4` source and the approved Spec C document.
+- Consumes: current `feat/v5` source (branched from the integrated main source) and the approved Spec C document in this worktree.
 - Produces: isolated worktree path plus exact baseline test output; no code.
 
-- [ ] **Step 1: Create or select the isolated implementation worktree**
+- [ ] **Step 1: Confirm the existing isolated implementation worktree**
 
-Invoke `superpowers:using-git-worktrees`, follow `GIT-RULES.md`, then record:
+From the existing implementation worktree, follow `GIT-RULES.md` and record:
 
 ```powershell
 git branch --show-current
@@ -70,7 +70,7 @@ git status --short
 git rev-parse HEAD
 ```
 
-Expected: implementation worktree is clean. The dirty main-worktree files are not staged, copied or deleted.
+Expected: branch is `feat/v5`, the implementation worktree is clean, and the recorded HEAD is the source baseline for all later checkpoints. Do not create or select another worktree.
 
 - [ ] **Step 2: Run the server baseline without the real OCR test**
 
@@ -490,6 +490,8 @@ assert client.post("/render-artifact", data={
 
 Then upload bytes, assert source-hash mismatch returns `409 source_identity_mismatch`, valid upload returns all render fields/base64 PNG, repeated key builds once, and two concurrent requests share the same future.
 
+For `/ocr-stream`, assert both production and acceptance still accept an omitted `render_artifact_key` during this compatibility task. When the field is present, production must start `ensure_render()` after analysis and before OCR iteration.
+
 - [ ] **Step 2: Write red overlap/lock test**
 
 Use events around a fake `build_render_artifact` and fake OCR engine. Assert render build starts after analysis and can remain blocked while OCR enters `_ocr_lock`; releasing either does not require releasing the other.
@@ -523,9 +525,9 @@ self._render_futures_lock = Lock()
 
 Use form fields `analysis_key`, `render_artifact_key`, `source_content_hash`, optional crop coordinates and optional image. Without live analysis/image return `409 artifact_missing`. With image, verify SHA-256 before `Pipeline.analyze()`. Serialize internal `patch_png` thành trường JSON `patch_rgba` bằng base64 chỉ tại HTTP boundary; response luôn có `schema_version="render-v1"` và `render_artifact_key` đúng request.
 
-Add required `render_artifact_key` to `/ocr-stream`; after analysis succeeds, call `ensure_render()` before yielding/iterating OCR so cleaning overlaps recognition.
+Add `render_artifact_key: str | None = Form(None)` to production and acceptance `/ocr-stream`. In production, after analysis succeeds, call `ensure_render()` before yielding/iterating OCR only when the field is present, so cleaning overlaps recognition without breaking the still-legacy extension caller.
 
-Update every production and acceptance `/ocr-stream` form/caller in this task, not later: both apps require the same field and both health endpoints expose the same two version domains. Keep Task 14 for deterministic render payloads, metrics and cache headers, so the existing protocol test suite is green at this checkpoint.
+Update both endpoint forms and their direct test callers in this task, but keep the field optional until Task 8 wires the extension caller and then makes it required in both apps. Both health endpoints expose the same two version domains. Keep Task 14 for deterministic render payloads, metrics and cache headers, so the existing protocol test suite is green at this checkpoint.
 
 - [ ] **Step 6: Split version payloads**
 
@@ -543,10 +545,10 @@ PIPELINE_VERSIONS = {
         "pt": "paddleocr-latin-ppocrv6-v1",
     },
     "translator_model": GEMINI_MODEL,
-    "prompt": "comic-page-items-v3",
+    "prompt": "comic-page-items-v2",
     "policy": "full-page-v1",
     "layout_order": "reading-order-v1",
-    "page_schema": "page-v2",
+    "page_schema": "page-v1",
 }
 PATCH_VERSIONS = {
     "cleaner": "telea3-feather2-v1",
@@ -555,7 +557,7 @@ PATCH_VERSIONS = {
 }
 ```
 
-Keep the existing recognizer values verbatim. `/health` returns both objects.
+Keep the existing recognizer, prompt and page-schema values verbatim in this task. Task 5 bumps only `region_resolver` in the page domain and introduces `PATCH_VERSIONS`; Task 6 bumps the prompt with its implementation, and Task 7 bumps `page_schema` at both identity owners. `/health` returns both objects.
 
 - [ ] **Step 7: Run green tests**
 
@@ -577,8 +579,10 @@ Inspect that translation/model/prompt values never participate in server render 
 - Modify: `server/contracts.py:8-34`
 - Modify: `server/translator.py:22-165`
 - Modify: `server/main.py:157-184`
+- Modify: `server/config.py:11-25`
 - Modify: `server/tests/test_translator.py`
 - Modify: `server/tests/test_translate_endpoint.py`
+- Modify: `server/tests/test_health.py`
 
 **Interfaces:**
 - Consumes: unchanged request item fields `id,text,reading_order,bbox`.
@@ -603,15 +607,15 @@ Parametrize invalid pairs: `text/null`, `text/empty`, `sfx/string`, invalid kind
 
 - [ ] **Step 2: Write endpoint/prompt red tests**
 
-Assert `/translate-items` returns JSON null, never `"None"`, and `ITEM_PROMPT` explicitly requests exact keys plus conditional null. Assert input projected to Gemini still has only the four existing request fields.
+Assert `/translate-items` returns JSON null, never `"None"`, and `ITEM_PROMPT` explicitly requests exact keys plus conditional null. Assert input projected to Gemini still has only the four existing request fields. Assert production `/health` advertises `versions.prompt == "comic-page-items-v3"` only with this new prompt contract.
 
 - [ ] **Step 3: Run red tests**
 
 ```powershell
-& 'D:\MangaTranslator\venv\Scripts\python.exe' -m pytest server/tests/test_translator.py server/tests/test_translate_endpoint.py -q
+& 'D:\MangaTranslator\venv\Scripts\python.exe' -m pytest server/tests/test_translator.py server/tests/test_translate_endpoint.py server/tests/test_health.py -q
 ```
 
-Expected: FAIL on the old two-field response and `str(None)` coercion.
+Expected: FAIL on the old two-field response, `str(None)` coercion, and the still-v2 prompt identity.
 
 - [ ] **Step 4: Implement one shared strict normalizer**
 
@@ -635,12 +639,12 @@ Both Gemini decode and `server/main.py` response pass through this helper. Do no
 
 - [ ] **Step 5: Update prompt and tests**
 
-Prompt tells Gemini to classify sound-effect lettering as `sfx`, keep dialogue/narration as `text`, return each input ID once, and emit null only for SFX. Keep one retry and full-page context unchanged.
+Prompt tells Gemini to classify sound-effect lettering as `sfx`, keep dialogue/narration as `text`, return each input ID once, and emit null only for SFX. Keep one retry and full-page context unchanged. In the same change, set `PIPELINE_VERSIONS["prompt"] = "comic-page-items-v3"`; do not advertise v3 before the prompt/normalizer exists.
 
 - [ ] **Step 6: Run green tests**
 
 ```powershell
-& 'D:\MangaTranslator\venv\Scripts\python.exe' -m pytest server/tests/test_translator.py server/tests/test_translate_endpoint.py -q
+& 'D:\MangaTranslator\venv\Scripts\python.exe' -m pytest server/tests/test_translator.py server/tests/test_translate_endpoint.py server/tests/test_health.py -q
 ```
 
 Expected: PASS.
@@ -656,16 +660,23 @@ Inspect the HTTP response and hot-cache payload types: no string coercion may oc
 **Files:**
 - Modify: `extension/page-cache.js:1-315`
 - Modify: `extension/test/page-cache.test.js`
+- Modify: `server/config.py:11-25`
+- Modify: `server/acceptance_app.py:284-303`
+- Modify: `server/tests/test_health.py`
+- Modify: `server/tests/test_acceptance_app.py`
 
 **Interfaces:**
 - Consumes: `versions`, `patch_versions`, `LAYOUT_FIT_VERSION`, PageRow/RenderBlock shapes from the spec.
-- Produces: validated PageRow round-trip, manifest absent/empty distinction, ready/sentinel render validation, selective purge.
+- Produces: validated PageRow round-trip, simultaneous `page-v2` identity at extension/production/acceptance health, manifest absent/empty distinction, ready/sentinel render validation, selective purge.
 
 - [ ] **Step 1: Write a full round-trip red test with fixed clock**
 
-Build a `page-v2` row containing text, SFX, vertical/reading order, manifest, mismatch count and ready render. Assert `putPage()` then `getPage()` deep-equals expected metadata. Add separate rows asserting:
+Build a `page-v2` row containing text, SFX, vertical/reading order, manifest, mismatch count and ready render. Include the existing operational fields `analysis_known`, `image_w`, `image_h`, `source_url`, `natural_width`, `natural_height`, `crop`, `created_at`, `updated_at`, `last_accessed_at` and `last_error`. Assert `putPage()` then `getPage()` deep-equals expected metadata with a fixed clock, including:
 
 ```javascript
+assert.strictEqual(roundTripped.analysis_known, true);
+assert.strictEqual(roundTripped.image_w, 800);
+assert.strictEqual(roundTripped.image_h, 1200);
 assert.strictEqual(Object.hasOwn(withoutManifest, "manifest_ids"), false);
 assert.deepStrictEqual(allSfx.manifest_ids, []);
 ```
@@ -687,15 +698,16 @@ Cover:
 
 ```powershell
 node --test extension/test/page-cache.test.js
+& 'D:\MangaTranslator\venv\Scripts\python.exe' -m pytest server/tests/test_health.py server/tests/test_acceptance_app.py -q
 ```
 
-Expected: FAIL because page-v2 fields and selective comparison do not exist.
+Expected: FAIL because page-v2 fields/selective comparison do not exist and the two health sites still advertise page-v1.
 
 - [ ] **Step 5: Implement exact allowlists**
 
-Set `PAGE_SCHEMA = "page-v2"`. Add dedicated validators `storedTranslationBlock`, `storedRenderBlock`, `storedRenderSubrecord`, and `storedManifestIds`; do not pass nullable enum/number fields through `copyStrings()`.
+Set `PAGE_SCHEMA = "page-v2"`, `PIPELINE_VERSIONS["page_schema"] = "page-v2"`, and the acceptance `/health` page-schema value to `"page-v2"` in the same task. Add dedicated validators `storedTranslationBlock`, `storedRenderBlock`, `storedRenderSubrecord`, and `storedManifestIds`; do not pass nullable enum/number fields through `copyStrings()`.
 
-`storedTranslationBlock()` phải allowlist tường minh toàn bộ `block_id`, `bbox`, `src_text`, `trans_text`, `kind`, `vertical`, `reading_order`, `state`. Page allowlist phải giữ tường minh `schema_version`, hai object version, năm identity field (`page_artifact_key`, `analysis_key`, `ocr_key`, `render_artifact_key`, `source_content_hash`), language/direction/state, `ocr_done`, `blocks`, optional `manifest_ids`, `manifest_mismatch_count` và optional `render`. Render validator giữ mọi field trong contract `RenderSubrecord`/`RenderBlock` đã duyệt; không dùng object spread tại persistence boundary.
+`storedTranslationBlock()` phải allowlist tường minh toàn bộ `block_id`, `bbox`, `src_text`, `trans_text`, `kind`, `vertical`, `reading_order`, `state`. Page allowlist là phần mở rộng nghiêm ngặt của `storedPage()` hiện tại: ngoài `schema_version`, hai object version, năm identity field (`page_artifact_key`, `analysis_key`, `ocr_key`, `render_artifact_key`, `source_content_hash`), language/direction/state, `ocr_done`, `blocks`, optional `manifest_ids`, `manifest_mismatch_count` và optional `render`, phải giữ và validate tường minh `analysis_known` (boolean), `image_w`/`image_h` (nullable finite number), `source_url`, `natural_width`/`natural_height`, `crop`, `created_at`, `updated_at`, `last_accessed_at` và `last_error`. Dùng nhánh nullable-number tương đương `copyNumbers(..., ["image_w", "image_h"])`; không suy allowlist toàn phần chỉ từ khối PageRow liệt kê các field mới trong spec. Render validator giữ mọi field trong contract `RenderSubrecord`/`RenderBlock` đã duyệt; không dùng object spread tại persistence boundary.
 
 Use:
 
@@ -713,6 +725,7 @@ Never default absent manifest to `[]`.
 
 ```powershell
 node --test extension/test/page-cache.test.js
+& 'D:\MangaTranslator\venv\Scripts\python.exe' -m pytest server/tests/test_health.py server/tests/test_acceptance_app.py -q
 ```
 
 Expected: PASS.
@@ -728,13 +741,17 @@ Inspect serialized storage JSON and assert no base64 PNG/`patch_rgba` value exis
 **Files:**
 - Create: `extension/source-fetch.js`
 - Create: `extension/test/source-fetch.test.js`
-- Modify: `extension/background.js:1-121,397-484,899-939`
+- Modify: `extension/background.js:1-121,397-625,899-939`
 - Modify: `extension/test/background-progressive.test.js`
 - Modify: `extension/test/progressive-integration.test.js`
+- Modify: `server/main.py:88-156`
+- Modify: `server/acceptance_app.py:335-394`
+- Modify: `server/tests/test_ocr_stream.py`
+- Modify: `server/tests/test_acceptance_app.py`
 
 **Interfaces:**
-- Produces: `MangaSourceFetch.create({fetchImpl, cryptoImpl, maxConcurrent})`, `pool.acquire(url) -> {promise, release}`, and async `buildKeys(descriptor, sourceIdentity, versions, patchVersions)`.
-- Consumes: descriptor source URL/crop and `/health` version siblings.
+- Produces: `MangaSourceFetch.create({fetchImpl, cryptoImpl, maxConcurrent})`, `pool.acquire(url) -> {promise, release}`, async `buildKeys(descriptor, sourceIdentity, versions, patchVersions)`, and the required end-to-end `/ocr-stream` render-key contract.
+- Consumes: descriptor source URL/crop, `/health` version siblings, and the optional `/ocr-stream` compatibility seam from Task 5.
 
 - [ ] **Step 1: Write source-pool red tests**
 
@@ -754,15 +771,16 @@ Add a deferred fetch fixture proving at most two URLs active, FIFO start, crop d
 
 - [ ] **Step 2: Write background key red tests**
 
-Assert same bytes/different URL yield same analysis key, same URL/different bytes yield different key, resolver bump changes analysis key, and dst/prompt/model changes do not alter render key.
+Assert same bytes/different URL yield same analysis key, same URL/different bytes yield different key, resolver bump changes analysis key, and dst/prompt/model changes do not alter render key. Capture the extension `/ocr-stream` FormData and assert it contains the exact `render_artifact_key` returned by `buildKeys()`. Add production and acceptance API tests asserting omission becomes `422` only after the caller is wired.
 
 - [ ] **Step 3: Run red tests**
 
 ```powershell
 node --test extension/test/source-fetch.test.js extension/test/background-progressive.test.js extension/test/progressive-integration.test.js
+& 'D:\MangaTranslator\venv\Scripts\python.exe' -m pytest server/tests/test_ocr_stream.py server/tests/test_acceptance_app.py -q
 ```
 
-Expected: FAIL because source identity is currently URL/natural dimensions and fetches are not pooled.
+Expected: FAIL because source identity is currently URL/natural dimensions, fetches are not pooled, the extension omits the render key, and both endpoints still accept that omission.
 
 - [ ] **Step 4: Implement the focused pool**
 
@@ -780,17 +798,23 @@ Implement the exact Spec C formulas and include `region_resolver` in `analysis_k
 
 Define `const LAYOUT_FIT_VERSION = "dom-fit-10px-v1"` trong background. Đưa nó vào render subrecord/event/metric identity, nhưng không đưa vào `/health`, `analysis_key`, `ocr_key`, `page_artifact_key` hoặc `render_artifact_key`; content chỉ echo giá trị nhận từ event, không sở hữu một constant trùng lặp.
 
+Preserve contract validity in this exact order inside the task:
+
+1. Store `renderArtifactKey` on the producer and append `form.append("render_artifact_key", producer.renderArtifactKey)` in `openOcrStream()` for every extension call; update every direct production/acceptance test caller in the same change.
+2. Only after those callers send the field, change production and acceptance to `render_artifact_key: str = Form(...)` and make production `ensure_render()` unconditional after analysis. Remove the optional Task 5 branch.
+
 - [ ] **Step 7: Run green tests**
 
 ```powershell
 node --test extension/test/source-fetch.test.js extension/test/background-progressive.test.js extension/test/progressive-integration.test.js
+& 'D:\MangaTranslator\venv\Scripts\python.exe' -m pytest server/tests/test_ocr_stream.py server/tests/test_acceptance_app.py -q
 ```
 
 Expected: PASS.
 
 - [ ] **Step 8: Review checkpoint**
 
-Inspect abort paths for supersede/disconnect: abort only the final URL consumer, never every crop/request sharing the fetch.
+Inspect abort paths for supersede/disconnect: abort only the final URL consumer, never every crop/request sharing the fetch. Also inspect the captured FormData and both endpoint signatures: no reachable extension `/ocr-stream` call may omit `render_artifact_key` when the server makes it required.
 
 ---
 
@@ -1225,7 +1249,7 @@ Record evidence for:
 
 - renderable text: no original ink, no rectangular white box, no visible seam;
 - scale/zoom: patch and text share geometry, no 1px clipping;
-- long text: shrinks no lower than 10px; overflow case leaves original unchanged;
+- long text: shrinks to exactly 10px inside the speech bubble, with `scrollWidth <= clientWidth` and `scrollHeight <= clientHeight`; keep `fit_failed` as a unit-level defensive check, not a visual acceptance fixture;
 - SFX: original remains and no translated text/patch appears;
 - partial replay followed by recovery failure: mounted overlay remains;
 - all-SFX cache hit: `image_done` precedes `scope_done` and translated count is 0.

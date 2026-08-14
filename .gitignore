@@ -21,7 +21,7 @@ graphify-out/
 log.txt
 
 # UI state cua Obsidian (config con lai van track)
-MangaTranslatorBrowser/.obsidian/workspace.json
+docs/.obsidian/workspace.json
 
 # Khoa ky extension - khong bao gio commit
 *.pem

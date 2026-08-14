@@ -68,12 +68,15 @@
 
     <script>
       const acceptance = new URLSearchParams(location.search).get("acceptance");
+      const benchmark = new URLSearchParams(location.search).get("benchmark");
       const acceptanceSources = Object.fromEntries(
         ["A", "B", "C", "D"].map((page) => [page, `/assets/${page}.png`])
       );
       const page = () => document.getElementById("readerPage");
       const sources = { A: "ja_page.png", B: "es_page.png" };
       const otherSource = (img) => (img.src.endsWith(sources.A) ? sources.B : sources.A);
+
+      if (benchmark === "cold") page().src = "/assets/A.png?benchmark=warmup";
 
       for (const name of ["A", "B"]) {
         document.getElementById("page" + name).onclick = () => { page().src = sources[name]; };

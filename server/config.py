@@ -12,16 +12,22 @@ PIPELINE_VERSIONS = {
     "detector": "comic-text-detector-v1",
     "dedupe": "iou-0.5-area-clamp-exact-v3",
     "prep": "upscale48-border8-v1",
+    "region_resolver": "light-component-v1",
     "recognizers": {
         "ja": "manga-ocr-v1",
         "es": "paddleocr-latin-ppocrv6-v1",
         "pt": "paddleocr-latin-ppocrv6-v1",
     },
     "translator_model": GEMINI_MODEL,
-    "prompt": "comic-page-items-v2",
+    "prompt": "comic-page-items-v3",
     "policy": "full-page-v1",
     "layout_order": "reading-order-v1",
-    "page_schema": "page-v1",
+    "page_schema": "page-v2",
+}
+PATCH_VERSIONS = {
+    "cleaner": "telea3-feather2-v1",
+    "render_encoding": "png-rgba-v1",
+    "render_schema": "render-v1",
 }
 PORT = int(os.getenv("PORT", "8910"))
 DEVICE = os.getenv("DEVICE", "cuda")

@@ -1,7 +1,8 @@
 const assert = require("assert");
 const fs = require("fs");
+const test = require("node:test");
 const vm = require("vm");
-const { webcrypto } = require("crypto");
+const { createHash, webcrypto } = require("crypto");
 const { TextEncoder, TextDecoder } = require("util");
 
 function responseFrom(chunks) {
@@ -21,6 +22,36 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+function sourceIdentityFor(source, bytes = Buffer.from(source)) {
+  return {
+    sourceContentHash: createHash("sha256").update(bytes).digest("hex"),
+    blob: new Blob([bytes]),
+  };
+}
+
+function translationKeyDigestBarrier() {
+  const entered = deferred();
+  const release = deferred();
+  let held = false;
+  return {
+    entered: entered.promise,
+    release: release.resolve,
+    crypto: {
+      subtle: {
+        async digest(_algorithm, bytes) {
+          if (!held && new TextDecoder().decode(bytes).includes('"reading_order"')) {
+            held = true;
+            entered.resolve();
+            await release.promise;
+          }
+          const value = createHash("sha256").update(Buffer.from(bytes)).digest();
+          return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+        },
+      },
+    },
+  };
+}
+
 async function flush(turns = 4) {
   for (let index = 0; index < turns; index++) {
     await Promise.resolve();
@@ -31,7 +62,7 @@ async function flush(turns = 4) {
 async function waitUntil(check, label) {
   for (let index = 0; index < 1000; index++) {
     if (check()) return;
-    await flush(1);
+    await new Promise((resolve) => setTimeout(resolve, 1));
   }
   assert.fail(`timed out waiting for ${label}`);
 }
@@ -46,6 +77,7 @@ function fakeStorage(seed = {}) {
       if (key === null) value = { ...rows };
       else if (typeof key === "string") value = key in rows ? { [key]: rows[key] } : {};
       else value = Object.fromEntries(key.filter((name) => name in rows).map((name) => [name, rows[name]]));
+      if (this.afterGet) await this.afterGet(key, value);
       return this.cloneForRead ? this.cloneForRead(value) : value;
     },
     async set(values) {
@@ -80,23 +112,33 @@ function fakePort(name = "translation") {
 
 function createFakeServer() {
   const versions = {
-    detector: "d1", dedupe: "dd1", prep: "p1",
+    detector: "d1", dedupe: "dd1", prep: "p1", region_resolver: "rr1",
     recognizers: { ja: "r-ja", es: "r-latin", pt: "r-latin" },
-    translator_model: "g1", prompt: "pr1", policy: "po1", layout_order: "reading-order-v1", page_schema: "page-v1",
+    translator_model: "g1", prompt: "pr1", policy: "po1", layout_order: "reading-order-v1", page_schema: "page-v2",
   };
-  const counts = { health: 0, source: 0, ocr: 0, coldOcr: 0, warmOcr: 0, translate: 0, aborted: 0 };
+  const patchVersions = { cleaner: "c1", render_encoding: "png-rgba-v1", render_schema: "render-v1" };
+  const counts = { health: 0, source: 0, ocr: 0, coldOcr: 0, warmOcr: 0, render: 0, renderKey: 0, renderBlob: 0, translate: 0, aborted: 0 };
   const translationBatches = [];
   const translationRequests = [];
   const translationBodies = [];
+  const ocrForms = [];
   const sourceGates = new Map();
   const failedSources = new Set();
   const ocrRows = new Map();
   const ocrAfterFirstGates = new Map();
   const analysisSources = new Map();
+  const renderPages = new Map();
+  const renderRows = new Map();
+  const renderGates = new Map();
+  const renderKeyMisses = new Set();
+  const failedRenders = new Set();
+  const renderForms = [];
   const translationGates = new Map();
   const translationResults = [];
+  let beforeOcr = null;
   let online = true;
   let responseVersions = versions;
+  let responsePatchVersions = patchVersions;
 
   async function waitForGate(gate, signal) {
     if (!gate) return;
@@ -112,7 +154,7 @@ function createFakeServer() {
     if (url.endsWith("/health")) {
       counts.health++;
       if (!online) throw new Error("offline");
-      return { ok: true, json: async () => ({ versions: responseVersions }) };
+      return { ok: true, json: async () => ({ versions: responseVersions, patch_versions: responsePatchVersions }) };
     }
     if (!url.startsWith("http://127.0.0.1:8910/")) {
       counts.source++;
@@ -129,6 +171,10 @@ function createFakeServer() {
     if (url.endsWith("/ocr-stream")) {
       counts.ocr++;
       const form = options.body;
+      ocrForms.push(form);
+      const before = beforeOcr;
+      beforeOcr = null;
+      await before?.(form);
       const analysisKey = form.get("analysis_key");
       const image = form.get("image");
       if (!image && !analysisSources.has(analysisKey)) return { ok: false, status: 409, json: async () => ({ error: "analysis_missing" }) };
@@ -142,6 +188,7 @@ function createFakeServer() {
       const pageName = sourceUrl
         ? new URL(sourceUrl).pathname.split("/").pop().replace(/\.[^.]+$/, "")
         : null;
+      if (pageName) renderPages.set(form.get("render_artifact_key"), pageName);
       const srcText = form.get("src_lang") === "es" ? "hola" : "こんにちは";
       const rows = ocrRows.get(pageName) || [
         { type: "analysis_ready", image_w: 100, image_h: 200 },
@@ -167,6 +214,52 @@ function createFakeServer() {
         },
       };
     }
+    if (url.endsWith("/render-artifact")) {
+      counts.render++;
+      const form = options.body;
+      const renderKey = form.get("render_artifact_key");
+      const image = form.get("image");
+      if (image) counts.renderBlob++;
+      else counts.renderKey++;
+      let pageName = renderPages.get(renderKey);
+      if (image) {
+        const sourceUrl = await image.text();
+        pageName = new URL(sourceUrl).pathname.split("/").pop().replace(/\.[^.]+$/, "");
+        renderPages.set(renderKey, pageName);
+      }
+      renderForms.push(form);
+      if (!image && (!pageName || renderKeyMisses.delete(pageName))) {
+        return { ok: false, status: 409, json: async () => ({ error: "artifact_missing" }) };
+      }
+      await waitForGate(renderGates.get(pageName), options.signal);
+      if (failedRenders.has(pageName)) {
+        return { ok: false, status: 500, json: async () => ({ error: "clean_failed" }) };
+      }
+      const rows = ocrRows.get(pageName) || [
+        { type: "analysis_ready", image_w: 100, image_h: 200 },
+        { type: "ocr_block", block_id: "b1", bbox: [1, 2, 3, 4], src_text: "source" },
+        { type: "image_done", recognized: 1, failed: 0 },
+      ];
+      const dimensions = rows.find((row) => row.type === "analysis_ready") || {};
+      const blocks = renderRows.get(pageName) || rows.filter((row) => row.type === "ocr_block").map((row) => ({
+        block_id: row.block_id,
+        patch_id: `patch-${row.block_id}`,
+        patch_bbox: row.bbox,
+        clean_region: row.bbox,
+        fit_bbox: row.bbox,
+        patch_mime: "image/png",
+        patch_rgba: Buffer.from(`patch:${row.block_id}`).toString("base64"),
+        reason: null,
+      }));
+      return { ok: true, status: 200, json: async () => ({
+        schema_version: "render-v1",
+        render_artifact_key: renderKey,
+        analysis_key: form.get("analysis_key"),
+        image_w: dimensions.image_w,
+        image_h: dimensions.image_h,
+        blocks,
+      }) };
+    }
     if (url.endsWith("/translate-items")) {
       counts.translate++;
       const body = JSON.parse(options.body);
@@ -180,39 +273,51 @@ function createFakeServer() {
         if (result.response) return result.response;
         return { ok: true, json: async () => result };
       }
-      return { ok: true, json: async () => ({ items: body.items.map((item) => ({ id: item.id, translation: `${body.dst_lang}:${item.text}` })) }) };
+      return { ok: true, json: async () => ({ items: body.items.map((item) => ({ id: item.id, kind: "text", translation: `${body.dst_lang}:${item.text}` })) }) };
     }
     throw new Error(`unexpected fetch ${url}`);
   }
 
   return {
     versions,
+    patchVersions,
     counts,
     translationBatches,
     translationRequests,
     translationBodies,
+    ocrForms,
+    renderForms,
     fetch,
     setResponseVersions(value) { responseVersions = value; },
+    setResponsePatchVersions(value) { responsePatchVersions = value; },
     setOnline(value) { online = value; },
     holdSource(pageName) { const gate = deferred(); sourceGates.set(pageName, gate); return gate; },
     releaseSource(pageName) { sourceGates.get(pageName)?.resolve(); sourceGates.delete(pageName); },
     failSource(pageName) { failedSources.add(pageName); },
     allowSource(pageName) { failedSources.delete(pageName); },
     setOcrRows(pageName, rows) { ocrRows.set(pageName, rows); },
+    primeAnalysis(analysisKey, sourceUrl) { analysisSources.set(analysisKey, sourceUrl); },
+    setRenderRows(pageName, rows) { renderRows.set(pageName, rows); },
+    primeRender(renderKey, pageName) { renderPages.set(renderKey, pageName); },
+    missRenderKey(pageName) { renderKeyMisses.add(pageName); },
+    failRender(pageName) { failedRenders.add(pageName); },
+    holdRender(pageName) { const gate = deferred(); renderGates.set(pageName, gate); return gate; },
+    releaseRender(pageName) { renderGates.get(pageName)?.resolve(); renderGates.delete(pageName); },
     holdOcrAfterFirst(pageName) { const gate = deferred(); ocrAfterFirstGates.set(pageName, gate); return gate; },
     releaseOcr(pageName) { ocrAfterFirstGates.get(pageName)?.resolve(); ocrAfterFirstGates.delete(pageName); },
     holdTranslation(dstLang) { const gate = deferred(); translationGates.set(dstLang, gate); return gate; },
     releaseTranslation(dstLang) { translationGates.get(dstLang)?.resolve(); translationGates.delete(dstLang); },
     queueTranslationResult(result) { translationResults.push(result); },
+    beforeNextOcr(callback) { beforeOcr = callback; },
   };
 }
 
-function createBackgroundApp({ storage = fakeStorage(), server = createFakeServer(), clock = performance } = {}) {
+function createBackgroundApp({ storage = fakeStorage(), server = createFakeServer(), clock = performance, cryptoImpl = webcrypto } = {}) {
   let connectListener;
   const runtimeListeners = [];
   const context = {
     Promise, Map, Set, URL, TextEncoder, TextDecoder, Buffer, performance: clock,
-    crypto: webcrypto, console, setTimeout, clearTimeout,
+    crypto: cryptoImpl, console, setTimeout, clearTimeout,
     AbortController, AbortSignal, FormData, Blob, structuredClone,
     importScripts: () => {},
     chrome: {
@@ -231,15 +336,28 @@ function createBackgroundApp({ storage = fakeStorage(), server = createFakeServe
     return vm.runInContext("JSON.parse(__storageJson)", context);
   };
   server.setResponseVersions(vm.runInContext(`(${JSON.stringify(server.versions)})`, context));
+  server.setResponsePatchVersions(vm.runInContext(`(${JSON.stringify(server.patchVersions)})`, context));
   vm.runInContext(fs.readFileSync("extension/page-cache.js", "utf8"), context);
   vm.runInContext(fs.readFileSync("extension/reading-order.js", "utf8"), context);
+  if (fs.existsSync("extension/source-fetch.js")) {
+    vm.runInContext(fs.readFileSync("extension/source-fetch.js", "utf8"), context);
+  }
   vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
   return {
     context,
     server,
     storage,
     async ready() { await vm.runInContext("ready", context); },
-    connect() { const value = fakePort(); connectListener(value); return value; },
+    connect() {
+      const value = fakePort();
+      const deliver = value.receive.bind(value);
+      value.receive = (message) => {
+        context.__portJson = JSON.stringify(message);
+        deliver(vm.runInContext("JSON.parse(__portJson)", context));
+      };
+      connectListener(value);
+      return value;
+    },
     message(message) {
       return new Promise((resolve, reject) => {
         const handled = runtimeListeners.some((listener) => listener(message, {}, resolve) === true);
@@ -259,10 +377,12 @@ function createBackgroundApp({ storage = fakeStorage(), server = createFakeServe
       );
       return port.sent.find((event) => event.type === type);
     },
-    async keysFor(job, srcLang = "ja", dstLang = "vi") {
+    async keysFor(job, srcLang = "ja", dstLang = "vi", sourceIdentity = sourceIdentityFor(job.source_url)) {
       return context.buildKeys(
         { ...job, src_lang: srcLang, dst_lang: dstLang },
-        vm.runInContext("serverVersions", context)
+        sourceIdentity,
+        vm.runInContext("serverVersions", context),
+        vm.runInContext("serverPatchVersions", context),
       );
     },
     page(pageKey) { return storage.rows[`mt:page:${pageKey}`]; },
@@ -273,24 +393,151 @@ function createBackgroundApp({ storage = fakeStorage(), server = createFakeServe
         context
       );
     },
-    restart() { return createBackgroundApp({ storage, server }); },
+    hotTranslationCount() { return vm.runInContext("hotTranslations.size", context); },
+    producer(pageKey) {
+      context.__pageKey = pageKey;
+      return vm.runInContext("producers.get(__pageKey)", context);
+    },
+    restart() { return createBackgroundApp({ storage, server, cryptoImpl }); },
   };
 }
 
+function cachedTranslatedPage({ keys, server, job, blockId = "old", mismatchCount = 0 }) {
+  const timestamp = 1700000000000;
+  return {
+    schema_version: "page-v2",
+    versions: structuredClone(server.versions),
+    patch_versions: structuredClone(server.patchVersions),
+    page_artifact_key: keys.pageArtifactKey,
+    analysis_key: keys.analysisKey,
+    ocr_key: keys.ocrKey,
+    render_artifact_key: keys.renderArtifactKey,
+    source_content_hash: keys.sourceContentHash,
+    source_url: job.source_url,
+    crop: "full",
+    natural_width: 100,
+    natural_height: 200,
+    src_lang: "ja",
+    dst_lang: "vi",
+    reading_direction: "rtl",
+    state: "complete",
+    analysis_known: true,
+    ocr_done: true,
+    image_w: 100,
+    image_h: 200,
+    blocks: [{
+      block_id: blockId, bbox: [1, 2, 3, 4], src_text: blockId, trans_text: `vi:${blockId}`,
+      kind: "text", vertical: false, reading_order: 0, state: "translated",
+    }],
+    manifest_ids: [blockId],
+    manifest_mismatch_count: mismatchCount,
+    created_at: timestamp,
+    updated_at: timestamp,
+    last_accessed_at: timestamp,
+    last_error: null,
+  };
+}
+
+function cachedIncompleteOcrPage(options) {
+  const page = cachedTranslatedPage(options);
+  page.state = "partial";
+  page.ocr_done = false;
+  page.last_error = "ocr_incomplete";
+  options.server.primeAnalysis(options.keys.analysisKey, options.job.source_url);
+  return page;
+}
+
 async function scenario(name, check) {
+  let timer;
   try {
-    await check();
+    await Promise.race([
+      check(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("scenario timed out after 5000ms")), 5000);
+      }),
+    ]);
   } catch (error) {
     error.message = `${name}: ${error.message}`;
     throw error;
+  } finally {
+    clearTimeout(timer);
   }
 }
+
+test("offline ledgers with one request ID merge their delivery ownership", async () => {
+  const app = createBackgroundApp();
+  await app.ready();
+  const descriptor = (jobId, source) => ({
+    ...app.job(jobId, source),
+    src_lang: "ja", dst_lang: "vi", scope: "visible", reading_direction: "rtl",
+  });
+  app.context.__offlineLedgerA = {
+    job_id: "offline-ledger-a",
+    request_id: "offline-ledger-request",
+    scope: "visible",
+    src_lang: "ja",
+    dst_lang: "vi",
+    state: "queued",
+    created_at: Date.now(),
+    waiting_for_health: false,
+    descriptor: descriptor("offline-ledger-a", "https://x/offline-ledger-a.jpg"),
+  };
+  app.context.__offlineLedgerB = {
+    job_id: "offline-ledger-b",
+    request_id: "offline-ledger-request",
+    scope: "visible",
+    src_lang: "ja",
+    dst_lang: "vi",
+    state: "queued",
+    created_at: Date.now(),
+    waiting_for_health: false,
+    descriptor: descriptor("offline-ledger-b", "https://x/offline-ledger-b.jpg"),
+  };
+  const observed = JSON.parse(vm.runInContext(`JSON.stringify((() => {
+    const first = offlineLedger(__offlineLedgerA);
+    const second = offlineLedger(__offlineLedgerB);
+    const invariant = createRequest(null, {
+      request_id: "missing-delivery-ledger",
+      scope: "visible",
+      src_lang: "ja",
+      dst_lang: "vi",
+      jobs: [__offlineLedgerA.descriptor],
+    });
+    invariant.connected = false;
+    invariant.deliveredByJob.delete(__offlineLedgerA.job_id);
+    let missingDeliveryRejected = false;
+    try {
+      terminalJob(invariant, __offlineLedgerA.job_id, null, 0, false, 0);
+    } catch {
+      missingDeliveryRejected = true;
+    }
+    return {
+      same_request: first.request === second.request,
+      request_count: requests.size,
+      expected: [...second.request.expectedJobIds].sort(),
+      delivered: second.request.deliveredByJob
+        ? [...second.request.deliveredByJob].map(([jobId, ids]) => [jobId, ids.size]).sort()
+        : null,
+      source_crops: second.request.jobsBySourceCrop.size,
+      missing_delivery_rejected: missingDeliveryRejected,
+    };
+  })())`, app.context));
+  assert.deepStrictEqual(observed, {
+    same_request: true,
+    request_count: 1,
+    expected: ["offline-ledger-a", "offline-ledger-b"],
+    delivered: [["offline-ledger-a", 0], ["offline-ledger-b", 0]],
+    source_crops: 2,
+    missing_delivery_rejected: true,
+  });
+});
 
 const context = {
   Promise, JSON, Map, Set, URL, TextEncoder, TextDecoder,
   crypto: webcrypto,
   console,
   setTimeout, clearTimeout,
+  AbortController, AbortSignal, FormData, Blob, structuredClone,
   importScripts: () => {},
   chrome: {
     runtime: {
@@ -304,9 +551,12 @@ const context = {
 };
 vm.createContext(context);
 vm.runInContext(fs.readFileSync("extension/reading-order.js", "utf8"), context);
+if (fs.existsSync("extension/source-fetch.js")) {
+  vm.runInContext(fs.readFileSync("extension/source-fetch.js", "utf8"), context);
+}
 vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
 
-(async () => {
+test("background progressive transport", { timeout: 30000 }, async () => {
   // The producer API is deliberately exercised through a port: changing
   // acceptScope to only retain foreground work must make this fail.
   assert.strictEqual(typeof context.acceptScope, "function");
@@ -320,9 +570,11 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const missingDirection = app.startScope("default-direction", "visible", app.job("default-direction-job", "https://x/default-direction.jpg"));
     delete missingDirection.reading_direction;
     port.receive(missingDirection);
-    await app.waitFor("page_job_accepted", port);
+    await waitUntil(() => server.counts.source === 1, "held source identity fetch");
     assert.strictEqual(app.storedJob("default-direction-job").descriptor.reading_direction, "rtl");
+    assert.strictEqual(port.sent.some((event) => event.type === "page_job_accepted"), false);
     server.releaseSource("default-direction");
+    await app.waitFor("page_job_accepted", port);
     await app.waitFor("scope_done", port);
 
     const beforeSource = server.counts.source;
@@ -360,9 +612,9 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     ]);
     server.holdOcrAfterFirst("full-page");
     server.queueTranslationResult({ items: [
-      { id: "bottom", translation: "vi:bottom" },
-      { id: "left", translation: "vi:left" },
-      { id: "right", translation: "vi:right" },
+      { id: "bottom", kind: "text", translation: "vi:bottom" },
+      { id: "left", kind: "text", translation: "vi:left" },
+      { id: "right", kind: "text", translation: "vi:right" },
     ] });
     const app = createBackgroundApp({ server });
     await app.ready();
@@ -408,12 +660,1947 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     );
   });
 
+  await scenario("render outcomes persist only as a full canonical manifest without patch bytes", async () => {
+    const storage = fakeStorage();
+    storage.cloneForRead = structuredClone;
+    const server = createFakeServer();
+    server.setOcrRows("render-outcomes", [
+      { type: "analysis_ready", image_w: 300, image_h: 500 },
+      { type: "ocr_block", block_id: "left", bbox: [10, 10, 20, 20], src_text: "left" },
+      { type: "ocr_block", block_id: "right", bbox: [200, 10, 20, 20], src_text: "right" },
+      { type: "image_done", recognized: 2, failed: 0 },
+    ]);
+    server.setRenderRows("render-outcomes", [
+      {
+        block_id: "left", patch_id: "patch-left", patch_bbox: [10, 10, 20, 20], clean_region: [10, 10, 20, 20],
+        fit_bbox: [10, 10, 20, 20], patch_mime: "image/png", patch_rgba: Buffer.from("patch:left").toString("base64"), reason: null,
+      },
+      {
+        block_id: "right", patch_id: "patch-right", patch_bbox: [200, 10, 20, 20], clean_region: [200, 10, 20, 20],
+        fit_bbox: [200, 10, 20, 20], patch_mime: "image/png", patch_rgba: Buffer.from("patch:right").toString("base64"), reason: null,
+      },
+      {
+        block_id: "artifact-extra", patch_id: "patch-extra", patch_bbox: [1, 1, 2, 2], clean_region: [1, 1, 2, 2],
+        fit_bbox: [1, 1, 2, 2], patch_mime: "image/png", patch_rgba: Buffer.from("patch:extra").toString("base64"), reason: null,
+      },
+    ]);
+    server.queueTranslationResult({ items: [
+      { id: "left", kind: "text", translation: "vi:left" },
+      { id: "right", kind: "text", translation: "vi:right" },
+    ] });
+    const app = createBackgroundApp({ storage, server });
+    await app.ready();
+    const job = app.job("render-outcomes-job", "https://x/render-outcomes.jpg");
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const port = app.connect();
+    port.receive(app.startScope("render-outcomes", "visible", job));
+    await app.waitFor("scope_done", port);
+
+    const events = port.sent.filter((event) => event.type === "translation");
+    assert.deepStrictEqual(events.map((event) => event.block_id), ["right", "left"]);
+    assert.deepStrictEqual(app.page(keys.pageArtifactKey).manifest_ids, ["right", "left"]);
+    const byId = new Map(events.map((event) => [event.block_id, event]));
+    const identity = byId.get("left");
+    const outcome = (blockId, layoutProfile) => ({
+      type: "render_metric",
+      request_id: "render-outcomes",
+      job_id: "render-outcomes-job",
+      page_artifact_key: identity.page_artifact_key,
+      render_artifact_key: identity.render_artifact_key,
+      layout_fit_version: identity.layout_fit_version,
+      block_id: blockId,
+      painted: true,
+      reason: null,
+      layout_profile: layoutProfile,
+    });
+
+    port.receive({ ...outcome("left", { font_px: 90, line_height: 9 }), page_artifact_key: "stale-page" });
+    port.receive({ ...outcome("left", { font_px: 90, line_height: 9 }), render_artifact_key: "stale-render" });
+    port.receive({ ...outcome("left", { font_px: 90, line_height: 9 }), layout_fit_version: "stale-layout" });
+    await flush();
+    assert.strictEqual(app.page(keys.pageArtifactKey).render, undefined);
+
+    port.receive(outcome("right", { font_px: 18, line_height: 1.2 }));
+    port.receive(outcome("artifact-extra", { font_px: 99, line_height: 9 }));
+    port.receive(outcome("right", { font_px: 88, line_height: 8 }));
+    await flush();
+    assert.strictEqual(app.page(keys.pageArtifactKey).render, undefined);
+
+    let failedReadyWrites = 0;
+    storage.beforeSet = async (values) => {
+      const row = values[`mt:page:${keys.pageArtifactKey}`];
+      if (failedReadyWrites < 2 && row?.render?.blocks?.length === 2) {
+        failedReadyWrites++;
+        throw new Error("transient render persistence failure");
+      }
+    };
+    port.receive(outcome("left", { font_px: 14, line_height: 1.1 }));
+    await waitUntil(() => failedReadyWrites === 2, "transient full render persistence failure");
+    await flush();
+    assert.strictEqual(app.page(keys.pageArtifactKey).render, undefined);
+
+    const retry = app.connect();
+    retry.receive(app.startScope(
+      "render-outcomes-retry",
+      "visible",
+      app.job("render-outcomes-retry-job", job.source_url),
+    ));
+    await app.waitFor("scope_done", retry);
+    await waitUntil(() => app.page(keys.pageArtifactKey).render !== undefined, "full render subrecord persistence");
+    const render = app.page(keys.pageArtifactKey).render;
+    assert.deepStrictEqual(render.blocks.map((block) => block.block_id), ["right", "left"]);
+    assert.deepStrictEqual(render.blocks.map((block) => block.layout_profile), [
+      { font_px: 18, line_height: 1.2 },
+      { font_px: 14, line_height: 1.1 },
+    ]);
+    assert.strictEqual(render.breaker_open, false);
+    assert.strictEqual(JSON.stringify(render).includes("patch_rgba"), false);
+  });
+
+  await scenario("stale render collector cannot restore an older page identity", async () => {
+    const server = createFakeServer();
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const job = app.job("collector-race-job", "https://x/collector-race.jpg");
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const oldPage = cachedTranslatedPage({ keys, server, job });
+    oldPage.render_artifact_key = "old-render";
+    const newerPatchVersions = { ...server.patchVersions, cleaner: "c2" };
+    const newerPage = structuredClone(oldPage);
+    newerPage.render_artifact_key = "new-render";
+    newerPage.patch_versions = newerPatchVersions;
+    newerPage.render = {
+      schema_version: "render-page-v1",
+      render_artifact_key: "new-render",
+      patch_versions: newerPatchVersions,
+      layout_fit_version: "layout-fit-v1",
+      breaker_open: false,
+      blocks: [{
+        block_id: "old", render_mode: "in_place", patch_id: "new-patch",
+        patch_bbox: [1, 2, 3, 4], fit_bbox: [1, 2, 3, 4],
+        layout_profile: { font_px: 17, line_height: 1.2 }, reason: null,
+      }],
+    };
+    const port = app.connect();
+    app.context.__collectorRaceOldPage = JSON.stringify(oldPage);
+    app.context.__collectorRaceArtifact = JSON.stringify({
+      render_artifact_key: "old-render",
+      blocks: [{ block_id: "old", patch_id: "old-patch", patch_bbox: [1, 2, 3, 4], fit_bbox: [1, 2, 3, 4], reason: null }],
+    });
+    app.context.__collectorRaceNewPage = JSON.stringify(newerPage);
+    app.context.__collectorRacePort = port;
+    await vm.runInContext(`(async () => {
+      const page = JSON.parse(__collectorRaceOldPage);
+      const producer = {
+        pageKey: page.page_artifact_key, page, persistUntilDone: true, persistChain: Promise.resolve(),
+        consumers: new Map(), jobIds: new Set(), prewarmOnly: false,
+      };
+      producers.set(page.page_artifact_key, producer);
+      await pageCache.putPage(page);
+      prepareRenderOutcomeCollector(page, JSON.parse(__collectorRaceArtifact), [
+        { requestId: "collector-race", jobId: "collector-race-job", port: __collectorRacePort },
+      ], producer);
+    })()`, app.context);
+    await vm.runInContext("pageCache.putPage(JSON.parse(__collectorRaceNewPage))", app.context);
+
+    port.receive({
+      type: "render_metric", request_id: "collector-race", job_id: "collector-race-job",
+      page_artifact_key: keys.pageArtifactKey, render_artifact_key: "old-render", layout_fit_version: "layout-fit-v1",
+      block_id: "old", painted: true, reason: null, layout_profile: { font_px: 14, line_height: 1.1 },
+    });
+    await flush();
+    app.context.__collectorRacePageKey = keys.pageArtifactKey;
+    await vm.runInContext("persist(producers.get(__collectorRacePageKey))", app.context);
+    await flush();
+
+    const stored = app.page(keys.pageArtifactKey);
+    assert.deepStrictEqual({
+      pageRenderKey: stored.render_artifact_key,
+      pagePatchVersions: stored.patch_versions,
+      renderKey: stored.render?.render_artifact_key,
+      renderPatchVersions: stored.render?.patch_versions,
+      patchId: stored.render?.blocks[0]?.patch_id,
+    }, {
+      pageRenderKey: "new-render",
+      pagePatchVersions: newerPatchVersions,
+      renderKey: "new-render",
+      renderPatchVersions: newerPatchVersions,
+      patchId: "new-patch",
+    });
+    const active = app.producer(keys.pageArtifactKey);
+    assert.strictEqual(active.page.render, undefined);
+  });
+
+  await scenario("collector ready write cannot overtake a queued render identity bump", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const app = createBackgroundApp({ storage, server });
+    await app.ready();
+    const job = app.job("collector-interleave-job", "https://x/collector-interleave.jpg");
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const oldPage = cachedTranslatedPage({ keys, server, job });
+    oldPage.state = "running";
+    oldPage.render_artifact_key = "old-render";
+    const bumpedPatchVersions = { ...server.patchVersions, cleaner: "c2" };
+    const layoutFitVersion = vm.runInContext("LAYOUT_FIT_VERSION", app.context);
+    const port = app.connect();
+    app.context.__collectorInterleaveOldPage = JSON.stringify(oldPage);
+    app.context.__collectorInterleaveArtifact = JSON.stringify({
+      render_artifact_key: "old-render",
+      blocks: [{ block_id: "old", patch_id: "old-patch", patch_bbox: [1, 2, 3, 4], fit_bbox: [1, 2, 3, 4], reason: null }],
+    });
+    app.context.__collectorInterleavePort = port;
+    await vm.runInContext(`(async () => {
+      const page = JSON.parse(__collectorInterleaveOldPage);
+      const producer = {
+        pageKey: page.page_artifact_key, page, persistUntilDone: true, persistChain: Promise.resolve(),
+        consumers: new Map(), jobIds: new Set(), prewarmOnly: false,
+      };
+      producers.set(page.page_artifact_key, producer);
+      await pageCache.putPage(page);
+      prepareRenderOutcomeCollector(page, JSON.parse(__collectorInterleaveArtifact), [
+        { requestId: "collector-interleave", jobId: "collector-interleave-job", port: __collectorInterleavePort },
+      ], producer);
+    })()`, app.context);
+    const oldReadyWrite = deferred();
+    const releaseOldReady = deferred();
+    let heldOldReady = false;
+    storage.beforeSet = async (values) => {
+      if (heldOldReady || !Object.values(values).some((row) => row?.render?.render_artifact_key === "old-render")) return;
+      heldOldReady = true;
+      oldReadyWrite.resolve();
+      await releaseOldReady.promise;
+    };
+
+    app.context.__collectorInterleaveMetric = JSON.stringify({
+      type: "render_metric", request_id: "collector-interleave", job_id: "collector-interleave-job",
+      page_artifact_key: keys.pageArtifactKey, render_artifact_key: "old-render", layout_fit_version: layoutFitVersion,
+      block_id: "old", painted: true, reason: null, layout_profile: { font_px: 14, line_height: 1.1 },
+    });
+    vm.runInContext("collectRenderOutcome(__collectorInterleavePort, JSON.parse(__collectorInterleaveMetric))", app.context);
+    await oldReadyWrite.promise;
+    app.context.__collectorInterleavePageKey = keys.pageArtifactKey;
+    vm.runInContext(
+      "globalThis.__collectorInterleaveOldWriteTail = pageWriteTails.get(__collectorInterleavePageKey)",
+      app.context
+    );
+    app.context.__collectorInterleavePatchVersions = JSON.stringify(bumpedPatchVersions);
+    app.context.__collectorInterleaveDescriptor = JSON.stringify({
+      ...job, src_lang: "ja", dst_lang: "vi", scope: "visible", reading_direction: "rtl", source_fetch_ms: 0,
+    });
+    const identityBump = vm.runInContext(`(async () => {
+      serverPatchVersions = JSON.parse(__collectorInterleavePatchVersions);
+      const descriptor = JSON.parse(__collectorInterleaveDescriptor);
+      const sourceIdentity = { sourceContentHash: ${JSON.stringify(keys.sourceContentHash)}, blob: new Blob(["collector-interleave"]) };
+      const nextKeys = await buildKeys(descriptor, sourceIdentity, serverVersions, serverPatchVersions);
+      globalThis.__collectorInterleaveRenderKey = nextKeys.renderArtifactKey;
+      const acquisition = { release() {} };
+      const request = {
+        requestId: "collector-interleave-new", scope: "visible", srcLang: "ja", dstLang: "vi", port: null,
+        jobsBySourceCrop: new Map(), sourceAcquisitions: new Map([[descriptor.job_id, acquisition]]),
+        sourceDescriptors: new Map([[descriptor.job_id, descriptor]]), cancelledSourceJobs: new Set(), jobs: new Map(), pendingJobs: [],
+      };
+      await attachDescriptor(request, descriptor, {
+        job_id: descriptor.job_id, request_id: request.requestId, scope: "visible", src_lang: "ja", dst_lang: "vi",
+        descriptor, state: "queued", created_at: 1,
+      }, sourceIdentity, acquisition);
+    })()`, app.context);
+    await waitUntil(
+      () => vm.runInContext(
+        "pageWriteTails.get(__collectorInterleavePageKey) !== globalThis.__collectorInterleaveOldWriteTail",
+        app.context
+      ),
+      "queued render identity bump"
+    );
+    assert.deepStrictEqual({
+      pageRenderKey: app.page(keys.pageArtifactKey).render_artifact_key,
+      pagePatchVersions: app.page(keys.pageArtifactKey).patch_versions,
+    }, {
+      pageRenderKey: "old-render",
+      pagePatchVersions: server.patchVersions,
+    });
+    releaseOldReady.resolve();
+    await identityBump;
+    await flush();
+
+    const stored = app.page(keys.pageArtifactKey);
+    const nextRenderKey = vm.runInContext("__collectorInterleaveRenderKey", app.context);
+    assert.deepStrictEqual({
+      pageRenderKey: stored.render_artifact_key,
+      pagePatchVersions: stored.patch_versions,
+      render: stored.render,
+    }, {
+      pageRenderKey: nextRenderKey,
+      pagePatchVersions: bumpedPatchVersions,
+      render: undefined,
+    });
+  });
+
+  await scenario("stale mismatch producer cannot write a sentinel into a bumped page", async () => {
+    const server = createFakeServer();
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const job = app.job("stale-mismatch-job", "https://x/stale-mismatch.jpg");
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const oldPage = cachedTranslatedPage({ keys, server, job, mismatchCount: 1 });
+    oldPage.state = "running";
+    oldPage.render_artifact_key = "old-render";
+    const bumpedPatchVersions = { ...server.patchVersions, cleaner: "c2" };
+    app.context.__staleMismatchOldPage = JSON.stringify(oldPage);
+    app.context.__staleMismatchPatchVersions = JSON.stringify(bumpedPatchVersions);
+    app.context.__staleMismatchDescriptor = JSON.stringify({
+      ...job, src_lang: "ja", dst_lang: "vi", scope: "visible", reading_direction: "rtl", source_fetch_ms: 0,
+    });
+    await vm.runInContext(`(async () => {
+      const oldPage = JSON.parse(__staleMismatchOldPage);
+      await pageCache.putPage(oldPage);
+      serverPatchVersions = JSON.parse(__staleMismatchPatchVersions);
+      const descriptor = JSON.parse(__staleMismatchDescriptor);
+      const sourceIdentity = { sourceContentHash: ${JSON.stringify(keys.sourceContentHash)}, blob: new Blob(["stale-mismatch"]) };
+      const nextKeys = await buildKeys(descriptor, sourceIdentity, serverVersions, serverPatchVersions);
+      globalThis.__staleMismatchRenderKey = nextKeys.renderArtifactKey;
+      const acquisition = { release() {} };
+      const request = {
+        requestId: "stale-mismatch-new", scope: "visible", srcLang: "ja", dstLang: "vi", port: null,
+        jobsBySourceCrop: new Map(), sourceAcquisitions: new Map([[descriptor.job_id, acquisition]]),
+        sourceDescriptors: new Map([[descriptor.job_id, descriptor]]), cancelledSourceJobs: new Set(), jobs: new Map(), pendingJobs: [],
+      };
+      await attachDescriptor(request, descriptor, {
+        job_id: descriptor.job_id, request_id: request.requestId, scope: "visible", src_lang: "ja", dst_lang: "vi",
+        descriptor, state: "queued", created_at: 1,
+      }, sourceIdentity, acquisition);
+      globalThis.__staleMismatchAction = await handleManifestMismatch({
+        pageKey: oldPage.page_artifact_key,
+        renderArtifactKey: oldPage.render_artifact_key,
+        page: oldPage,
+      });
+    })()`, app.context);
+
+    const stored = app.page(keys.pageArtifactKey);
+    assert.deepStrictEqual({
+      action: vm.runInContext("__staleMismatchAction", app.context),
+      pageRenderKey: stored.render_artifact_key,
+      pagePatchVersions: stored.patch_versions,
+      render: stored.render,
+      mismatchCount: stored.manifest_mismatch_count,
+    }, {
+      action: "stale",
+      pageRenderKey: vm.runInContext("__staleMismatchRenderKey", app.context),
+      pagePatchVersions: bumpedPatchVersions,
+      render: undefined,
+      mismatchCount: 1,
+    });
+  });
+
+  await scenario("queued collector cannot overwrite a persisted mismatch sentinel", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const app = createBackgroundApp({ storage, server });
+    await app.ready();
+    const job = app.job("queued-sentinel-job", "https://x/queued-sentinel.jpg");
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const page = cachedTranslatedPage({ keys, server, job, mismatchCount: 1 });
+    const port = app.connect();
+    app.context.__queuedSentinelPage = JSON.stringify(page);
+    app.context.__queuedSentinelArtifact = JSON.stringify({
+      render_artifact_key: keys.renderArtifactKey,
+      blocks: [{ block_id: "old", patch_id: "old-patch", patch_bbox: [1, 2, 3, 4], fit_bbox: [1, 2, 3, 4], reason: null }],
+    });
+    app.context.__queuedSentinelPort = port;
+    await vm.runInContext(`(async () => {
+      const page = JSON.parse(__queuedSentinelPage);
+      await pageCache.putPage(page);
+      prepareRenderOutcomeCollector(page, JSON.parse(__queuedSentinelArtifact), [
+        { requestId: "queued-sentinel", jobId: "queued-sentinel-job", port: __queuedSentinelPort },
+      ]);
+      globalThis.__queuedSentinelProducer = {
+        pageKey: page.page_artifact_key,
+        renderArtifactKey: page.render_artifact_key,
+        page,
+      };
+    })()`, app.context);
+
+    const mismatchReadHeld = deferred();
+    const releaseMismatchRead = deferred();
+    let heldMismatchRead = false;
+    storage.beforeSet = async () => {
+      if (heldMismatchRead) return;
+      heldMismatchRead = true;
+      mismatchReadHeld.resolve();
+      await releaseMismatchRead.promise;
+    };
+    vm.runInContext("globalThis.__queuedSentinelMismatch = handleManifestMismatch(__queuedSentinelProducer)", app.context);
+    await mismatchReadHeld.promise;
+    app.context.__queuedSentinelPageKey = keys.pageArtifactKey;
+    vm.runInContext(
+      "globalThis.__queuedSentinelMismatchTail = pageWriteTails.get(__queuedSentinelPageKey)",
+      app.context
+    );
+
+    port.receive({
+      type: "render_metric", request_id: "queued-sentinel", job_id: "queued-sentinel-job",
+      page_artifact_key: keys.pageArtifactKey, render_artifact_key: keys.renderArtifactKey,
+      layout_fit_version: vm.runInContext("LAYOUT_FIT_VERSION", app.context),
+      block_id: "old", painted: true, reason: null, layout_profile: { font_px: 14, line_height: 1.1 },
+    });
+    await waitUntil(
+      () => vm.runInContext(
+        "pageWriteTails.get(__queuedSentinelPageKey) !== globalThis.__queuedSentinelMismatchTail",
+        app.context
+      ),
+      "collector queued behind mismatch sentinel"
+    );
+    releaseMismatchRead.resolve();
+    await vm.runInContext("__queuedSentinelMismatch", app.context);
+    await waitUntil(
+      () => vm.runInContext("!pageWriteTails.has(__queuedSentinelPageKey)", app.context),
+      "queued collector completion"
+    );
+
+    assert.deepStrictEqual(app.page(keys.pageArtifactKey).render, {
+      schema_version: "render-page-v1",
+      render_artifact_key: keys.renderArtifactKey,
+      patch_versions: server.patchVersions,
+      layout_fit_version: "dom-fit-10px-v1",
+      breaker_open: true,
+      blocks: [],
+    });
+  });
+
+  await scenario("retire producer cannot overwrite or remove a bumped page", async () => {
+    const retained = [];
+    const expectedPatchVersions = { cleaner: "c2", render_encoding: "png-rgba-v1", render_schema: "render-v1" };
+    for (const mode of ["useful", "empty"]) {
+      const storage = fakeStorage();
+      const server = createFakeServer();
+      const app = createBackgroundApp({ storage, server });
+      await app.ready();
+      const job = app.job(`retire-stale-${mode}-job`, `https://x/retire-stale-${mode}.jpg`);
+      const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+      const oldPage = cachedTranslatedPage({ keys, server, job });
+      oldPage.render_artifact_key = "old-render";
+      if (mode === "empty") {
+        oldPage.analysis_known = false;
+        oldPage.ocr_done = false;
+        oldPage.image_w = null;
+        oldPage.image_h = null;
+        oldPage.blocks = [];
+        delete oldPage.manifest_ids;
+      }
+      const bumpedPatchVersions = { ...expectedPatchVersions };
+      const bumpedPage = cachedTranslatedPage({ keys, server, job });
+      bumpedPage.render_artifact_key = "new-render";
+      bumpedPage.patch_versions = bumpedPatchVersions;
+      const retiredWriteDone = deferred();
+      const retireJobStorageKey = `mt:job:retire-stale-${mode}-job`;
+      storage.beforeRemove = async (names) => {
+        if ((Array.isArray(names) ? names : [names]).includes(retireJobStorageKey)) retiredWriteDone.resolve();
+      };
+      const persistGate = deferred();
+      app.context.__retireStaleOldPage = JSON.stringify(oldPage);
+      app.context.__retireStaleGate = persistGate.promise;
+      app.context.__retireStaleJobId = `retire-stale-${mode}-job`;
+      vm.runInContext(`(() => {
+        const page = JSON.parse(__retireStaleOldPage);
+        retireProducer({
+          pageKey: page.page_artifact_key,
+          renderArtifactKey: page.render_artifact_key,
+          page,
+          persistUntilDone: true,
+          persistChain: __retireStaleGate,
+          counters: { stale_work: 0 },
+          cancelled: false,
+          retired: false,
+          sourceAcquisition: null,
+          ocrKey: "retire-stale-ocr",
+          ocrStageKey: "retire-stale-ocr",
+          analysisKey: "retire-stale-analysis",
+          jobIds: new Set([__retireStaleJobId]),
+        });
+      })()`, app.context);
+      app.context.__retireStaleBumpedPage = JSON.stringify(bumpedPage);
+      await vm.runInContext("pageCache.putPage(JSON.parse(__retireStaleBumpedPage))", app.context);
+      persistGate.resolve();
+      await retiredWriteDone.promise;
+      retained.push({
+        mode,
+        renderArtifactKey: app.page(keys.pageArtifactKey)?.render_artifact_key,
+        patchVersions: app.page(keys.pageArtifactKey)?.patch_versions,
+      });
+    }
+    assert.deepStrictEqual(retained, [
+      {
+        mode: "useful",
+        renderArtifactKey: "new-render",
+        patchVersions: expectedPatchVersions,
+      },
+      {
+        mode: "empty",
+        renderArtifactKey: "new-render",
+        patchVersions: expectedPatchVersions,
+      },
+    ]);
+  });
+
+  await scenario("creation cannot overwrite a row that arrives after its null read", async () => {
+    const server = createFakeServer();
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const job = app.job("creation-race-a", "https://x/creation-race.jpg");
+    const c1Keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const firstFindHeld = deferred();
+    const releaseFirstFind = deferred();
+    app.context.__creationFirstFindHeld = firstFindHeld;
+    app.context.__creationReleaseFirstFind = releaseFirstFind.promise;
+    await vm.runInContext(`(() => {
+      const originalFindPage = pageCache.findPage.bind(pageCache);
+      let holdFirstFind = true;
+      pageCache.findPage = async (predicate) => {
+        if (holdFirstFind) {
+          holdFirstFind = false;
+          __creationFirstFindHeld.resolve();
+          await __creationReleaseFirstFind;
+        }
+        return originalFindPage(predicate);
+      };
+    })()`, app.context);
+    app.context.__creationC1PatchVersions = JSON.stringify(server.patchVersions);
+    app.context.__creationADescriptor = JSON.stringify({
+      ...job, src_lang: "ja", dst_lang: "vi", scope: "visible", reading_direction: "rtl", source_fetch_ms: 0,
+    });
+    app.context.__creationBDescriptor = JSON.stringify({
+      ...job, job_id: "creation-race-b", src_lang: "ja", dst_lang: "vi", scope: "visible", reading_direction: "rtl", source_fetch_ms: 0,
+    });
+    const first = vm.runInContext(`(async () => {
+      serverPatchVersions = JSON.parse(__creationC1PatchVersions);
+      const descriptor = JSON.parse(__creationADescriptor);
+      const sourceIdentity = { sourceContentHash: ${JSON.stringify(c1Keys.sourceContentHash)}, blob: new Blob([descriptor.source_url]) };
+      const acquisition = { release() {} };
+      const request = {
+        requestId: "creation-race-a", scope: "visible", srcLang: "ja", dstLang: "vi", port: null,
+        jobsBySourceCrop: new Map(), sourceAcquisitions: new Map([[descriptor.job_id, acquisition]]),
+        sourceDescriptors: new Map([[descriptor.job_id, descriptor]]), cancelledSourceJobs: new Set(), jobs: new Map(), pendingJobs: [],
+      };
+      await attachDescriptor(request, descriptor, {
+        job_id: descriptor.job_id, request_id: request.requestId, scope: "visible", src_lang: "ja", dst_lang: "vi",
+        descriptor, state: "queued", created_at: 1,
+      }, sourceIdentity, acquisition);
+    })()`, app.context);
+    await firstFindHeld.promise;
+    const second = vm.runInContext(`(async () => {
+      serverPatchVersions = JSON.parse(__creationC1PatchVersions);
+      const descriptor = JSON.parse(__creationBDescriptor);
+      const sourceIdentity = { sourceContentHash: ${JSON.stringify(c1Keys.sourceContentHash)}, blob: new Blob([descriptor.source_url]) };
+      const acquisition = { release() {} };
+      const request = {
+        requestId: "creation-race-b", scope: "visible", srcLang: "ja", dstLang: "vi", port: null,
+        jobsBySourceCrop: new Map(), sourceAcquisitions: new Map([[descriptor.job_id, acquisition]]),
+        sourceDescriptors: new Map([[descriptor.job_id, descriptor]]), cancelledSourceJobs: new Set(), jobs: new Map(), pendingJobs: [],
+      };
+      await attachDescriptor(request, descriptor, {
+        job_id: descriptor.job_id, request_id: request.requestId, scope: "visible", src_lang: "ja", dst_lang: "vi",
+        descriptor, state: "queued", created_at: 1,
+      }, sourceIdentity, acquisition);
+    })()`, app.context);
+    await second;
+    const newerPage = cachedTranslatedPage({ keys: c1Keys, server, job });
+    newerPage.state = "partial";
+    newerPage.last_error = "newer row";
+    app.context.__creationNewerPage = JSON.stringify(newerPage);
+    await vm.runInContext("pageCache.putPage(JSON.parse(__creationNewerPage))", app.context);
+    assert.deepStrictEqual({
+      state: app.page(c1Keys.pageArtifactKey).state,
+      lastError: app.page(c1Keys.pageArtifactKey).last_error,
+    }, {
+      state: "partial",
+      lastError: "newer row",
+    });
+    releaseFirstFind.resolve();
+    await first;
+    assert.deepStrictEqual({
+      state: app.page(c1Keys.pageArtifactKey).state,
+      lastError: app.page(c1Keys.pageArtifactKey).last_error,
+    }, {
+      state: "partial",
+      lastError: "newer row",
+    });
+  });
+
+  await scenario("prewarm find touch cannot erase a ready render", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const app = createBackgroundApp({ storage, server });
+    await app.ready();
+    const job = app.job("prewarm-find-job", "https://x/prewarm-find.jpg");
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const page = cachedTranslatedPage({ keys, server, job });
+    const port = app.connect();
+    app.context.__prewarmFindPage = JSON.stringify(page);
+    app.context.__prewarmFindArtifact = JSON.stringify({
+      render_artifact_key: keys.renderArtifactKey,
+      blocks: [{ block_id: "old", patch_id: "find-ready-patch", patch_bbox: [1, 2, 3, 4], fit_bbox: [1, 2, 3, 4], reason: null }],
+    });
+    app.context.__prewarmFindPort = port;
+    await vm.runInContext(`(async () => {
+      const page = JSON.parse(__prewarmFindPage);
+      await pageCache.putPage(page);
+      prepareRenderOutcomeCollector(page, JSON.parse(__prewarmFindArtifact), [
+        { requestId: "prewarm-find-render", jobId: "prewarm-find-render-job", port: __prewarmFindPort },
+      ]);
+    })()`, app.context);
+
+    const oldReadHeld = deferred();
+    const releaseOldRead = deferred();
+    let heldOldRead = false;
+    storage.afterGet = async (key) => {
+      if (heldOldRead || key !== null) return;
+      heldOldRead = true;
+      oldReadHeld.resolve();
+      await releaseOldRead.promise;
+    };
+    app.context.__prewarmFindDescriptor = JSON.stringify({
+      ...job, src_lang: "ja", dst_lang: "vi", scope: "prewarm", reading_direction: "rtl", source_fetch_ms: 0,
+    });
+    const attached = vm.runInContext(`(async () => {
+      const descriptor = JSON.parse(__prewarmFindDescriptor);
+      const sourceIdentity = { sourceContentHash: ${JSON.stringify(keys.sourceContentHash)}, blob: new Blob([descriptor.source_url]) };
+      const acquisition = { release() {} };
+      const request = createRequest(null, {
+        request_id: "prewarm-find-attach", scope: "prewarm", src_lang: "ja", dst_lang: "vi", jobs: [descriptor],
+      });
+      request.sourceAcquisitions.set(descriptor.job_id, acquisition);
+      request.sourceDescriptors.set(descriptor.job_id, descriptor);
+      await attachDescriptor(request, descriptor, {
+        job_id: descriptor.job_id, request_id: request.requestId, scope: "prewarm", src_lang: "ja", dst_lang: "vi",
+        descriptor, state: "queued", created_at: 1,
+      }, sourceIdentity, acquisition);
+    })()`, app.context);
+    await oldReadHeld.promise;
+    app.context.__prewarmFindMetric = JSON.stringify({
+      type: "render_metric", request_id: "prewarm-find-render", job_id: "prewarm-find-render-job",
+      page_artifact_key: keys.pageArtifactKey, render_artifact_key: keys.renderArtifactKey,
+      layout_fit_version: vm.runInContext("LAYOUT_FIT_VERSION", app.context),
+      block_id: "old", painted: true, reason: null, layout_profile: { font_px: 14, line_height: 1.1 },
+    });
+    vm.runInContext("collectRenderOutcome(__prewarmFindPort, JSON.parse(__prewarmFindMetric))", app.context);
+    await waitUntil(() => app.page(keys.pageArtifactKey).render !== undefined, "ready render before releasing old find read");
+    releaseOldRead.resolve();
+    await attached;
+    await flush();
+    assert.strictEqual(app.page(keys.pageArtifactKey).render?.blocks[0]?.patch_id, "find-ready-patch");
+  });
+
+  await scenario("initial page touch cannot erase a ready render", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const app = createBackgroundApp({ storage, server });
+    await app.ready();
+    const job = app.job("initial-touch-job", "https://x/initial-touch.jpg");
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const page = cachedTranslatedPage({ keys, server, job });
+    page.state = "running";
+    const port = app.connect();
+    app.context.__initialTouchPage = JSON.stringify(page);
+    app.context.__initialTouchArtifact = JSON.stringify({
+      render_artifact_key: keys.renderArtifactKey,
+      blocks: [{ block_id: "old", patch_id: "ready-patch", patch_bbox: [1, 2, 3, 4], fit_bbox: [1, 2, 3, 4], reason: null }],
+    });
+    app.context.__initialTouchPort = port;
+    await vm.runInContext(`(async () => {
+      const page = JSON.parse(__initialTouchPage);
+      await pageCache.putPage(page);
+      prepareRenderOutcomeCollector(page, JSON.parse(__initialTouchArtifact), [
+        { requestId: "initial-touch-render", jobId: "initial-touch-render-job", port: __initialTouchPort },
+      ]);
+    })()`, app.context);
+
+    const oldReadHeld = deferred();
+    const releaseOldRead = deferred();
+    let heldOldRead = false;
+    const pageStorageKey = `mt:page:${keys.pageArtifactKey}`;
+    storage.afterGet = async (key) => {
+      if (heldOldRead || key !== pageStorageKey) return;
+      heldOldRead = true;
+      oldReadHeld.resolve();
+      await releaseOldRead.promise;
+    };
+    app.context.__initialTouchDescriptor = JSON.stringify({
+      ...job, src_lang: "ja", dst_lang: "vi", scope: "visible", reading_direction: "rtl", source_fetch_ms: 0,
+    });
+    const attached = vm.runInContext(`(async () => {
+      const descriptor = JSON.parse(__initialTouchDescriptor);
+      const sourceIdentity = { sourceContentHash: ${JSON.stringify(keys.sourceContentHash)}, blob: new Blob([descriptor.source_url]) };
+      const acquisition = { release() {} };
+      const request = {
+        requestId: "initial-touch-attach", scope: "visible", srcLang: "ja", dstLang: "vi", port: null,
+        jobsBySourceCrop: new Map(), sourceAcquisitions: new Map([[descriptor.job_id, acquisition]]),
+        sourceDescriptors: new Map([[descriptor.job_id, descriptor]]), cancelledSourceJobs: new Set(), jobs: new Map(), pendingJobs: [],
+      };
+      await attachDescriptor(request, descriptor, {
+        job_id: descriptor.job_id, request_id: request.requestId, scope: "visible", src_lang: "ja", dst_lang: "vi",
+        descriptor, state: "queued", created_at: 1,
+      }, sourceIdentity, acquisition);
+    })()`, app.context);
+    await oldReadHeld.promise;
+    const initialReadSerialized = vm.runInContext(
+      `pageWriteTails.has(${JSON.stringify(keys.pageArtifactKey)})`,
+      app.context,
+    );
+    if (!initialReadSerialized) {
+      releaseOldRead.resolve();
+      await attached;
+    }
+    assert.strictEqual(initialReadSerialized, true, "initial page read must hold the page write chain");
+    app.context.__initialTouchMetric = JSON.stringify({
+      type: "render_metric", request_id: "initial-touch-render", job_id: "initial-touch-render-job",
+      page_artifact_key: keys.pageArtifactKey, render_artifact_key: keys.renderArtifactKey,
+      layout_fit_version: vm.runInContext("LAYOUT_FIT_VERSION", app.context),
+      block_id: "old", painted: true, reason: null, layout_profile: { font_px: 14, line_height: 1.1 },
+    });
+    vm.runInContext("collectRenderOutcome(__initialTouchPort, JSON.parse(__initialTouchMetric))", app.context);
+    releaseOldRead.resolve();
+    await attached;
+    await waitUntil(() => app.page(keys.pageArtifactKey).render !== undefined, "ready render after the serialized initial read");
+    assert.strictEqual(app.page(keys.pageArtifactKey).render?.blocks[0]?.patch_id, "ready-patch");
+  });
+
+  await scenario("non-reusable producer is not joined after a non-terminal cache fallback", async () => {
+    for (const fixture of [
+      { name: "identity-mismatch", cancelled: false, retired: false, identityMismatch: true },
+      { name: "cancelled", cancelled: true, retired: false, identityMismatch: false },
+      { name: "retired", cancelled: false, retired: true, identityMismatch: false },
+    ]) {
+      const storage = fakeStorage();
+      const server = createFakeServer();
+      const app = createBackgroundApp({ storage, server });
+      await app.ready();
+      const job = app.job(`${fixture.name}-active-job`, `https://x/${fixture.name}-active.jpg`);
+      const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+      const page = cachedTranslatedPage({ keys, server, job });
+      page.state = "partial";
+      app.context.__staleActivePage = JSON.stringify(page);
+      app.context.__staleActiveDescriptor = JSON.stringify({
+        ...job, src_lang: "ja", dst_lang: "vi", scope: "visible", reading_direction: "rtl", source_fetch_ms: 0,
+      });
+      app.context.__staleActiveFixture = JSON.stringify(fixture);
+      app.context.__staleActiveSourceHash = keys.sourceContentHash;
+      await vm.runInContext(`(async () => {
+        const page = JSON.parse(__staleActivePage);
+        await pageCache.putPage(page);
+        const fixture = JSON.parse(__staleActiveFixture);
+        const stalePage = structuredClone(page);
+        if (fixture.identityMismatch) {
+          stalePage.render_artifact_key = "stale-render";
+          stalePage.patch_versions = { ...stalePage.patch_versions, cleaner: "stale-cleaner" };
+        }
+        const stale = {
+          pageKey: stalePage.page_artifact_key,
+          renderArtifactKey: stalePage.render_artifact_key,
+          page: stalePage,
+          ocrStageKey: stalePage.ocr_key,
+          analysisKey: stalePage.analysis_key,
+          consumers: new Map(),
+          jobIds: new Set(),
+          prewarmOnly: false,
+          persistUntilDone: false,
+          cancelled: fixture.cancelled,
+          retired: fixture.retired,
+          timings: { accepted: 0 },
+          durations: {},
+          analysisCacheHit: null,
+          ocrSummary: null,
+          translationBatchTrace: [],
+          persistChain: Promise.resolve(),
+        };
+        producers.set(page.page_artifact_key, stale);
+        const descriptor = JSON.parse(__staleActiveDescriptor);
+        const acquisition = { released: false, release() { this.released = true; } };
+        const request = createRequest(null, {
+          request_id: "stale-active-" + fixture.name,
+          scope: "visible", src_lang: "ja", dst_lang: "vi", jobs: [descriptor],
+        });
+        request.sourceAcquisitions.set(descriptor.job_id, acquisition);
+        request.sourceDescriptors.set(descriptor.job_id, descriptor);
+        await attachDescriptor(request, descriptor, {
+          job_id: descriptor.job_id, request_id: request.requestId, scope: "visible", src_lang: "ja", dst_lang: "vi",
+          descriptor, state: "queued", created_at: 1,
+        }, { sourceContentHash: __staleActiveSourceHash, blob: new Blob([descriptor.source_url]) }, acquisition);
+        const attached = request.jobs.get(descriptor.job_id);
+        const replacedBeforeCleanup = producers.get(page.page_artifact_key) === attached && attached !== stale;
+        if (fixture.name === "identity-mismatch") await finishProducer(stale, { translated: 0, failed: 0 });
+        if (fixture.name === "cancelled") await failProducer(stale, new Error("stale producer failed"));
+        globalThis.__staleActiveResult = JSON.stringify({
+          staleConsumers: stale.consumers.size,
+          attachedToStale: attached === stale,
+          replacedBeforeCleanup,
+          newOwnsAcquisition: attached?.sourceAcquisition === acquisition,
+          acquisitionReleased: acquisition.released,
+          replacementRemains: producers.get(page.page_artifact_key) === attached,
+        });
+      })()`, app.context);
+      assert.deepStrictEqual(JSON.parse(vm.runInContext("__staleActiveResult", app.context)), {
+        staleConsumers: 0,
+        attachedToStale: false,
+        replacedBeforeCleanup: true,
+        newOwnsAcquisition: true,
+        acquisitionReleased: false,
+        replacementRemains: true,
+      });
+    }
+  });
+
+  await scenario("terminal render error cannot restore an older page identity", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const app = createBackgroundApp({ storage, server });
+    await app.ready();
+    const job = app.job("terminal-stale-error-job", "https://x/terminal-stale-error.jpg");
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const oldPage = cachedTranslatedPage({ keys, server, job });
+    storage.rows[`mt:page:${keys.pageArtifactKey}`] = oldPage;
+    server.primeRender(keys.renderArtifactKey, "terminal-stale-error");
+    server.failRender("terminal-stale-error");
+    server.holdRender("terminal-stale-error");
+    const port = app.connect();
+    port.receive(app.startScope("terminal-stale-error", "visible", job));
+    await waitUntil(() => server.counts.render === 1, "held terminal render request");
+
+    const bumpedPatchVersions = { ...server.patchVersions, cleaner: "c2" };
+    const bumpedPage = structuredClone(oldPage);
+    bumpedPage.render_artifact_key = "new-render";
+    bumpedPage.patch_versions = bumpedPatchVersions;
+    app.context.__terminalStaleBumpedPage = JSON.stringify(bumpedPage);
+    await vm.runInContext("pageCache.putPage(JSON.parse(__terminalStaleBumpedPage))", app.context);
+    assert.deepStrictEqual({
+      renderArtifactKey: app.page(keys.pageArtifactKey).render_artifact_key,
+      patchVersions: app.page(keys.pageArtifactKey).patch_versions,
+    }, {
+      renderArtifactKey: "new-render",
+      patchVersions: bumpedPatchVersions,
+    });
+
+    server.releaseRender("terminal-stale-error");
+    await app.waitFor("scope_done", port);
+    assert.deepStrictEqual({
+      renderArtifactKey: app.page(keys.pageArtifactKey).render_artifact_key,
+      patchVersions: app.page(keys.pageArtifactKey).patch_versions,
+    }, {
+      renderArtifactKey: "new-render",
+      patchVersions: bumpedPatchVersions,
+    });
+  });
+
+  await scenario("disconnect and supersede invalidate incomplete render collectors", async () => {
+    for (const action of ["disconnect", "supersede"]) {
+      const app = createBackgroundApp();
+      await app.ready();
+      const requestId = `collector-${action}`;
+      const jobId = `collector-${action}-job`;
+      const job = app.job(jobId, `https://x/collector-${action}.jpg`);
+      const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+      const port = app.connect();
+      port.receive(app.startScope(requestId, "visible", job));
+      await app.waitFor("scope_done", port);
+      const event = port.sent.find((row) => row.type === "translation" && row.request_id === requestId);
+
+      if (action === "disconnect") {
+        port.disconnect();
+      } else {
+        const replacementId = `${requestId}-replacement`;
+        port.receive(app.startScope(replacementId, "visible", null, requestId));
+        await waitUntil(
+          () => port.sent.some((row) => row.type === "scope_done" && row.request_id === replacementId),
+          "collector superseding scope completion"
+        );
+      }
+      port.receive({
+        type: "render_metric",
+        request_id: requestId,
+        job_id: jobId,
+        page_artifact_key: event.page_artifact_key,
+        render_artifact_key: event.render_artifact_key,
+        layout_fit_version: event.layout_fit_version,
+        block_id: event.block_id,
+        painted: true,
+        reason: null,
+        layout_profile: { font_px: 16, line_height: 1.2 },
+      });
+      await flush();
+      assert.strictEqual(app.page(keys.pageArtifactKey).render, undefined);
+      assert.strictEqual(vm.runInContext("renderOutcomeCollectors.size", app.context), 0);
+    }
+  });
+
+  await scenario("incomplete render collectors stay bounded", async () => {
+    const app = createBackgroundApp();
+    await app.ready();
+    const bounded = vm.runInContext(`
+      for (let index = 0; index < 129; index++) {
+        prepareRenderOutcomeCollector(
+          { page_artifact_key: "bounded-page-" + index, render_artifact_key: "bounded-render-" + index, manifest_ids: ["b" + index] },
+          {
+            render_artifact_key: "bounded-render-" + index,
+            blocks: [{
+              block_id: "b" + index, patch_id: "patch-" + index, patch_bbox: [1, 2, 3, 4],
+              fit_bbox: [1, 2, 3, 4], reason: null,
+            }],
+          },
+          [{ requestId: "bounded-request-" + index, jobId: "bounded-job-" + index, port: {} }]
+        );
+      }
+      ({
+        size: renderOutcomeCollectors.size,
+        firstRetained: renderOutcomeCollectors.has(renderOutcomeKey("bounded-page-0", "bounded-render-0", LAYOUT_FIT_VERSION)),
+      })
+    `, app.context);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(bounded)), { size: 128, firstRetained: false });
+  });
+
+  await scenario("manifest recovery isolates itself from a shared OCR stage", async () => {
+    const app = createBackgroundApp();
+    await app.ready();
+    const recovered = vm.runInContext(`
+      const shared = {
+        key: "shared-ocr", consumers: new Map([["recovering", {}], ["peer", {}]]),
+        controller: new AbortController(), promise: null, ocrDone: true, blocks: new Map(), blockErrors: [],
+      };
+      ocrStages.set("shared-ocr", shared);
+      const producer = {
+        pageKey: "recovering", ocrKey: "shared-ocr", analysisKey: "shared-analysis",
+        page: { state: "complete", analysis_known: true, ocr_done: true, image_w: 100, image_h: 200, blocks: [], manifest_ids: ["old"] },
+        ocrStage: shared, analysisStage: null, translationReady: Promise.resolve(), renderReady: Promise.resolve(),
+        renderArtifact: {}, cancelled: true,
+      };
+      resetProducerForManifestRecovery(producer);
+      const recoveryStage = attachStage(ocrStages, producer.ocrStageKey || producer.ocrKey, producer);
+      ({
+        originalRetained: ocrStages.get("shared-ocr") === shared,
+        peerRetained: shared.consumers.has("peer"),
+        recoveryIsDistinct: recoveryStage !== shared,
+      })
+    `, app.context);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(recovered)), {
+      originalRetained: true,
+      peerRetained: true,
+      recoveryIsDistinct: true,
+    });
+  });
+
+  await scenario("every OCR stream carries the exact render key built from fetched bytes", async () => {
+    // Mutation caught: omitting render_artifact_key or deriving it from translation identity.
+    const server = createFakeServer();
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const job = app.job("render-key-job", "https://x/render-key.jpg");
+    const expected = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const port = app.connect();
+    port.receive(app.startScope("render-key", "visible", job));
+    await app.waitFor("scope_done", port);
+
+    assert.strictEqual(server.ocrForms.length, 1);
+    assert.strictEqual(server.ocrForms[0].get("render_artifact_key"), expected.renderArtifactKey);
+    assert.strictEqual(await server.ocrForms[0].get("image").text(), job.source_url);
+    assert.strictEqual(server.counts.source, 1);
+    const stored = app.page(expected.pageArtifactKey);
+    assert.strictEqual(stored.source_content_hash, sourceIdentityFor(job.source_url).sourceContentHash);
+    assert.strictEqual(stored.render_artifact_key, expected.renderArtifactKey);
+    assert.deepStrictEqual(stored.patch_versions, server.patchVersions);
+  });
+
+  await scenario("render and translation join in either order and warm replay is one key call", async () => {
+    const server = createFakeServer();
+    server.holdTranslation("vi");
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const job = app.job("join-job", "https://x/render-join.jpg");
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const first = app.connect();
+    first.receive(app.startScope("join-first", "visible", job));
+    await waitUntil(() => server.counts.translate === 1, "render-ready translation request");
+    assert.strictEqual(first.sent.some((event) => event.type === "translation"), false);
+    server.releaseTranslation("vi");
+    await app.waitFor("scope_done", first);
+    const coldEvent = first.sent.find((event) => event.type === "translation");
+    assert.deepStrictEqual(
+      {
+        patch_id: coldEvent.patch_id,
+        patch_rgba: coldEvent.patch_rgba,
+        patch_mime: coldEvent.patch_mime,
+        patch_bbox: coldEvent.patch_bbox,
+        fit_bbox: coldEvent.fit_bbox,
+        vertical: coldEvent.vertical,
+        text: coldEvent.text,
+        layout_fit_version: coldEvent.layout_fit_version,
+        layout_hint: coldEvent.layout_hint,
+      },
+      {
+        patch_id: "patch-b1",
+        patch_rgba: Buffer.from("patch:b1").toString("base64"),
+        patch_mime: "image/png",
+        patch_bbox: [1, 2, 3, 4],
+        fit_bbox: [1, 2, 3, 4],
+        vertical: false,
+        text: "vi:こんにちは",
+        layout_fit_version: "dom-fit-10px-v1",
+        layout_hint: null,
+      }
+    );
+
+    app.page(keys.pageArtifactKey).render = {
+      schema_version: "render-page-v1",
+      render_artifact_key: keys.renderArtifactKey,
+      patch_versions: server.patchVersions,
+      layout_fit_version: "dom-fit-10px-v1",
+      breaker_open: false,
+      blocks: [{
+        block_id: "b1",
+        render_mode: "in_place",
+        patch_id: "patch-b1",
+        patch_bbox: [1, 2, 3, 4],
+        fit_bbox: [1, 2, 3, 4],
+        layout_profile: { font_px: 16, line_height: 1.2 },
+        reason: null,
+      }],
+    };
+    const beforeWarm = structuredClone(server.counts);
+    server.holdRender("render-join");
+    const warm = app.connect();
+    warm.receive(app.startScope("join-warm", "visible", app.job("join-warm-job", job.source_url)));
+    await waitUntil(() => server.counts.renderKey === beforeWarm.renderKey + 1, "warm render key call");
+    assert.strictEqual(server.counts.translate, beforeWarm.translate);
+    assert.strictEqual(warm.sent.some((event) => event.type === "translation"), false);
+    server.releaseRender("render-join");
+    const warmDone = await app.waitFor("scope_done", warm);
+    assert.strictEqual(warmDone.cache_hit, true);
+    assert.strictEqual(server.counts.renderBlob, beforeWarm.renderBlob);
+    const warmEvent = warm.sent.find((event) => event.type === "translation");
+    assert.deepStrictEqual(warmEvent.layout_hint, { font_px: 16, line_height: 1.2 });
+  });
+
+  await scenario("render artifact retries exactly once with source bytes on artifact_missing", async () => {
+    const server = createFakeServer();
+    server.missRenderKey("render-retry");
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const job = app.job("render-retry-job", "https://x/render-retry.jpg", {
+      crop: { left: 0.1, top: 0.2, right: 0.9, bottom: 0.8 },
+    });
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const port = app.connect();
+    port.receive(app.startScope("render-retry", "visible", job));
+    await app.waitFor("scope_done", port);
+    assert.deepStrictEqual(
+      { render: server.counts.render, key: server.counts.renderKey, blob: server.counts.renderBlob },
+      { render: 2, key: 1, blob: 1 }
+    );
+    assert.strictEqual(server.renderForms[0].get("image"), null);
+    assert.strictEqual(await server.renderForms[1].get("image").text(), "https://x/render-retry.jpg");
+    for (const form of server.renderForms) {
+      assert.strictEqual(form.get("analysis_key"), keys.analysisKey);
+      assert.strictEqual(form.get("render_artifact_key"), keys.renderArtifactKey);
+      assert.strictEqual(form.get("source_content_hash"), sourceIdentityFor(job.source_url).sourceContentHash);
+      assert.deepStrictEqual(
+        ["left", "top", "right", "bottom"].map((name) => Number(form.get(`crop_${name}`))),
+        [0.1, 0.2, 0.9, 0.8]
+      );
+    }
+  });
+
+  await scenario("strict SFX rows persist but never enter the manifest or event stream", async () => {
+    const server = createFakeServer();
+    server.setOcrRows("mixed-kind", [
+      { type: "analysis_ready", image_w: 300, image_h: 500 },
+      { type: "ocr_block", block_id: "text", bbox: [200, 10, 20, 20], src_text: "hello", vertical: false },
+      { type: "ocr_block", block_id: "sfx", bbox: [10, 10, 20, 20], src_text: "boom", vertical: true },
+      { type: "image_done", recognized: 2, failed: 0 },
+    ]);
+    server.queueTranslationResult({ items: [
+      { id: "text", kind: "text", translation: "xin chao" },
+      { id: "sfx", kind: "sfx", translation: null },
+    ] });
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const job = app.job("mixed-kind-job", "https://x/mixed-kind.jpg");
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const port = app.connect();
+    port.receive(app.startScope("mixed-kind", "visible", job));
+    await app.waitFor("scope_done", port);
+    const page = app.page(keys.pageArtifactKey);
+    assert.deepStrictEqual(page.manifest_ids, ["text"]);
+    assert.deepStrictEqual(
+      page.blocks.map((block) => ({ id: block.block_id, kind: block.kind, trans_text: block.trans_text })),
+      [{ id: "text", kind: "text", trans_text: "xin chao" }, { id: "sfx", kind: "sfx", trans_text: null }]
+    );
+    assert.deepStrictEqual(port.sent.filter((event) => event.type === "translation").map((event) => event.block_id), ["text"]);
+    const coldDone = port.sent.find((event) => event.type === "scope_done");
+    assert.deepStrictEqual(
+      port.sent.filter((event) => event.type === "image_done").map((event) => ({
+        translated: event.translated, recognized: event.recognized, failed: event.failed,
+      })),
+      [{ translated: 1, recognized: 2, failed: 0 }],
+    );
+    assert.deepStrictEqual({ translated: coldDone.translated, failed: coldDone.failed }, { translated: 1, failed: 0 });
+
+    const replay = app.connect();
+    replay.receive(app.startScope("mixed-kind-cache", "visible", app.job("mixed-kind-cache-job", job.source_url)));
+    const replayDone = await app.waitFor("scope_done", replay);
+    assert.deepStrictEqual(
+      replay.sent.filter((event) => event.type === "translation").map((event) => event.block_id),
+      ["text"],
+    );
+    assert.deepStrictEqual(
+      replay.sent.filter((event) => event.type === "image_done").map((event) => ({
+        translated: event.translated, recognized: event.recognized, failed: event.failed,
+      })),
+      [{ translated: 1, recognized: 2, failed: 0 }],
+    );
+    assert.deepStrictEqual(
+      { translated: replayDone.translated, failed: replayDone.failed, cache_hit: replayDone.cache_hit },
+      { translated: 1, failed: 0, cache_hit: true },
+    );
+  });
+
+  await scenario("all-SFX and capability-skip pages persist translations without render events", async () => {
+    const sfxServer = createFakeServer();
+    sfxServer.setOcrRows("all-sfx", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "ocr_block", block_id: "only-sfx", bbox: [1, 2, 3, 4], src_text: "boom" },
+      { type: "image_done", recognized: 1, failed: 0 },
+    ]);
+    sfxServer.queueTranslationResult({ items: [{ id: "only-sfx", kind: "sfx", translation: null }] });
+    const sfxApp = createBackgroundApp({ server: sfxServer });
+    await sfxApp.ready();
+    const sfxJob = sfxApp.job("all-sfx-job", "https://x/all-sfx.jpg");
+    const sfxKeys = await sfxApp.keysFor({ ...sfxJob, reading_direction: "rtl" });
+    const sfxPort = sfxApp.connect();
+    sfxPort.receive(sfxApp.startScope("all-sfx", "visible", sfxJob));
+    await sfxApp.waitFor("scope_done", sfxPort);
+    assert.deepStrictEqual(sfxApp.page(sfxKeys.pageArtifactKey).manifest_ids, []);
+    assert.strictEqual(sfxPort.sent.some((event) => event.type === "translation"), false);
+    assert.deepStrictEqual(
+      sfxPort.sent.filter((event) => event.type === "image_done").map((event) => ({
+        translated: event.translated, recognized: event.recognized, failed: event.failed,
+      })),
+      [{ translated: 0, recognized: 1, failed: 0 }],
+    );
+    assert.deepStrictEqual(
+      sfxPort.sent.filter((event) => event.type === "scope_done").map((event) => ({
+        translated: event.translated, failed: event.failed,
+      })),
+      [{ translated: 0, failed: 0 }],
+    );
+
+    const skipServer = createFakeServer();
+    skipServer.setRenderRows("capability-skip", [{
+      block_id: "b1", patch_id: null, patch_bbox: null, clean_region: null,
+      fit_bbox: null, patch_mime: null, patch_rgba: null, reason: "clean_failed",
+    }]);
+    const skipApp = createBackgroundApp({ server: skipServer });
+    await skipApp.ready();
+    const skipJob = skipApp.job("capability-skip-job", "https://x/capability-skip.jpg");
+    const skipKeys = await skipApp.keysFor({ ...skipJob, reading_direction: "rtl" });
+    const skipPort = skipApp.connect();
+    skipPort.receive(skipApp.startScope("capability-skip", "visible", skipJob));
+    await skipApp.waitFor("scope_done", skipPort);
+    const skipped = skipApp.page(skipKeys.pageArtifactKey);
+    assert.deepStrictEqual(skipped.manifest_ids, ["b1"]);
+    assert.strictEqual(skipped.blocks[0].trans_text, "vi:こんにちは");
+    assert.strictEqual(skipPort.sent.some((event) => event.type === "translation"), false);
+  });
+
+  await scenario("delivery counts survive failures and remain per consumer", async () => {
+    const beforeServer = createFakeServer();
+    beforeServer.failRender("delivery-fail-before");
+    const beforeApp = createBackgroundApp({ server: beforeServer });
+    await beforeApp.ready();
+    const beforePort = beforeApp.connect();
+    beforePort.receive(beforeApp.startScope(
+      "delivery-fail-before",
+      "visible",
+      beforeApp.job("delivery-fail-before-job", "https://x/delivery-fail-before.jpg"),
+    ));
+    const beforeDone = await beforeApp.waitFor("scope_done", beforePort);
+    assert.deepStrictEqual(beforePort.sent.filter((event) => event.type === "translation"), []);
+    assert.deepStrictEqual(
+      beforePort.sent.filter((event) => event.type === "image_done").map((event) => ({
+        translated: event.translated, recognized: event.recognized, failed: event.failed,
+      })),
+      [{ translated: 0, recognized: 1, failed: 1 }],
+    );
+    assert.deepStrictEqual({ translated: beforeDone.translated, failed: beforeDone.failed }, { translated: 0, failed: 1 });
+
+    const sharedServer = createFakeServer();
+    sharedServer.holdTranslation("vi");
+    const sharedApp = createBackgroundApp({ server: sharedServer });
+    await sharedApp.ready();
+    const source = "https://x/delivery-shared.jpg";
+    const throwing = sharedApp.connect();
+    const post = throwing.postMessage.bind(throwing);
+    throwing.postMessage = (message) => {
+      if (message.type === "translation") throw new Error("disconnected translation port");
+      post(message);
+    };
+    throwing.receive(sharedApp.startScope("delivery-throwing", "visible", sharedApp.job("delivery-throwing-job", source)));
+    await waitUntil(() => sharedServer.counts.translate === 1, "held shared translation");
+    const live = sharedApp.connect();
+    live.receive(sharedApp.startScope("delivery-live", "visible", sharedApp.job("delivery-live-job", source)));
+    await sharedApp.waitFor("page_job_accepted", live);
+    sharedServer.releaseTranslation("vi");
+    const throwingDone = await sharedApp.waitFor("scope_done", throwing);
+    const liveDone = await sharedApp.waitFor("scope_done", live);
+    assert.deepStrictEqual(
+      [throwing, live].map((port) => port.sent.filter((event) => event.type === "translation").map((event) => event.block_id)),
+      [[], ["b1"]],
+    );
+    assert.deepStrictEqual(
+      [throwing, live].map((port) => port.sent.filter((event) => event.type === "image_done").map((event) => ({
+        translated: event.translated, recognized: event.recognized, failed: event.failed,
+      }))),
+      [[{ translated: 0, recognized: 1, failed: 0 }], [{ translated: 1, recognized: 1, failed: 0 }]],
+    );
+    assert.deepStrictEqual(
+      [throwingDone, liveDone].map((done) => ({ translated: done.translated, failed: done.failed })),
+      [{ translated: 0, failed: 0 }, { translated: 1, failed: 0 }],
+    );
+  });
+
+  await scenario("direct replay survives accepted, progress, and translation port failures", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const bootstrap = createBackgroundApp({ storage, server });
+    await bootstrap.ready();
+    const job = bootstrap.job("delivery-replay-job", "https://x/delivery-replay.jpg");
+    const keys = await bootstrap.keysFor({ ...job, reading_direction: "rtl" });
+    const page = cachedTranslatedPage({ keys, server, job, blockId: "first" });
+    page.blocks.push({
+      block_id: "second", bbox: [5, 6, 7, 8], src_text: "second", trans_text: "vi:second",
+      kind: "text", vertical: false, reading_order: 1, state: "translated",
+    });
+    page.manifest_ids = ["first", "second"];
+    storage.rows[`mt:page:${keys.pageArtifactKey}`] = page;
+    server.primeRender(keys.renderArtifactKey, "delivery-replay");
+    server.setRenderRows("delivery-replay", page.blocks.map((block) => ({
+      block_id: block.block_id,
+      patch_id: `patch-${block.block_id}`,
+      patch_bbox: block.bbox,
+      clean_region: block.bbox,
+      fit_bbox: block.bbox,
+      patch_mime: "image/png",
+      patch_rgba: Buffer.from(`patch:${block.block_id}`).toString("base64"),
+      reason: null,
+    })));
+
+    const observed = [];
+    for (const fixture of [
+      { name: "accepted", rejects: (message) => message.type === "page_job_accepted" },
+      { name: "progress", rejects: (message) => message.type === "progress" },
+      { name: "translation", rejects: (message) => message.type === "translation" && message.block_id === "second" },
+    ]) {
+      const app = bootstrap.restart();
+      await app.ready();
+      const port = app.connect();
+      const post = port.postMessage.bind(port);
+      let rejected = false;
+      port.postMessage = (message) => {
+        if (!rejected && fixture.rejects(message)) {
+          rejected = true;
+          throw new Error(`port failed on ${fixture.name}`);
+        }
+        post(message);
+      };
+      const replayJob = app.job(`delivery-replay-${fixture.name}-job`, job.source_url);
+      port.receive(app.startScope(`delivery-replay-${fixture.name}`, "visible", replayJob));
+      const done = await app.waitFor("scope_done", port);
+      observed.push({
+        name: fixture.name,
+        translated_events: port.sent.filter((event) => event.type === "translation").map((event) => event.block_id),
+        image_done: port.sent.filter((event) => event.type === "image_done").map((event) => ({
+          translated: event.translated, recognized: event.recognized, failed: event.failed,
+        })),
+        scope_done: { translated: done.translated, failed: done.failed, cache_hit: done.cache_hit },
+        page: { state: app.page(keys.pageArtifactKey).state, last_error: app.page(keys.pageArtifactKey).last_error },
+        metrics: done.page_metrics.map((row) => ({ cache_hit: row.cache_hit, error_code: row.error_code })),
+      });
+    }
+    assert.deepStrictEqual(observed, [
+      {
+        name: "accepted", translated_events: ["first", "second"],
+        image_done: [{ translated: 2, recognized: 2, failed: 0 }],
+        scope_done: { translated: 2, failed: 0, cache_hit: true },
+        page: { state: "complete", last_error: null },
+        metrics: [{ cache_hit: true, error_code: null }],
+      },
+      {
+        name: "progress", translated_events: ["first", "second"],
+        image_done: [{ translated: 2, recognized: 2, failed: 0 }],
+        scope_done: { translated: 2, failed: 0, cache_hit: true },
+        page: { state: "complete", last_error: null },
+        metrics: [{ cache_hit: true, error_code: null }],
+      },
+      {
+        name: "translation", translated_events: ["first"],
+        image_done: [{ translated: 1, recognized: 2, failed: 0 }],
+        scope_done: { translated: 1, failed: 0, cache_hit: true },
+        page: { state: "complete", last_error: null },
+        metrics: [{ cache_hit: true, error_code: null }],
+      },
+    ]);
+  });
+
+  await scenario("producer transport failures do not reject the OCR stage", async () => {
+    const observed = [];
+    for (const fixture of [
+      {
+        name: "progress",
+        rows: [
+          { type: "analysis_ready", image_w: 100, image_h: 200 },
+          { type: "ocr_block", block_id: "good", bbox: [1, 2, 3, 4], src_text: "good" },
+          { type: "image_done", recognized: 1, failed: 0 },
+        ],
+      },
+      {
+        name: "block_error",
+        rows: [
+          { type: "analysis_ready", image_w: 100, image_h: 200 },
+          { type: "ocr_block", block_id: "good", bbox: [1, 2, 3, 4], src_text: "good" },
+          { type: "ocr_block_error", block_id: "bad", code: "recognition_failed" },
+          { type: "image_done", recognized: 1, failed: 1 },
+        ],
+      },
+    ]) {
+      const server = createFakeServer();
+      server.setOcrRows(`delivery-${fixture.name}`, fixture.rows);
+      const app = createBackgroundApp({ server });
+      await app.ready();
+      const port = app.connect();
+      const post = port.postMessage.bind(port);
+      let rejected = false;
+      port.postMessage = (message) => {
+        if (!rejected && message.type === fixture.name) {
+          rejected = true;
+          throw new Error(`port failed on ${fixture.name}`);
+        }
+        post(message);
+      };
+      port.receive(app.startScope(
+        `delivery-${fixture.name}`,
+        "visible",
+        app.job(`delivery-${fixture.name}-job`, `https://x/delivery-${fixture.name}.jpg`),
+      ));
+      const done = await app.waitFor("scope_done", port);
+      observed.push({
+        name: fixture.name,
+        translated_events: port.sent.filter((event) => event.type === "translation").map((event) => event.block_id),
+        scope_done: { translated: done.translated, failed: done.failed },
+      });
+    }
+    assert.deepStrictEqual(observed, [
+      { name: "progress", translated_events: ["good"], scope_done: { translated: 1, failed: 0 } },
+      { name: "block_error", translated_events: ["good"], scope_done: { translated: 1, failed: 1 } },
+    ]);
+  });
+
+  await scenario("disconnected consumers receive no delivery or terminal", async () => {
+    const server = createFakeServer();
+    server.holdTranslation("vi");
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const source = "https://x/delivery-disconnect.jpg";
+    const gone = app.connect();
+    gone.receive(app.startScope("delivery-gone", "visible", app.job("delivery-gone-job", source)));
+    await waitUntil(() => server.counts.translate === 1, "held disconnect translation");
+    const live = app.connect();
+    live.receive(app.startScope("delivery-staying", "visible", app.job("delivery-staying-job", source)));
+    await app.waitFor("page_job_accepted", live);
+    gone.disconnect();
+    server.releaseTranslation("vi");
+    const done = await app.waitFor("scope_done", live);
+    assert.strictEqual(gone.sent.some((event) => event.type === "translation" || event.type === "image_done" || event.type === "scope_done"), false);
+    assert.deepStrictEqual(
+      live.sent.filter((event) => event.type === "image_done").map((event) => ({
+        translated: event.translated, recognized: event.recognized, failed: event.failed,
+      })),
+      [{ translated: 1, recognized: 1, failed: 0 }],
+    );
+    assert.deepStrictEqual({ translated: done.translated, failed: done.failed }, { translated: 1, failed: 0 });
+  });
+
+  await scenario("duplicate producer terminal does not emit after the job is done", async () => {
+    const server = createFakeServer();
+    server.holdTranslation("vi");
+    server.holdSource("delivery-terminal-b");
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const firstJob = app.job("delivery-terminal-a-job", "https://x/delivery-terminal-a.jpg");
+    const secondJob = app.job("delivery-terminal-b-job", "https://x/delivery-terminal-b.jpg");
+    const firstKeys = await app.keysFor({ ...firstJob, reading_direction: "rtl" });
+    const port = app.connect();
+    port.receive({ ...app.startScope("delivery-terminal", "visible"), jobs: [firstJob, secondJob] });
+    await waitUntil(() => server.counts.translate === 1, "first terminal translation");
+    app.context.__duplicateTerminalProducer = app.producer(firstKeys.pageArtifactKey);
+    server.releaseTranslation("vi");
+    await waitUntil(
+      () => vm.runInContext("requests.get('delivery-terminal')?.done.has('delivery-terminal-a-job')", app.context),
+      "first delivery terminal",
+    );
+    await vm.runInContext(
+      "finishProducer(__duplicateTerminalProducer, { translated: 1, failed: 0 })",
+      app.context,
+    );
+    assert.strictEqual(
+      port.sent.filter((event) => event.type === "image_done" && event.job_id === "delivery-terminal-a-job").length,
+      1,
+    );
+    server.releaseSource("delivery-terminal-b");
+    const done = await app.waitFor("scope_done", port);
+    assert.deepStrictEqual({ translated: done.translated, failed: done.failed }, { translated: 2, failed: 0 });
+  });
+
+  await scenario("capability and content fit failures persist only a full canonical skip manifest", async () => {
+    const server = createFakeServer();
+    server.setOcrRows("mixed-render-skips", [
+      { type: "analysis_ready", image_w: 300, image_h: 500 },
+      { type: "ocr_block", block_id: "left", bbox: [10, 10, 20, 20], src_text: "left" },
+      { type: "ocr_block", block_id: "invalid", bbox: [100, 10, 20, 20], src_text: "invalid" },
+      { type: "ocr_block", block_id: "right", bbox: [200, 10, 20, 20], src_text: "right" },
+      { type: "image_done", recognized: 3, failed: 0 },
+    ]);
+    server.setRenderRows("mixed-render-skips", [
+      {
+        block_id: "left", patch_id: null, patch_bbox: null, clean_region: null,
+        fit_bbox: null, patch_mime: null, patch_rgba: null, reason: "clean_failed",
+      },
+      {
+        block_id: "invalid", patch_id: "patch-invalid", patch_bbox: [100, 10, 0, 20], clean_region: [100, 10, 20, 20],
+        fit_bbox: [100, 10, 20, 20], patch_mime: "image/png", patch_rgba: Buffer.from("patch:invalid").toString("base64"), reason: null,
+      },
+      {
+        block_id: "right", patch_id: "patch-right", patch_bbox: [200, 10, 20, 20], clean_region: [200, 10, 20, 20],
+        fit_bbox: [200, 10, 20, 20], patch_mime: "image/png", patch_rgba: Buffer.from("patch:right").toString("base64"), reason: null,
+      },
+    ]);
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const job = app.job("mixed-render-skips-job", "https://x/mixed-render-skips.jpg");
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const port = app.connect();
+    port.receive(app.startScope("mixed-render-skips", "visible", job));
+    await app.waitFor("scope_done", port);
+
+    const event = port.sent.find((row) => row.type === "translation");
+    assert.strictEqual(event.block_id, "right");
+    assert.strictEqual(app.page(keys.pageArtifactKey).render, undefined);
+    port.receive({
+      type: "render_metric",
+      request_id: "mixed-render-skips",
+      job_id: "mixed-render-skips-job",
+      page_artifact_key: event.page_artifact_key,
+      render_artifact_key: event.render_artifact_key,
+      layout_fit_version: event.layout_fit_version,
+      block_id: "right",
+      painted: false,
+      reason: "fit_failed",
+      layout_profile: null,
+    });
+    await waitUntil(() => app.page(keys.pageArtifactKey).render !== undefined, "full canonical skip render");
+    assert.deepStrictEqual(app.page(keys.pageArtifactKey).render.blocks, [
+      {
+        block_id: "right", render_mode: "skip", patch_id: null, patch_bbox: null,
+        fit_bbox: [200, 10, 20, 20], layout_profile: null, reason: "fit_failed",
+      },
+      {
+        block_id: "invalid", render_mode: "skip", patch_id: null, patch_bbox: null,
+        fit_bbox: [100, 10, 20, 20], layout_profile: null, reason: "layout_failed",
+      },
+      {
+        block_id: "left", render_mode: "skip", patch_id: null, patch_bbox: null,
+        fit_bbox: null, layout_profile: null, reason: "clean_failed",
+      },
+    ]);
+  });
+
+  await scenario("fast render rejection cancels translation still blocked in key hashing", async () => {
+    const server = createFakeServer();
+    const barrier = translationKeyDigestBarrier();
+    server.failRender("fast-render-rejection");
+    const app = createBackgroundApp({ server, cryptoImpl: barrier.crypto });
+    await app.ready();
+    const job = app.job("fast-render-rejection-job", "https://x/fast-render-rejection.jpg");
+    const port = app.connect();
+    port.receive(app.startScope("fast-render-rejection", "visible", job));
+    await barrier.entered;
+    await app.waitFor("scope_done", port);
+    assert.strictEqual(server.counts.translate, 0);
+    barrier.release();
+    await flush();
+    assert.strictEqual(server.counts.translate, 0);
+    assert.strictEqual(app.hotTranslationCount(), 0);
+    assert.strictEqual(port.sent.some((event) => event.type === "translation" || event.type === "block_error"), false);
+  });
+
+  await scenario("slow render rejection quarantines a late translation response", async () => {
+    const server = createFakeServer();
+    server.failRender("slow-render-rejection");
+    server.holdRender("slow-render-rejection");
+    server.holdTranslation("vi");
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const job = app.job("slow-render-rejection-job", "https://x/slow-render-rejection.jpg");
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const port = app.connect();
+    port.receive(app.startScope("slow-render-rejection", "visible", job));
+    await waitUntil(() => server.counts.translate === 1, "held translation request before render rejection");
+    const producer = app.producer(keys.pageArtifactKey);
+    assert.ok(producer);
+    assert.strictEqual(port.sent.some((event) => event.type === "scope_done"), false);
+    server.releaseRender("slow-render-rejection");
+    await app.waitFor("scope_done", port);
+    const terminalPage = JSON.parse(JSON.stringify(producer.page));
+    const terminalEvents = structuredClone(port.sent);
+    assert.strictEqual(app.hotTranslationCount(), 0);
+    server.releaseTranslation("vi");
+    await flush();
+    assert.strictEqual(app.hotTranslationCount(), 0);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(producer.page)), terminalPage);
+    assert.deepStrictEqual(port.sent, terminalEvents);
+  });
+
+  await scenario("manifest mismatch emits nothing", async () => {
+    const mismatchServer = createFakeServer();
+    mismatchServer.setRenderRows("manifest-mismatch", []);
+    const mismatchApp = createBackgroundApp({ server: mismatchServer });
+    await mismatchApp.ready();
+    const mismatchJob = mismatchApp.job("manifest-mismatch-job", "https://x/manifest-mismatch.jpg");
+    const mismatchKeys = await mismatchApp.keysFor({ ...mismatchJob, reading_direction: "rtl" });
+    const mismatchPort = mismatchApp.connect();
+    mismatchPort.receive(mismatchApp.startScope("manifest-mismatch", "visible", mismatchJob));
+    await mismatchApp.waitFor("scope_done", mismatchPort);
+    assert.strictEqual(mismatchPort.sent.some((event) => event.type === "translation"), false);
+    const breakerPage = mismatchApp.page(mismatchKeys.pageArtifactKey);
+    assert.strictEqual(breakerPage.manifest_mismatch_count, 1);
+    assert.strictEqual(breakerPage.ocr_done, true);
+    assert.deepStrictEqual(breakerPage.manifest_ids, ["b1"]);
+    assert.strictEqual(breakerPage.blocks[0].trans_text.startsWith("vi:"), true);
+
+    const beforeRevisit = structuredClone(mismatchServer.counts);
+    const revisit = mismatchApp.connect();
+    revisit.receive(mismatchApp.startScope(
+      "manifest-mismatch-revisit",
+      "visible",
+      mismatchApp.job("manifest-mismatch-revisit-job", mismatchJob.source_url),
+    ));
+    await mismatchApp.waitFor("scope_done", revisit);
+    assert.deepStrictEqual(
+      {
+        render: mismatchServer.counts.render - beforeRevisit.render,
+        ocr: mismatchServer.counts.ocr - beforeRevisit.ocr,
+        text: mismatchServer.counts.translate - beforeRevisit.translate,
+      },
+      { render: 0, ocr: 0, text: 0 },
+    );
+  });
+
+  await scenario("manifest recovery measures render wait from the recovery run", async () => {
+    let tick = 0;
+    const server = createFakeServer();
+    server.setRenderRows("manifest-recovery-timing", []);
+    server.holdRender("manifest-recovery-timing");
+    const app = createBackgroundApp({ server, clock: { now: () => tick } });
+    await app.ready();
+    const job = app.job("manifest-recovery-timing-job", "https://x/manifest-recovery-timing.jpg");
+    const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    const port = app.connect();
+    port.receive(app.startScope("manifest-recovery-timing", "visible", job));
+    await waitUntil(
+      () => server.counts.ocr === 1 && server.counts.translate === 1 && server.counts.render === 1,
+      "initial manifest-mismatch run",
+    );
+    server.beforeNextOcr(() => {
+      tick = 20;
+      server.setRenderRows("manifest-recovery-timing", [{
+        block_id: "b1", patch_id: "patch-b1", patch_bbox: [1, 2, 3, 4], clean_region: [1, 2, 3, 4],
+        fit_bbox: [1, 2, 3, 4], patch_mime: "image/png", patch_rgba: Buffer.from("patch:b1").toString("base64"), reason: null,
+      }]);
+      server.holdTranslation("vi");
+      server.holdRender("manifest-recovery-timing");
+    });
+    tick = 10;
+    server.releaseRender("manifest-recovery-timing");
+    await waitUntil(() => server.counts.translate === 2, "recovery translation request");
+    server.releaseTranslation("vi");
+    await waitUntil(
+      () => app.producer(keys.pageArtifactKey)?.timings.final_translation === 20,
+      "recovery final translation timing",
+    );
+    tick = 37;
+    server.releaseRender("manifest-recovery-timing");
+    const done = await app.waitFor("scope_done", port);
+    assert.strictEqual(done.page_metrics[0].manifest_mismatch, true);
+    assert.strictEqual(done.page_metrics[0].render_wait_after_translation_ms, 17);
+  });
+
+  await scenario("first fresh manifest mismatch claims before one paid recovery and preserves the claim", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const bootstrap = createBackgroundApp({ storage, server });
+    await bootstrap.ready();
+    const job = bootstrap.job("mismatch-recovery-job", "https://x/mismatch-recovery.jpg");
+    const keys = await bootstrap.keysFor({ ...job, reading_direction: "rtl" });
+    const pageStorageKey = `mt:page:${keys.pageArtifactKey}`;
+    storage.rows[pageStorageKey] = cachedTranslatedPage({ keys, server, job });
+    server.primeRender(keys.renderArtifactKey, "mismatch-recovery");
+    server.setRenderRows("mismatch-recovery", []);
+    server.setOcrRows("mismatch-recovery", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "ocr_block", block_id: "new", bbox: [5, 6, 7, 8], src_text: "new" },
+      { type: "image_done", recognized: 1, failed: 0 },
+    ]);
+    server.queueTranslationResult({ items: [{ id: "new", kind: "text", translation: "vi:new" }] });
+    let recoverySnapshot = null;
+    server.beforeNextOcr(() => {
+      recoverySnapshot = structuredClone(storage.rows[pageStorageKey]);
+      server.setRenderRows("mismatch-recovery", [
+        {
+          block_id: "new", patch_id: "patch-new", patch_bbox: [5, 6, 7, 8], clean_region: [5, 6, 7, 8],
+          fit_bbox: [5, 6, 7, 8], patch_mime: "image/png", patch_rgba: Buffer.from("patch:new").toString("base64"), reason: null,
+        },
+        {
+          block_id: "artifact-extra", patch_id: null, patch_bbox: null, clean_region: null,
+          fit_bbox: null, patch_mime: null, patch_rgba: null, reason: "unsupported_region",
+        },
+      ]);
+    });
+
+    const app = bootstrap.restart();
+    await app.ready();
+    const port = app.connect();
+    port.receive(app.startScope("mismatch-recovery", "visible", job));
+    const done = await app.waitFor("scope_done", port);
+
+    assert.strictEqual(recoverySnapshot?.manifest_mismatch_count, 1, "claim must persist before recovery OCR");
+    assert.deepStrictEqual(
+      { source: server.counts.source, ocr: server.counts.ocr, text: server.counts.translate, render: server.counts.render },
+      { source: 1, ocr: 1, text: 1, render: 2 }
+    );
+    assert.strictEqual(done.failed, 0);
+    assert.deepStrictEqual(port.sent.filter((event) => event.type === "translation").map((event) => event.block_id), ["new"]);
+    assert.deepStrictEqual(app.page(keys.pageArtifactKey).manifest_ids, ["new"]);
+    assert.strictEqual(app.page(keys.pageArtifactKey).manifest_mismatch_count, 1);
+
+    const recoveryEvent = port.sent.find((event) => event.type === "translation");
+    server.setRenderRows("mismatch-recovery", []);
+    const beforeRepeat = structuredClone(server.counts);
+    const repeat = app.connect();
+    repeat.receive(app.startScope("mismatch-repeat", "visible", app.job("mismatch-repeat-job", job.source_url)));
+    await app.waitFor("scope_done", repeat);
+    assert.deepStrictEqual(app.page(keys.pageArtifactKey).render, {
+      schema_version: "render-page-v1",
+      render_artifact_key: keys.renderArtifactKey,
+      patch_versions: server.patchVersions,
+      layout_fit_version: "dom-fit-10px-v1",
+      breaker_open: true,
+      blocks: [],
+    });
+    assert.deepStrictEqual(
+      {
+        render: server.counts.render - beforeRepeat.render,
+        ocr: server.counts.ocr - beforeRepeat.ocr,
+        text: server.counts.translate - beforeRepeat.translate,
+      },
+      { render: 1, ocr: 0, text: 0 }
+    );
+
+    port.receive({
+      type: "render_metric",
+      request_id: "mismatch-recovery",
+      job_id: "mismatch-recovery-job",
+      page_artifact_key: recoveryEvent.page_artifact_key,
+      render_artifact_key: recoveryEvent.render_artifact_key,
+      layout_fit_version: recoveryEvent.layout_fit_version,
+      block_id: recoveryEvent.block_id,
+      painted: true,
+      reason: null,
+      layout_profile: { font_px: 16, line_height: 1.2 },
+    });
+    await flush();
+    assert.strictEqual(app.page(keys.pageArtifactKey).render.breaker_open, true, "late pre-breaker metric must not replace the sentinel");
+    assert.strictEqual(vm.runInContext("renderOutcomeCollectors.size", app.context), 0, "durable sentinel must invalidate the old collector");
+
+    const beforeSentinelRevisit = structuredClone(server.counts);
+    const sentinelRevisit = app.connect();
+    sentinelRevisit.receive(app.startScope("sentinel-revisit", "visible", app.job("sentinel-revisit-job", job.source_url)));
+    await app.waitFor("scope_done", sentinelRevisit);
+    assert.deepStrictEqual(
+      {
+        render: server.counts.render - beforeSentinelRevisit.render,
+        ocr: server.counts.ocr - beforeSentinelRevisit.ocr,
+        text: server.counts.translate - beforeSentinelRevisit.translate,
+      },
+      { render: 0, ocr: 0, text: 0 }
+    );
+
+    const bumpedPatchVersions = { ...server.patchVersions, cleaner: "c2" };
+    app.context.__patchVersionsJson = JSON.stringify(bumpedPatchVersions);
+    server.setResponsePatchVersions(vm.runInContext("JSON.parse(__patchVersionsJson)", app.context));
+    await vm.runInContext("refreshServerVersions(false)", app.context);
+    const bumpedKeys = await app.keysFor({ ...job, reading_direction: "rtl" });
+    server.primeRender(bumpedKeys.renderArtifactKey, "mismatch-recovery");
+    server.setRenderRows("mismatch-recovery", [{
+      block_id: "new", patch_id: "patch-new-c2", patch_bbox: [5, 6, 7, 8], clean_region: [5, 6, 7, 8],
+      fit_bbox: [5, 6, 7, 8], patch_mime: "image/png", patch_rgba: Buffer.from("patch:new:c2").toString("base64"), reason: null,
+    }]);
+    const beforePatchRetry = structuredClone(server.counts);
+    const patchRetry = app.connect();
+    patchRetry.receive(app.startScope("patch-retry", "visible", app.job("patch-retry-job", job.source_url)));
+    await app.waitFor("scope_done", patchRetry);
+    assert.deepStrictEqual(
+      {
+        render: server.counts.render - beforePatchRetry.render,
+        ocr: server.counts.ocr - beforePatchRetry.ocr,
+        text: server.counts.translate - beforePatchRetry.translate,
+      },
+      { render: 1, ocr: 0, text: 0 }
+    );
+    assert.deepStrictEqual(patchRetry.sent.filter((event) => event.type === "translation").map((event) => event.block_id), ["new"]);
+    assert.strictEqual(app.page(keys.pageArtifactKey).manifest_mismatch_count, 1);
+  });
+
+  await scenario("partial OCR replay uses the durable manifest mismatch breaker", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const bootstrap = createBackgroundApp({ storage, server });
+    await bootstrap.ready();
+    const job = bootstrap.job("partial-mismatch-job", "https://x/partial-mismatch.jpg");
+    const keys = await bootstrap.keysFor({ ...job, reading_direction: "rtl" });
+    const pageStorageKey = `mt:page:${keys.pageArtifactKey}`;
+    storage.rows[pageStorageKey] = cachedIncompleteOcrPage({ keys, server, job });
+    server.primeRender(keys.renderArtifactKey, "partial-mismatch");
+    server.setRenderRows("partial-mismatch", []);
+    server.setOcrRows("partial-mismatch", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "ocr_block", block_id: "new", bbox: [5, 6, 7, 8], src_text: "new" },
+      { type: "image_done", recognized: 1, failed: 0 },
+    ]);
+    server.queueTranslationResult({ items: [{ id: "new", kind: "text", translation: "vi:new" }] });
+    let recoverySnapshot = null;
+    server.beforeNextOcr(() => {
+      recoverySnapshot = structuredClone(storage.rows[pageStorageKey]);
+      server.setRenderRows("partial-mismatch", [{
+        block_id: "new", patch_id: "patch-new", patch_bbox: [5, 6, 7, 8], clean_region: [5, 6, 7, 8],
+        fit_bbox: [5, 6, 7, 8], patch_mime: "image/png", patch_rgba: Buffer.from("patch:new").toString("base64"), reason: null,
+      }]);
+    });
+
+    const app = bootstrap.restart();
+    await app.ready();
+    const first = app.connect();
+    first.receive(app.startScope("partial-mismatch", "visible", job));
+    await app.waitFor("scope_done", first);
+
+    assert.strictEqual(recoverySnapshot?.manifest_mismatch_count, 1);
+    assert.strictEqual(storage.rows[`mt:ocr-recovery:${keys.ocrKey}`], undefined);
+    assert.deepStrictEqual(
+      { render: server.counts.render, ocr: server.counts.ocr, text: server.counts.translate },
+      { render: 2, ocr: 1, text: 1 },
+    );
+    assert.deepStrictEqual({
+      state: app.page(keys.pageArtifactKey).state,
+      manifest_mismatch_count: app.page(keys.pageArtifactKey).manifest_mismatch_count,
+      manifest_ids: app.page(keys.pageArtifactKey).manifest_ids,
+    }, {
+      state: "complete",
+      manifest_mismatch_count: 1,
+      manifest_ids: ["new"],
+    });
+
+    server.setRenderRows("partial-mismatch", []);
+    const beforeRepeat = structuredClone(server.counts);
+    const repeat = app.connect();
+    repeat.receive(app.startScope("partial-mismatch-repeat", "visible", app.job("partial-mismatch-repeat-job", job.source_url)));
+    await app.waitFor("scope_done", repeat);
+    assert.deepStrictEqual(app.page(keys.pageArtifactKey).render, {
+      schema_version: "render-page-v1",
+      render_artifact_key: keys.renderArtifactKey,
+      patch_versions: server.patchVersions,
+      layout_fit_version: "dom-fit-10px-v1",
+      breaker_open: true,
+      blocks: [],
+    });
+    assert.deepStrictEqual(
+      {
+        render: server.counts.render - beforeRepeat.render,
+        ocr: server.counts.ocr - beforeRepeat.ocr,
+        text: server.counts.translate - beforeRepeat.translate,
+      },
+      { render: 1, ocr: 0, text: 0 },
+    );
+
+    const beforeSentinel = structuredClone(server.counts);
+    const sentinel = app.connect();
+    sentinel.receive(app.startScope("partial-mismatch-sentinel", "visible", app.job("partial-mismatch-sentinel-job", job.source_url)));
+    await app.waitFor("scope_done", sentinel);
+    assert.deepStrictEqual(
+      {
+        render: server.counts.render - beforeSentinel.render,
+        ocr: server.counts.ocr - beforeSentinel.ocr,
+        text: server.counts.translate - beforeSentinel.translate,
+      },
+      { render: 0, ocr: 0, text: 0 },
+    );
+  });
+
+  await scenario("partial OCR replay breaker releases its source and job ledger", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const bootstrap = createBackgroundApp({ storage, server });
+    await bootstrap.ready();
+    const job = bootstrap.job("partial-breaker-job", "https://x/partial-breaker.jpg");
+    const keys = await bootstrap.keysFor({ ...job, reading_direction: "rtl" });
+    storage.rows[`mt:page:${keys.pageArtifactKey}`] = cachedIncompleteOcrPage({
+      keys, server, job, mismatchCount: 1,
+    });
+    server.primeRender(keys.renderArtifactKey, "partial-breaker");
+    server.setRenderRows("partial-breaker", []);
+
+    const app = bootstrap.restart();
+    await app.ready();
+    const first = app.connect();
+    first.receive(app.startScope("partial-breaker", "visible", job));
+    await app.waitFor("scope_done", first);
+    await waitUntil(() => app.storedJob(job.job_id) === undefined, "partial breaker job cleanup");
+
+    assert.deepStrictEqual(
+      { source: server.counts.source, render: server.counts.render, ocr: server.counts.ocr, text: server.counts.translate },
+      { source: 1, render: 1, ocr: 0, text: 0 },
+    );
+    assert.deepStrictEqual(app.page(keys.pageArtifactKey).render, {
+      schema_version: "render-page-v1",
+      render_artifact_key: keys.renderArtifactKey,
+      patch_versions: server.patchVersions,
+      layout_fit_version: "dom-fit-10px-v1",
+      breaker_open: true,
+      blocks: [],
+    });
+
+    const beforeRevisit = structuredClone(server.counts);
+    const revisitJob = app.job("partial-breaker-revisit-job", job.source_url);
+    const revisit = app.connect();
+    revisit.receive(app.startScope("partial-breaker-revisit", "visible", revisitJob));
+    await app.waitFor("scope_done", revisit);
+    await waitUntil(() => app.storedJob(revisitJob.job_id) === undefined, "partial breaker revisit job cleanup");
+    assert.deepStrictEqual(
+      {
+        source: server.counts.source - beforeRevisit.source,
+        render: server.counts.render - beforeRevisit.render,
+        ocr: server.counts.ocr - beforeRevisit.ocr,
+        text: server.counts.translate - beforeRevisit.translate,
+      },
+      { source: 1, render: 0, ocr: 0, text: 0 },
+    );
+  });
+
+  await scenario("missing and stale renders rebuild without spending the mismatch claim", async () => {
+    for (const kind of ["missing", "stale"]) {
+      const storage = fakeStorage();
+      const server = createFakeServer();
+      const bootstrap = createBackgroundApp({ storage, server });
+      await bootstrap.ready();
+      const job = bootstrap.job(`${kind}-render-job`, `https://x/${kind}-render.jpg`);
+      const keys = await bootstrap.keysFor({ ...job, reading_direction: "rtl" });
+      const page = cachedTranslatedPage({ keys, server, job });
+      if (kind === "stale") {
+        page.render = {
+          schema_version: "render-page-v1",
+          render_artifact_key: keys.renderArtifactKey,
+          patch_versions: structuredClone(server.patchVersions),
+          layout_fit_version: "dom-fit-old",
+          breaker_open: false,
+          blocks: [{
+            block_id: "old", render_mode: "in_place", patch_id: "old-patch", patch_bbox: [1, 2, 3, 4],
+            fit_bbox: [1, 2, 3, 4], layout_profile: { font_px: 16, line_height: 1.2 }, reason: null,
+          }],
+        };
+      }
+      storage.rows[`mt:page:${keys.pageArtifactKey}`] = page;
+      server.primeRender(keys.renderArtifactKey, `${kind}-render`);
+      server.setRenderRows(`${kind}-render`, [{
+        block_id: "old", patch_id: "new-patch", patch_bbox: [1, 2, 3, 4], clean_region: [1, 2, 3, 4],
+        fit_bbox: [1, 2, 3, 4], patch_mime: "image/png", patch_rgba: Buffer.from("new-patch").toString("base64"), reason: null,
+      }]);
+
+      const app = bootstrap.restart();
+      await app.ready();
+      const port = app.connect();
+      port.receive(app.startScope(`${kind}-render`, "visible", job));
+      await app.waitFor("scope_done", port);
+      assert.deepStrictEqual(
+        { render: server.counts.render, ocr: server.counts.ocr, text: server.counts.translate },
+        { render: 1, ocr: 0, text: 0 }
+      );
+      assert.strictEqual(app.page(keys.pageArtifactKey).manifest_mismatch_count, 0);
+      assert.deepStrictEqual(port.sent.filter((row) => row.type === "translation").map((row) => row.block_id), ["old"]);
+    }
+  });
+
+  await scenario("mismatch claim write failure never starts paid recovery", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const bootstrap = createBackgroundApp({ storage, server });
+    await bootstrap.ready();
+    const job = bootstrap.job("mismatch-write-failure-job", "https://x/mismatch-write-failure.jpg");
+    const keys = await bootstrap.keysFor({ ...job, reading_direction: "rtl" });
+    storage.rows[`mt:page:${keys.pageArtifactKey}`] = cachedTranslatedPage({ keys, server, job });
+    server.primeRender(keys.renderArtifactKey, "mismatch-write-failure");
+    server.setRenderRows("mismatch-write-failure", []);
+    storage.beforeSet = async (values) => {
+      if (Object.values(values).some((row) => row?.schema_version === "page-v2" && row.manifest_mismatch_count === 1)) {
+        throw new Error("claim write refused");
+      }
+    };
+
+    const app = bootstrap.restart();
+    await app.ready();
+    const port = app.connect();
+    port.receive(app.startScope("mismatch-write-failure", "visible", job));
+    const done = await app.waitFor("scope_done", port);
+
+    assert.deepStrictEqual(
+      { render: server.counts.render, ocr: server.counts.ocr, text: server.counts.translate },
+      { render: 1, ocr: 0, text: 0 }
+    );
+    assert.strictEqual(done.failed, 1);
+    assert.strictEqual(port.sent.some((event) => event.type === "translation"), false);
+  });
+
+  await scenario("different crops share one retained source fetch", async () => {
+    // Mutation caught: deduping the source entry by URL plus crop instead of URL alone.
+    const server = createFakeServer();
+    server.holdSource("shared-crop");
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const port = app.connect();
+    port.receive({
+      ...app.startScope("shared-crop", "visible"),
+      jobs: [
+        app.job("shared-crop-full", "https://x/shared-crop.jpg"),
+        app.job("shared-crop-half", "https://x/shared-crop.jpg", {
+          crop: { left: 0, top: 0, right: 0.5, bottom: 1 },
+        }),
+      ],
+    });
+    await waitUntil(() => server.counts.source === 1, "one shared source fetch");
+    server.releaseSource("shared-crop");
+    const done = await app.waitFor("scope_done", port);
+    assert.deepStrictEqual({ images: done.images, failed: done.failed }, { images: 2, failed: 0 });
+    assert.strictEqual(server.counts.source, 1);
+  });
+
   await scenario("late consumer replays a completed in-flight page before persistence", async () => {
     const storage = fakeStorage();
     const releaseCompleteWrite = deferred();
     let completeWriteHeld = false;
     storage.beforeSet = async (values) => {
-      if (completeWriteHeld || !Object.values(values).some((row) => row?.schema_version === "page-v1" && row.state === "complete")) return;
+      if (completeWriteHeld || !Object.values(values).some((row) => row?.schema_version === "page-v2" && row.state === "complete")) return;
       completeWriteHeld = true;
       await releaseCompleteWrite.promise;
     };
@@ -452,7 +2639,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
         ],
         expected: { translated: 1, failed: 1 },
         lateExpected: { translated: 1, failed: 0 },
-        sourceCalls: 1,
+        sourceCalls: 2,
       },
       {
         name: "failed",
@@ -463,7 +2650,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
         ],
         expected: { translated: 0, failed: 1 },
         lateExpected: { translated: 0, failed: 1 },
-        sourceCalls: 1,
+        sourceCalls: 2,
       },
       {
         name: "pre-ocr-failed",
@@ -509,7 +2696,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     }
   });
 
-  await scenario("A continues after disconnect and exact return makes zero calls", async () => {
+  await scenario("A continues after disconnect and exact return only rehashes source", async () => {
     const server = createFakeServer();
     server.holdSource("detached");
     const app = createBackgroundApp({ server });
@@ -518,7 +2705,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
     const first = app.connect();
     first.receive(app.startScope("detached-request", "visible", job));
-    await app.waitFor("page_job_accepted", first);
+    await waitUntil(() => server.counts.source === 1, "detached source fetch");
     first.disconnect();
     server.releaseSource("detached");
     await waitUntil(() => app.page(keys.pageArtifactKey)?.state === "complete", "detached page completion");
@@ -543,7 +2730,13 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       { image_w: replayed.image_w, image_h: replayed.image_h },
       { image_w: 100, image_h: 200 }
     );
-    assert.deepStrictEqual(server.counts, calls);
+    // Mutation caught: retaining a settled source entry after the producer's
+    // final release would make this revisit skip the required byte hash fetch.
+    assert.deepStrictEqual({ ...server.counts, source: calls.source, render: calls.render, renderKey: calls.renderKey }, calls);
+    assert.strictEqual(server.counts.source, calls.source + 1);
+    assert.strictEqual(server.counts.render, calls.render + 1);
+    assert.strictEqual(server.counts.renderKey, calls.renderKey + 1);
+    assert.strictEqual(server.counts.renderBlob, calls.renderBlob);
   });
 
   await scenario("loaded disconnect aborts active and queued work and leaves no storage", async () => {
@@ -602,9 +2795,11 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     port.receive(offline.startScope("offline", "visible", offline.job("offline-job", "https://x/offline.jpg")));
     await waitUntil(() => offline.storedJob("offline-job")?.waiting_for_health === true, "offline ledger");
     await flush(20);
+    // Mutation caught: deferring source acquisition until server health returns
+    // breaks eager URL dedupe/hash work and forces resume to fetch again.
     assert.deepStrictEqual(
       { health: offlineServer.counts.health, source: offlineServer.counts.source },
-      { health: 2, source: 0 }
+      { health: 2, source: 1 }
     );
     offlineServer.setOnline(true);
     assert.strictEqual((await offline.message({ type: "health" })).ok, true);
@@ -671,14 +2866,19 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     });
     const server = createFakeServer();
     server.holdSource("legacy-direction");
+    server.holdOcrAfterFirst("legacy-direction");
     const app = createBackgroundApp({ storage, server });
+    // Mutation caught: awaiting restored source bytes inside global readiness
+    // blocks every new worker request while one old image fetch is slow.
     await app.ready();
+    await waitUntil(() => server.counts.source === 1, "legacy direction source fetch");
+    server.releaseSource("legacy-direction");
     await waitUntil(() => app.storedJob(descriptor.job_id)?.page_artifact_key, "legacy direction repersist");
     const stored = app.storedJob(descriptor.job_id);
     const expected = await app.keysFor({ ...descriptor, reading_direction: "rtl" });
     assert.strictEqual(stored.descriptor.reading_direction, "rtl");
     assert.strictEqual(stored.page_artifact_key, expected.pageArtifactKey);
-    server.releaseSource("legacy-direction");
+    server.releaseOcr("legacy-direction");
     await waitUntil(() => app.storedJob(descriptor.job_id) === undefined, "legacy direction completion");
   });
 
@@ -742,18 +2942,23 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const job = app.job("prewarm-job", "https://x/prewarm.jpg");
     const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
     app.server.holdSource("prewarm");
-    const response = await app.message({
+    const responsePromise = app.message({
       type: "prewarmJob",
       src_lang: "ja",
       dst_lang: "vi",
       job,
     });
+    // Mutation caught: leaving the runtime prewarm caller on the old
+    // attachDescriptor signature skips source acquisition/hash entirely.
+    await waitUntil(() => app.server.counts.source === 1, "prewarm source identity");
+    assert.strictEqual(app.debug().producers, 0);
+    app.server.releaseSource("prewarm");
+    const response = await responsePromise;
     assert.strictEqual(response.ok, true);
     app.context.__prewarmKey = keys.pageArtifactKey;
     assert.strictEqual(vm.runInContext("producers.get(__prewarmKey).descriptor.reading_direction", app.context), "rtl");
     assert.strictEqual(app.storedJob("prewarm-job"), undefined);
     assert.strictEqual(app.page(keys.pageArtifactKey), undefined);
-    app.server.releaseSource("prewarm");
     await waitUntil(() => app.server.counts.ocr === 1 && app.debug().producers === 0, "prewarm completion");
     assert.deepStrictEqual(
       { source: app.server.counts.source, ocr: app.server.counts.ocr, translate: app.server.counts.translate },
@@ -781,7 +2986,10 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     });
     assert.strictEqual(response.ok, true);
     await waitUntil(() => app.debug().producers === 0, "cached prewarm completion");
-    assert.deepStrictEqual(app.server.counts, before);
+    // Mutation caught: URL-only prewarm lookup would skip hashing the current
+    // bytes before deciding that the page artifact is still compatible.
+    assert.deepStrictEqual({ ...app.server.counts, source: before.source }, before);
+    assert.strictEqual(app.server.counts.source, before.source + 1);
   });
 
   await scenario("target change reuses a persisted zero-block OCR completion", async () => {
@@ -812,7 +3020,12 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const en = app.connect();
     en.receive({ ...app.startScope("empty-en", "visible", app.job("empty-en-job", "https://x/empty.jpg")), dst_lang: "en" });
     const enDone = await app.waitFor("scope_done", en);
-    assert.deepStrictEqual(server.counts, before);
+    // Mutation caught: prewarm and target-change jobs must each establish the
+    // current byte identity even when zero-block OCR itself is reusable.
+    assert.deepStrictEqual({ ...server.counts, source: before.source, render: before.render, renderKey: before.renderKey }, before);
+    assert.strictEqual(server.counts.source, before.source + 2);
+    assert.strictEqual(server.counts.render, before.render + 1);
+    assert.strictEqual(server.counts.renderKey, before.renderKey + 1);
     assert.deepStrictEqual(
       { translated: enDone.translated, failed: enDone.failed, cache_hit: enDone.cache_hit },
       { translated: 0, failed: 0, cache_hit: false }
@@ -850,8 +3063,8 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
 
   await scenario("detached queued manual work is demoted to background FIFO", async () => {
     const server = createFakeServer();
-    server.holdSource("slot-a");
-    server.holdSource("slot-b");
+    server.holdOcrAfterFirst("slot-a");
+    server.holdOcrAfterFirst("slot-b");
     const app = createBackgroundApp({ server });
     await app.ready();
     const blockers = app.connect();
@@ -862,9 +3075,11 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
         app.job("slot-b", "https://x/slot-b.jpg"),
       ],
     });
-    await waitUntil(() => server.counts.source === 2, "occupied producer slots");
+    await waitUntil(() => server.counts.ocr === 2, "occupied producer slots");
     const manual = app.connect();
     manual.receive(app.startScope("queued-manual", "visible", app.job("queued-manual-job", "https://x/queued-manual.jpg")));
+    // Mutation caught: coupling the source-pool limit to producer slots would
+    // prevent this third identity from reaching the foreground task queue.
     await app.waitFor("page_job_accepted", manual);
     await waitUntil(
       () => vm.runInContext("taskQueue.some((task) => task.producer?.descriptor.job_id === 'queued-manual-job')", app.context),
@@ -880,7 +3095,8 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       1
     );
     blockers.disconnect();
-    await waitUntil(() => server.counts.source === 3, "detached manual source fetch");
+    await waitUntil(() => server.counts.ocr === 3, "detached manual OCR");
+    assert.strictEqual(server.counts.source, 3);
   });
 
   await scenario("detached A never renders on replacement B", async () => {
@@ -890,7 +3106,9 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     await app.ready();
     const active = app.connect();
     active.receive(app.startScope("rA", "visible", app.job("jA", "https://x/A.jpg")));
-    await app.waitFor("page_job_accepted", active);
+    await waitUntil(() => server.counts.source === 1, "detached A source identity");
+    // Mutation caught: cancelling an unmatched visible acquisition during
+    // replacement would prevent detached A from completing in background.
     active.receive(app.startScope("rB", "visible", app.job("jB", "https://x/B.jpg"), "rA"));
     await waitUntil(
       () => active.sent.some((event) => event.type === "scope_done" && event.request_id === "rB"),
@@ -907,6 +3125,131 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     );
   });
 
+  await scenario("two restored jobs share one offline request and survive a nonmatching replacement", async () => {
+    const storage = fakeStorage();
+    const removedJobs = [];
+    storage.beforeRemove = async (keys) => {
+      for (const key of Array.isArray(keys) ? keys : [keys]) {
+        if (key.startsWith("mt:job:")) removedJobs.push(key.slice("mt:job:".length));
+      }
+    };
+    const server = createFakeServer();
+    const bootstrap = createBackgroundApp({ storage, server });
+    await bootstrap.ready();
+    const requestId = "restored-pair";
+    const fixtures = [
+      { name: "restored-pair-a", jobId: "restored-pair-a-job", blockId: "pair-a" },
+      { name: "restored-pair-b", jobId: "restored-pair-b-job", blockId: "pair-b" },
+    ];
+    const rows = [];
+    for (const fixture of fixtures) {
+      const job = {
+        ...bootstrap.job(fixture.jobId, `https://x/${fixture.name}.jpg`),
+        src_lang: "ja", dst_lang: "vi", scope: "visible", reading_direction: "rtl",
+      };
+      const keys = await bootstrap.keysFor(job);
+      const page = cachedTranslatedPage({ keys, server, job, blockId: fixture.blockId });
+      page.state = "partial";
+      page.ocr_done = false;
+      page.last_error = "ocr_incomplete";
+      delete page.manifest_ids;
+      storage.rows[`mt:page:${keys.pageArtifactKey}`] = page;
+      storage.rows[`mt:job:${job.job_id}`] = {
+        job_id: job.job_id,
+        request_id: requestId,
+        scope: "visible",
+        src_lang: "ja",
+        dst_lang: "vi",
+        state: "queued",
+        created_at: Date.now(),
+        waiting_for_health: false,
+        page_artifact_key: keys.pageArtifactKey,
+        descriptor: job,
+      };
+      server.primeAnalysis(keys.analysisKey, job.source_url);
+      server.setOcrRows(fixture.name, [
+        { type: "analysis_ready", image_w: 100, image_h: 200 },
+        { type: "ocr_block", block_id: fixture.blockId, bbox: [1, 2, 3, 4], src_text: fixture.blockId },
+        { type: "image_done", recognized: 1, failed: 0 },
+      ]);
+      server.holdOcrAfterFirst(fixture.name);
+      rows.push({ fixture, job, keys });
+    }
+
+    const app = bootstrap.restart();
+    await app.ready();
+    await waitUntil(
+      () => app.debug().offline === 0 && app.debug().producers === 2 && server.counts.ocr === 2,
+      "both restored producers held at OCR",
+    );
+    const restored = JSON.parse(vm.runInContext(`JSON.stringify((() => {
+      const request = requests.get('${requestId}');
+      return {
+        request_count: requests.size,
+        job_count: request?.jobs.size ?? null,
+        delivered: request?.deliveredByJob
+          ? [...request.deliveredByJob].map(([jobId, ids]) => [jobId, ids.size]).sort()
+          : null,
+        producer_count: producers.size,
+      };
+    })())`, app.context));
+    assert.deepStrictEqual(restored, {
+      request_count: 1,
+      job_count: 2,
+      delivered: [["restored-pair-a-job", 0], ["restored-pair-b-job", 0]],
+      producer_count: 2,
+    });
+
+    server.holdSource("restored-pair-replacement");
+    const replacement = app.connect();
+    replacement.receive(app.startScope(
+      "restored-pair-replacement",
+      "visible",
+      app.job("restored-pair-replacement-job", "https://x/restored-pair-replacement.jpg"),
+      requestId,
+    ));
+    await waitUntil(
+      () => vm.runInContext(`!requests.has('${requestId}')`, app.context),
+      "old restored request release",
+    );
+    const detached = rows.map(({ keys }) => {
+      app.context.__restoredPairKey = keys.pageArtifactKey;
+      return JSON.parse(vm.runInContext(`JSON.stringify((() => {
+        const producer = producers.get(__restoredPairKey);
+        return {
+          in_map: producer !== undefined,
+          consumers: producer?.consumers.size ?? null,
+          retired: producer?.retired ?? null,
+        };
+      })())`, app.context));
+    });
+    assert.deepStrictEqual(detached, [
+      { in_map: true, consumers: 0, retired: false },
+      { in_map: true, consumers: 0, retired: false },
+    ]);
+    assert.deepStrictEqual(
+      rows.map(({ job }) => app.storedJob(job.job_id) !== undefined),
+      [true, true],
+    );
+
+    for (const { fixture } of rows) server.releaseOcr(fixture.name);
+    await waitUntil(
+      () => rows.every(({ keys }) => app.page(keys.pageArtifactKey)?.state === "complete"),
+      "both detached restored producers terminal",
+    );
+    await waitUntil(
+      () => rows.every(({ job }) => app.storedJob(job.job_id) === undefined),
+      "both restored ledgers removed",
+    );
+    assert.deepStrictEqual(
+      rows.map(({ job }) => removedJobs.filter((jobId) => jobId === job.job_id).length),
+      [1, 1],
+    );
+
+    server.releaseSource("restored-pair-replacement");
+    await app.waitFor("scope_done", replacement);
+  });
+
   await scenario("worker restart requeues persisted running job", async () => {
     const storage = fakeStorage();
     const app = createBackgroundApp({ storage });
@@ -920,24 +3263,28 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const keys = await app.keysFor({ ...descriptor, reading_direction: "rtl" });
     const now = Date.now();
     storage.rows[`mt:page:${keys.pageArtifactKey}`] = {
-      schema_version: "page-v1",
+      schema_version: "page-v2",
       page_artifact_key: keys.pageArtifactKey,
       analysis_key: keys.analysisKey,
       ocr_key: keys.ocrKey,
-      overlay_key: keys.overlayKey,
+      render_artifact_key: keys.renderArtifactKey,
+      source_content_hash: sourceIdentityFor(descriptor.source_url).sourceContentHash,
       source_url: descriptor.source_url,
       crop: "full",
       natural_width: 100,
       natural_height: 200,
       src_lang: "ja",
       dst_lang: "vi",
+      reading_direction: "rtl",
       versions: vm.runInContext("serverVersions", app.context),
+      patch_versions: app.server.patchVersions,
       state: "running",
       analysis_known: false,
       ocr_done: false,
       image_w: null,
       image_h: null,
       blocks: [],
+      manifest_mismatch_count: 0,
       created_at: now,
       updated_at: now,
       last_accessed_at: now,
@@ -974,20 +3321,21 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     await app.ready();
     const active = app.connect();
     active.receive(app.startScope("old", "visible", app.job("old-job", "https://x/shared.jpg")));
-    await app.waitFor("page_job_accepted", active);
     await waitUntil(() => server.counts.source === 1, "shared source fetch");
+    // Mutation caught: releasing the old final ref before acquiring the exact
+    // replacement aborts the shared fetch and starts a second URL request.
     active.receive(app.startScope(
       "new",
       "visible",
       app.job("new-job", "https://x/shared.jpg"),
       "old"
     ));
+    await waitUntil(() => app.storedJob("old-job") === undefined, "old ledger removal");
+    server.releaseSource("shared");
     await waitUntil(
       () => active.sent.some((event) => event.type === "page_job_accepted" && event.request_id === "new"),
       "replacement acceptance"
     );
-    await waitUntil(() => app.storedJob("old-job") === undefined, "old ledger removal");
-    server.releaseSource("shared");
     await waitUntil(
       () => active.sent.some((event) => event.type === "scope_done" && event.request_id === "new"),
       "replacement completion"
@@ -1104,9 +3452,11 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       dst_lang: "en",
     });
     await app.waitFor("scope_done", en);
+    // Mutation caught: artifact reuse must follow a fresh exact-byte identity,
+    // not treat a repeated URL as proof that source content is unchanged.
     assert.deepStrictEqual(
       { source: app.server.counts.source, ocr: app.server.counts.ocr, translate: app.server.counts.translate },
-      { source: 1, ocr: 1, translate: 2 }
+      { source: 2, ocr: 1, translate: 2 }
     );
 
     const es = app.connect();
@@ -1122,7 +3472,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
         warmOcr: app.server.counts.warmOcr,
         translate: app.server.counts.translate,
       },
-      { source: 1, coldOcr: 1, warmOcr: 1, translate: 3 }
+      { source: 3, coldOcr: 1, warmOcr: 1, translate: 3 }
     );
 
     const back = app.connect();
@@ -1130,13 +3480,19 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     await app.waitFor("scope_done", back);
     assert.deepStrictEqual(
       { source: app.server.counts.source, ocr: app.server.counts.ocr, translate: app.server.counts.translate },
-      { source: 1, ocr: 2, translate: 3 }
+      { source: 4, ocr: 2, translate: 3 }
     );
     assert.ok(back.sent.some((event) => event.type === "translation" && event.cache_hit));
   });
 
   await scenario("partial page requests the complete ordered page without replaying cached blocks", async () => {
     const server = createFakeServer();
+    server.setOcrRows("partial", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "ocr_block", block_id: "b1", bbox: [1, 2, 3, 4], src_text: "one" },
+      { type: "ocr_block", block_id: "b2", bbox: [5, 6, 7, 8], src_text: "two" },
+      { type: "image_done", recognized: 2, failed: 0 },
+    ]);
     server.holdTranslation("vi");
     const app = createBackgroundApp({ server });
     await app.ready();
@@ -1144,27 +3500,31 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const keys = await app.keysFor({ ...job, reading_direction: "rtl" });
     const now = Date.now();
     app.storage.rows[`mt:page:${keys.pageArtifactKey}`] = {
-      schema_version: "page-v1",
+      schema_version: "page-v2",
       page_artifact_key: keys.pageArtifactKey,
       analysis_key: keys.analysisKey,
       ocr_key: keys.ocrKey,
-      overlay_key: keys.overlayKey,
+      render_artifact_key: keys.renderArtifactKey,
+      source_content_hash: sourceIdentityFor(job.source_url).sourceContentHash,
       source_url: job.source_url,
       crop: "full",
       natural_width: 100,
       natural_height: 200,
       src_lang: "ja",
       dst_lang: "vi",
+      reading_direction: "rtl",
       versions: app.server.versions,
+      patch_versions: app.server.patchVersions,
       state: "partial",
       analysis_known: true,
       ocr_done: true,
       image_w: 100,
       image_h: 200,
       blocks: [
-        { block_id: "b1", bbox: [1, 2, 3, 4], src_text: "one", trans_text: "vi:one", state: "complete" },
-        { block_id: "b2", bbox: [5, 6, 7, 8], src_text: "two", trans_text: null, state: "ocr_complete" },
+        { block_id: "b1", bbox: [1, 2, 3, 4], src_text: "one", trans_text: "vi:one", kind: "text", vertical: false, reading_order: 0, state: "translated" },
+        { block_id: "b2", bbox: [5, 6, 7, 8], src_text: "two", trans_text: null, kind: "text", vertical: false, reading_order: 1, state: "ocr_complete" },
       ],
+      manifest_mismatch_count: 0,
       created_at: now,
       updated_at: now,
       last_accessed_at: now,
@@ -1191,15 +3551,590 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       ["b1", "b2"]
     );
     assert.deepStrictEqual(app.server.translationBatches, [["b1", "b2"]]);
+    // Mutation caught: a partial-page reuse still has to prove the source hash
+    // before trusting its analysis/OCR identities.
     assert.deepStrictEqual(
       { source: app.server.counts.source, ocr: app.server.counts.ocr },
-      { source: 0, ocr: 0 }
+      { source: 1, ocr: 0 }
     );
     assert.strictEqual(app.page(keys.pageArtifactKey).state, "complete");
+    assert.ok(Number.isFinite(done.page_metrics[0].fetch_ms));
     assert.deepStrictEqual(
-      { fetch_ms: done.page_metrics[0].fetch_ms, analysis_ms: done.page_metrics[0].analysis_ms, first_ocr_ms: done.page_metrics[0].first_ocr_ms, ocr_done_ms: done.page_metrics[0].ocr_done_ms },
-      { fetch_ms: null, analysis_ms: null, first_ocr_ms: null, ocr_done_ms: null }
+      { analysis_ms: done.page_metrics[0].analysis_ms, first_ocr_ms: done.page_metrics[0].first_ocr_ms, ocr_done_ms: done.page_metrics[0].ocr_done_ms },
+      { analysis_ms: null, first_ocr_ms: null, ocr_done_ms: null }
     );
+  });
+
+  await scenario("partial manifest replays before one claimed OCR recovery and retranslates a changed snapshot", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const bootstrap = createBackgroundApp({ storage, server });
+    await bootstrap.ready();
+    const job = bootstrap.job("ocr-recovery-changed-job", "https://x/ocr-recovery-changed.jpg");
+    const keys = await bootstrap.keysFor({ ...job, reading_direction: "rtl" });
+    storage.rows[`mt:page:${keys.pageArtifactKey}`] = cachedIncompleteOcrPage({ keys, server, job });
+    server.primeRender(keys.renderArtifactKey, "ocr-recovery-changed");
+    server.setRenderRows("ocr-recovery-changed", [{
+      block_id: "old", patch_id: "patch-old", patch_bbox: [1, 2, 3, 4], clean_region: [1, 2, 3, 4],
+      fit_bbox: [1, 2, 3, 4], patch_mime: "image/png", patch_rgba: Buffer.from("patch:old").toString("base64"), reason: null,
+    }]);
+    server.setOcrRows("ocr-recovery-changed", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "ocr_block", block_id: "new", bbox: [5, 6, 7, 8], src_text: "new" },
+      { type: "image_done", recognized: 1, failed: 0 },
+    ]);
+
+    const app = bootstrap.restart();
+    await app.ready();
+    const port = app.connect();
+    let beforeOcr = null;
+    server.beforeNextOcr(() => {
+      beforeOcr = {
+        recovery: structuredClone(storage.rows[`mt:ocr-recovery:${keys.ocrKey}`]),
+        jobPresent: storage.rows["mt:job:ocr-recovery-changed-job"] !== undefined,
+        events: structuredClone(port.sent),
+      };
+      server.setRenderRows("ocr-recovery-changed", [{
+        block_id: "new", patch_id: "patch-new", patch_bbox: [5, 6, 7, 8], clean_region: [5, 6, 7, 8],
+        fit_bbox: [5, 6, 7, 8], patch_mime: "image/png", patch_rgba: Buffer.from("patch:new").toString("base64"), reason: null,
+      }]);
+    });
+    port.receive(app.startScope("ocr-recovery-changed", "visible", job));
+    const done = await app.waitFor("scope_done", port);
+
+    assert.deepStrictEqual(beforeOcr?.recovery, { schema_version: "ocr-recovery-v1" });
+    assert.strictEqual(beforeOcr?.jobPresent, true);
+    assert.deepStrictEqual(
+      beforeOcr?.events.filter((event) => event.type === "translation").map((event) => event.block_id),
+      ["old"],
+    );
+    assert.strictEqual(beforeOcr?.events.some((event) => event.type === "image_done"), false);
+    assert.deepStrictEqual(
+      { ocr: server.counts.ocr, text: server.counts.translate },
+      { ocr: 1, text: 1 },
+    );
+    assert.strictEqual(server.ocrForms[0].get("image"), null);
+    assert.deepStrictEqual(server.translationBatches, [["new"]]);
+    assert.deepStrictEqual(
+      port.sent.filter((event) => event.type === "translation").map((event) => event.block_id),
+      ["old", "new"],
+    );
+    assert.ok(
+      port.sent.findIndex((event) => event.type === "translation" && event.block_id === "old") <
+        port.sent.findIndex((event) => event.type === "image_done"),
+    );
+    assert.deepStrictEqual(
+      { translated: done.translated, failed: done.failed, state: app.page(keys.pageArtifactKey).state },
+      { translated: 2, failed: 0, state: "complete" },
+    );
+    assert.strictEqual(app.page(keys.pageArtifactKey).ocr_done, true);
+    assert.deepStrictEqual(app.page(keys.pageArtifactKey).manifest_ids, ["new"]);
+    assert.strictEqual(done.page_metrics[0].partial_replay, true);
+  });
+
+  await scenario("target replacement cannot persist an OCR recovery scratch page", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const bootstrap = createBackgroundApp({ storage, server });
+    await bootstrap.ready();
+    const source = "https://x/ocr-recovery-replaced.jpg";
+    const oldJob = bootstrap.job("ocr-recovery-replaced-old-job", source);
+    const keys = await bootstrap.keysFor({ ...oldJob, reading_direction: "rtl" });
+    const authoritative = cachedIncompleteOcrPage({ keys, server, job: oldJob });
+    authoritative.render = {
+      schema_version: "render-page-v1",
+      render_artifact_key: keys.renderArtifactKey,
+      patch_versions: structuredClone(server.patchVersions),
+      layout_fit_version: "dom-fit-old",
+      breaker_open: false,
+      blocks: [{
+        block_id: "old", render_mode: "in_place", patch_id: "old-patch",
+        patch_bbox: [1, 2, 3, 4], fit_bbox: [1, 2, 3, 4],
+        layout_profile: { font_px: 16, line_height: 1.2 }, reason: null,
+      }],
+    };
+    storage.rows[`mt:page:${keys.pageArtifactKey}`] = authoritative;
+    server.primeRender(keys.renderArtifactKey, "ocr-recovery-replaced");
+    server.setRenderRows("ocr-recovery-replaced", [{
+      block_id: "old", patch_id: "old-patch", patch_bbox: [1, 2, 3, 4], clean_region: [1, 2, 3, 4],
+      fit_bbox: [1, 2, 3, 4], patch_mime: "image/png", patch_rgba: Buffer.from("patch:old").toString("base64"), reason: null,
+    }]);
+    server.setOcrRows("ocr-recovery-replaced", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "ocr_block", block_id: "new", bbox: [5, 6, 7, 8], src_text: "new" },
+      { type: "image_done", recognized: 1, failed: 0 },
+    ]);
+    server.holdOcrAfterFirst("ocr-recovery-replaced");
+
+    const app = bootstrap.restart();
+    await app.ready();
+    const port = app.connect();
+    port.receive(app.startScope("ocr-recovery-replaced-old", "visible", oldJob));
+    await waitUntil(
+      () => app.producer(keys.pageArtifactKey)?.page.blocks.some((block) => block.block_id === "new"),
+      "OCR recovery scratch block",
+    );
+
+    port.receive({
+      ...app.startScope(
+        "ocr-recovery-replaced-new",
+        "visible",
+        app.job("ocr-recovery-replaced-new-job", source),
+        "ocr-recovery-replaced-old",
+      ),
+      dst_lang: "en",
+    });
+    await waitUntil(
+      () => port.sent.some((event) => event.type === "page_job_accepted" && event.request_id === "ocr-recovery-replaced-new"),
+      "replacement acceptance",
+    );
+    await flush();
+
+    const stored = app.page(keys.pageArtifactKey);
+    assert.deepStrictEqual({
+      state: stored.state,
+      ocr_done: stored.ocr_done,
+      block_ids: stored.blocks.map((block) => block.block_id),
+      manifest_ids: stored.manifest_ids,
+      render_block_ids: stored.render?.blocks.map((block) => block.block_id),
+    }, {
+      state: "partial",
+      ocr_done: false,
+      block_ids: ["old"],
+      manifest_ids: ["old"],
+      render_block_ids: ["old"],
+    });
+
+    server.releaseOcr("ocr-recovery-replaced");
+    await app.waitFor("scope_done", port);
+  });
+
+  await scenario("unchanged OCR recovery reuses the authoritative manifest without Gemini", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const bootstrap = createBackgroundApp({ storage, server });
+    await bootstrap.ready();
+    const job = bootstrap.job("ocr-recovery-unchanged-job", "https://x/ocr-recovery-unchanged.jpg");
+    const keys = await bootstrap.keysFor({ ...job, reading_direction: "rtl" });
+    const page = cachedIncompleteOcrPage({ keys, server, job });
+    page.render = {
+      schema_version: "render-page-v1",
+      render_artifact_key: keys.renderArtifactKey,
+      patch_versions: structuredClone(server.patchVersions),
+      layout_fit_version: "dom-fit-old",
+      breaker_open: false,
+      blocks: [{
+        block_id: "old", render_mode: "in_place", patch_id: "old-patch",
+        patch_bbox: [1, 2, 3, 4], fit_bbox: [1, 2, 3, 4],
+        layout_profile: { font_px: 16, line_height: 1.2 }, reason: null,
+      }],
+    };
+    storage.rows[`mt:page:${keys.pageArtifactKey}`] = page;
+    server.primeRender(keys.renderArtifactKey, "ocr-recovery-unchanged");
+    server.setRenderRows("ocr-recovery-unchanged", [{
+      block_id: "old", patch_id: "patch-old", patch_bbox: [1, 2, 3, 4], clean_region: [1, 2, 3, 4],
+      fit_bbox: [1, 2, 3, 4], patch_mime: "image/png", patch_rgba: Buffer.from("patch:old").toString("base64"), reason: null,
+    }]);
+    server.setOcrRows("ocr-recovery-unchanged", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "ocr_block", block_id: "old", bbox: [1, 2, 3, 4], src_text: "old" },
+      { type: "image_done", recognized: 1, failed: 0 },
+    ]);
+
+    const app = bootstrap.restart();
+    await app.ready();
+    const port = app.connect();
+    port.receive(app.startScope("ocr-recovery-unchanged", "visible", job));
+    const done = await app.waitFor("scope_done", port);
+
+    assert.deepStrictEqual(
+      { ocr: server.counts.ocr, text: server.counts.translate },
+      { ocr: 1, text: 0 },
+    );
+    assert.deepStrictEqual(
+      port.sent.filter((event) => event.type === "translation").map((event) => event.block_id),
+      ["old"],
+    );
+    assert.deepStrictEqual(
+      { translated: done.translated, failed: done.failed, state: app.page(keys.pageArtifactKey).state },
+      { translated: 1, failed: 0, state: "complete" },
+    );
+    assert.strictEqual(app.page(keys.pageArtifactKey).ocr_done, true);
+    assert.deepStrictEqual(app.page(keys.pageArtifactKey).manifest_ids, ["old"]);
+    assert.strictEqual(storage.rows[`mt:page:${keys.pageArtifactKey}`].render, undefined);
+  });
+
+  await scenario("reordered unchanged OCR blocks reuse kinds by block identity without Gemini", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const bootstrap = createBackgroundApp({ storage, server });
+    await bootstrap.ready();
+    const job = bootstrap.job("ocr-recovery-reordered-job", "https://x/ocr-recovery-reordered.jpg");
+    const keys = await bootstrap.keysFor({ ...job, reading_direction: "rtl" });
+    const page = cachedIncompleteOcrPage({ keys, server, job });
+    page.blocks = [
+      {
+        ...page.blocks[0], block_id: "text", src_text: "hello", trans_text: "vi:hello",
+        kind: "text", reading_order: 0,
+      },
+      {
+        block_id: "sfx", bbox: [5, 6, 7, 8], src_text: "boom", trans_text: null,
+        kind: "sfx", vertical: false, reading_order: 1, state: "translated",
+      },
+    ];
+    page.manifest_ids = ["text"];
+    storage.rows[`mt:page:${keys.pageArtifactKey}`] = page;
+    server.primeRender(keys.renderArtifactKey, "ocr-recovery-reordered");
+    server.setRenderRows("ocr-recovery-reordered", [
+      {
+        block_id: "text", patch_id: "patch-text", patch_bbox: [1, 2, 3, 4], clean_region: [1, 2, 3, 4],
+        fit_bbox: [1, 2, 3, 4], patch_mime: "image/png", patch_rgba: Buffer.from("patch:text").toString("base64"), reason: null,
+      },
+      {
+        block_id: "sfx", patch_id: null, patch_bbox: null, clean_region: null,
+        fit_bbox: null, patch_mime: null, patch_rgba: null, reason: "unsupported_region",
+      },
+    ]);
+    server.setOcrRows("ocr-recovery-reordered", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "ocr_block", block_id: "sfx", bbox: [5, 6, 7, 8], src_text: "boom" },
+      { type: "ocr_block", block_id: "text", bbox: [1, 2, 3, 4], src_text: "hello" },
+      { type: "image_done", recognized: 2, failed: 0 },
+    ]);
+
+    const app = bootstrap.restart();
+    await app.ready();
+    const port = app.connect();
+    port.receive(app.startScope("ocr-recovery-reordered", "visible", job));
+    await app.waitFor("scope_done", port);
+
+    assert.deepStrictEqual(
+      { ocr: server.counts.ocr, text: server.counts.translate },
+      { ocr: 1, text: 0 },
+    );
+    assert.deepStrictEqual(
+      app.page(keys.pageArtifactKey).blocks.map((block) => ({ id: block.block_id, kind: block.kind })),
+      [{ id: "text", kind: "text" }, { id: "sfx", kind: "sfx" }],
+    );
+    assert.deepStrictEqual(app.page(keys.pageArtifactKey).manifest_ids, ["text"]);
+  });
+
+  await scenario("OCR kind transitions force exact full-page translation in both directions", async () => {
+    const recover = async (fromKind, toKind) => {
+      const name = `ocr-recovery-kind-${fromKind}-${toKind}`;
+      const storage = fakeStorage();
+      const server = createFakeServer();
+      const bootstrap = createBackgroundApp({ storage, server });
+      await bootstrap.ready();
+      const job = bootstrap.job(`${name}-job`, `https://x/${name}.jpg`);
+      const keys = await bootstrap.keysFor({ ...job, reading_direction: "rtl" });
+      const page = cachedIncompleteOcrPage({ keys, server, job });
+      page.blocks[0].kind = fromKind;
+      page.blocks[0].trans_text = fromKind === "sfx" ? null : "vi:old";
+      page.manifest_ids = fromKind === "sfx" ? [] : ["old"];
+      storage.rows[`mt:page:${keys.pageArtifactKey}`] = page;
+      server.primeRender(keys.renderArtifactKey, name);
+      server.setOcrRows(name, [
+        { type: "analysis_ready", image_w: 100, image_h: 200 },
+        { type: "ocr_block", block_id: "old", bbox: [1, 2, 3, 4], src_text: "old", kind: toKind },
+        { type: "image_done", recognized: 1, failed: 0 },
+      ]);
+      server.queueTranslationResult({
+        items: [{ id: "old", kind: toKind, translation: toKind === "sfx" ? null : "vi:old" }],
+      });
+
+      const app = bootstrap.restart();
+      await app.ready();
+      const port = app.connect();
+      port.receive(app.startScope(name, "visible", job));
+      await app.waitFor("scope_done", port);
+      const stored = app.page(keys.pageArtifactKey);
+      return {
+        transition: `${fromKind}->${toKind}`,
+        network: { ocr: server.counts.ocr, text: server.counts.translate },
+        batches: server.translationBatches,
+        block: {
+          kind: stored.blocks[0].kind,
+          trans_text: stored.blocks[0].trans_text,
+          state: stored.blocks[0].state,
+        },
+        manifest_ids: stored.manifest_ids,
+      };
+    };
+
+    const observed = [];
+    for (const transition of [["text", "sfx"], ["sfx", "text"]]) {
+      observed.push(await recover(...transition));
+    }
+    assert.deepStrictEqual(observed, [
+      {
+        transition: "text->sfx",
+        network: { ocr: 1, text: 1 },
+        batches: [["old"]],
+        block: { kind: "sfx", trans_text: null, state: "translated" },
+        manifest_ids: [],
+      },
+      {
+        transition: "sfx->text",
+        network: { ocr: 1, text: 1 },
+        batches: [["old"]],
+        block: { kind: "text", trans_text: "vi:old", state: "translated" },
+        manifest_ids: ["old"],
+      },
+    ]);
+  });
+
+  await scenario("concurrent partial pages sharing an OCR identity spend one recovery claim", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const bootstrap = createBackgroundApp({ storage, server });
+    await bootstrap.ready();
+    const source = "https://x/ocr-recovery-shared.jpg";
+    const viJob = bootstrap.job("ocr-recovery-shared-vi-job", source);
+    const enJob = bootstrap.job("ocr-recovery-shared-en-job", source);
+    const viKeys = await bootstrap.keysFor({ ...viJob, reading_direction: "rtl" }, "ja", "vi");
+    const enKeys = await bootstrap.keysFor({ ...enJob, reading_direction: "rtl" }, "ja", "en");
+    const viPage = cachedIncompleteOcrPage({ keys: viKeys, server, job: viJob });
+    const enPage = cachedIncompleteOcrPage({ keys: enKeys, server, job: enJob });
+    enPage.dst_lang = "en";
+    storage.rows[`mt:page:${viKeys.pageArtifactKey}`] = viPage;
+    storage.rows[`mt:page:${enKeys.pageArtifactKey}`] = enPage;
+    server.primeRender(viKeys.renderArtifactKey, "ocr-recovery-shared");
+    server.setRenderRows("ocr-recovery-shared", [{
+      block_id: "old", patch_id: "patch-old", patch_bbox: [1, 2, 3, 4], clean_region: [1, 2, 3, 4],
+      fit_bbox: [1, 2, 3, 4], patch_mime: "image/png", patch_rgba: Buffer.from("patch:old").toString("base64"), reason: null,
+    }]);
+    server.setOcrRows("ocr-recovery-shared", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "ocr_block", block_id: "old", bbox: [1, 2, 3, 4], src_text: "old" },
+      { type: "image_done", recognized: 1, failed: 0 },
+    ]);
+    server.holdOcrAfterFirst("ocr-recovery-shared");
+
+    const app = bootstrap.restart();
+    await app.ready();
+    const vi = app.connect();
+    const en = app.connect();
+    vi.receive(app.startScope("ocr-recovery-shared-vi", "visible", viJob));
+    en.receive({ ...app.startScope("ocr-recovery-shared-en", "visible", enJob), dst_lang: "en" });
+    await waitUntil(() => server.counts.ocr === 1, "single shared OCR recovery");
+    await waitUntil(
+      () => vi.sent.some((event) => event.type === "scope_done") || en.sent.some((event) => event.type === "scope_done"),
+      "ledger-losing shared visit terminal",
+    );
+    assert.strictEqual(server.counts.ocr, 1);
+    assert.strictEqual(server.counts.translate, 0);
+    assert.deepStrictEqual(storage.rows[`mt:ocr-recovery:${viKeys.ocrKey}`], { schema_version: "ocr-recovery-v1" });
+    assert.strictEqual(enKeys.ocrKey, viKeys.ocrKey);
+
+    server.releaseOcr("ocr-recovery-shared");
+    await app.waitFor("scope_done", vi);
+    await app.waitFor("scope_done", en);
+    assert.strictEqual(server.counts.ocr, 1);
+    assert.deepStrictEqual(
+      [vi, en].map((port) => port.sent.filter((event) => event.type === "translation").map((event) => event.block_id)),
+      [["old"], ["old"]],
+    );
+  });
+
+  await scenario("a warm recovery miss spends no second OCR POST and cannot retry on revisit", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const bootstrap = createBackgroundApp({ storage, server });
+    await bootstrap.ready();
+    const job = bootstrap.job("ocr-recovery-warm-miss-job", "https://x/ocr-recovery-warm-miss.jpg");
+    const keys = await bootstrap.keysFor({ ...job, reading_direction: "rtl" });
+    const page = cachedTranslatedPage({ keys, server, job });
+    page.state = "partial";
+    page.ocr_done = false;
+    page.last_error = "ocr_incomplete";
+    storage.rows[`mt:page:${keys.pageArtifactKey}`] = page;
+    server.primeRender(keys.renderArtifactKey, "ocr-recovery-warm-miss");
+    server.setRenderRows("ocr-recovery-warm-miss", [{
+      block_id: "old", patch_id: "patch-old", patch_bbox: [1, 2, 3, 4], clean_region: [1, 2, 3, 4],
+      fit_bbox: [1, 2, 3, 4], patch_mime: "image/png", patch_rgba: Buffer.from("patch:old").toString("base64"), reason: null,
+    }]);
+
+    const app = bootstrap.restart();
+    await app.ready();
+    const first = app.connect();
+    first.receive(app.startScope("ocr-recovery-warm-miss", "visible", job));
+    const failed = await app.waitFor("scope_done", first);
+    assert.deepStrictEqual(
+      { ocr: server.counts.ocr, coldOcr: server.counts.coldOcr, text: server.counts.translate },
+      { ocr: 1, coldOcr: 0, text: 0 },
+    );
+    assert.strictEqual(server.ocrForms.length, 1);
+    assert.strictEqual(server.ocrForms[0].get("image"), null);
+    assert.deepStrictEqual(first.sent.filter((event) => event.type === "translation").map((event) => event.block_id), ["old"]);
+    assert.deepStrictEqual({ translated: failed.translated, failed: failed.failed }, { translated: 1, failed: 1 });
+    assert.deepStrictEqual(storage.rows[`mt:ocr-recovery:${keys.ocrKey}`], { schema_version: "ocr-recovery-v1" });
+
+    const revisit = app.connect();
+    revisit.receive(app.startScope(
+      "ocr-recovery-warm-miss-revisit",
+      "visible",
+      app.job("ocr-recovery-warm-miss-revisit-job", job.source_url),
+    ));
+    const done = await app.waitFor("scope_done", revisit);
+    assert.strictEqual(server.counts.ocr, 1);
+    assert.deepStrictEqual({ translated: done.translated, failed: done.failed }, { translated: 1, failed: 0 });
+  });
+
+  await scenario("failed OCR recovery preserves replay and its ledger across page identities", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const bootstrap = createBackgroundApp({ storage, server });
+    await bootstrap.ready();
+    const job = bootstrap.job("ocr-recovery-incomplete-job", "https://x/ocr-recovery-incomplete.jpg");
+    const keys = await bootstrap.keysFor({ ...job, reading_direction: "rtl" });
+    storage.rows[`mt:page:${keys.pageArtifactKey}`] = cachedIncompleteOcrPage({ keys, server, job });
+    server.primeRender(keys.renderArtifactKey, "ocr-recovery-incomplete");
+    server.setRenderRows("ocr-recovery-incomplete", [{
+      block_id: "old", patch_id: "patch-old", patch_bbox: [1, 2, 3, 4], clean_region: [1, 2, 3, 4],
+      fit_bbox: [1, 2, 3, 4], patch_mime: "image/png", patch_rgba: Buffer.from("patch:old").toString("base64"), reason: null,
+    }]);
+    server.setOcrRows("ocr-recovery-incomplete", [
+      { type: "analysis_ready", image_w: 100, image_h: 200 },
+      { type: "ocr_block", block_id: "old", bbox: [1, 2, 3, 4], src_text: "old" },
+      { type: "image_done", recognized: 1, failed: 1 },
+    ]);
+
+    const app = bootstrap.restart();
+    await app.ready();
+    const port = app.connect();
+    port.receive(app.startScope("ocr-recovery-incomplete", "visible", job));
+    const done = await app.waitFor("scope_done", port);
+
+    assert.deepStrictEqual(
+      { ocr: server.counts.ocr, text: server.counts.translate },
+      { ocr: 1, text: 0 },
+    );
+    assert.deepStrictEqual(port.sent.filter((event) => event.type === "translation").map((event) => event.block_id), ["old"]);
+    assert.deepStrictEqual(
+      port.sent.filter((event) => event.type === "image_done").map((event) => ({ translated: event.translated, failed: event.failed })),
+      [{ translated: 1, failed: 1 }],
+    );
+    assert.deepStrictEqual({ translated: done.translated, failed: done.failed }, { translated: 1, failed: 1 });
+    assert.deepStrictEqual(
+      {
+        state: app.page(keys.pageArtifactKey).state,
+        ocr_done: app.page(keys.pageArtifactKey).ocr_done,
+        manifest_ids: app.page(keys.pageArtifactKey).manifest_ids,
+      },
+      { state: "partial", ocr_done: false, manifest_ids: ["old"] },
+    );
+    assert.deepStrictEqual(storage.rows[`mt:ocr-recovery:${keys.ocrKey}`], { schema_version: "ocr-recovery-v1" });
+
+    const restarted = app.restart();
+    await restarted.ready();
+    const beforeRevisit = structuredClone(server.counts);
+    const revisit = restarted.connect();
+    revisit.receive(restarted.startScope(
+      "ocr-recovery-failed-revisit",
+      "visible",
+      restarted.job("ocr-recovery-failed-revisit-job", job.source_url),
+    ));
+    const revisitDone = await restarted.waitFor("scope_done", revisit);
+    assert.deepStrictEqual(
+      { ocr: server.counts.ocr - beforeRevisit.ocr, text: server.counts.translate - beforeRevisit.translate },
+      { ocr: 0, text: 0 },
+    );
+    assert.deepStrictEqual(revisit.sent.filter((event) => event.type === "translation").map((event) => event.block_id), ["old"]);
+    assert.deepStrictEqual({ translated: revisitDone.translated, failed: revisitDone.failed }, { translated: 1, failed: 0 });
+
+    const dstKeys = await restarted.keysFor({ ...job, reading_direction: "rtl" }, "ja", "en");
+    const dstPage = cachedIncompleteOcrPage({ keys: dstKeys, server, job });
+    dstPage.dst_lang = "en";
+    storage.rows[`mt:page:${dstKeys.pageArtifactKey}`] = dstPage;
+    const beforeDst = structuredClone(server.counts);
+    const dst = restarted.connect();
+    dst.receive({
+      ...restarted.startScope("ocr-recovery-new-dst", "visible", restarted.job("ocr-recovery-new-dst-job", job.source_url)),
+      dst_lang: "en",
+    });
+    await restarted.waitFor("scope_done", dst);
+    assert.notStrictEqual(dstKeys.pageArtifactKey, keys.pageArtifactKey);
+    assert.strictEqual(dstKeys.ocrKey, keys.ocrKey);
+    assert.deepStrictEqual(
+      { ocr: server.counts.ocr - beforeDst.ocr, text: server.counts.translate - beforeDst.translate },
+      { ocr: 0, text: 0 },
+    );
+
+    vm.runInContext('serverVersions.prompt = "pr2"', restarted.context);
+    const promptKeys = await restarted.keysFor({ ...job, reading_direction: "rtl" });
+    const promptPage = cachedIncompleteOcrPage({ keys: promptKeys, server, job });
+    promptPage.versions = JSON.parse(vm.runInContext("JSON.stringify(serverVersions)", restarted.context));
+    storage.rows[`mt:page:${promptKeys.pageArtifactKey}`] = promptPage;
+    const beforePrompt = structuredClone(server.counts);
+    const prompt = restarted.connect();
+    prompt.receive({
+      ...restarted.startScope("ocr-recovery-new-prompt", "visible", restarted.job("ocr-recovery-new-prompt-job", job.source_url)),
+      dst_lang: "vi",
+    });
+    await restarted.waitFor("scope_done", prompt);
+    assert.notStrictEqual(promptKeys.pageArtifactKey, keys.pageArtifactKey);
+    assert.strictEqual(promptKeys.ocrKey, keys.ocrKey);
+    assert.deepStrictEqual(
+      { ocr: server.counts.ocr - beforePrompt.ocr, text: server.counts.translate - beforePrompt.translate },
+      { ocr: 0, text: 0 },
+    );
+
+    const newOcrKeys = await restarted.keysFor({ ...job, reading_direction: "rtl" }, "es", "vi");
+    const newOcrPage = cachedIncompleteOcrPage({ keys: newOcrKeys, server, job });
+    newOcrPage.src_lang = "es";
+    newOcrPage.versions = JSON.parse(vm.runInContext("JSON.stringify(serverVersions)", restarted.context));
+    storage.rows[`mt:page:${newOcrKeys.pageArtifactKey}`] = newOcrPage;
+    const beforeNewOcr = structuredClone(server.counts);
+    const newOcr = restarted.connect();
+    newOcr.receive({
+      ...restarted.startScope("ocr-recovery-new-key", "visible", restarted.job("ocr-recovery-new-key-job", job.source_url)),
+      src_lang: "es",
+    });
+    await restarted.waitFor("scope_done", newOcr);
+    assert.notStrictEqual(newOcrKeys.ocrKey, keys.ocrKey);
+    assert.deepStrictEqual(
+      { ocr: server.counts.ocr - beforeNewOcr.ocr, text: server.counts.translate - beforeNewOcr.translate },
+      { ocr: 1, text: 0 },
+    );
+    assert.deepStrictEqual(storage.rows[`mt:ocr-recovery:${newOcrKeys.ocrKey}`], { schema_version: "ocr-recovery-v1" });
+  });
+
+  await scenario("OCR recovery claim write failure returns without OCR or Gemini", async () => {
+    const storage = fakeStorage();
+    const server = createFakeServer();
+    const bootstrap = createBackgroundApp({ storage, server });
+    await bootstrap.ready();
+    const job = bootstrap.job("ocr-recovery-claim-failed-job", "https://x/ocr-recovery-claim-failed.jpg");
+    const keys = await bootstrap.keysFor({ ...job, reading_direction: "rtl" });
+    storage.rows[`mt:page:${keys.pageArtifactKey}`] = cachedIncompleteOcrPage({ keys, server, job });
+    server.primeRender(keys.renderArtifactKey, "ocr-recovery-claim-failed");
+    server.setRenderRows("ocr-recovery-claim-failed", [{
+      block_id: "old", patch_id: "patch-old", patch_bbox: [1, 2, 3, 4], clean_region: [1, 2, 3, 4],
+      fit_bbox: [1, 2, 3, 4], patch_mime: "image/png", patch_rgba: Buffer.from("patch:old").toString("base64"), reason: null,
+    }]);
+    storage.beforeSet = async (values) => {
+      if (Object.keys(values).some((key) => key.startsWith("mt:ocr-recovery:"))) throw new Error("quota");
+    };
+
+    const app = bootstrap.restart();
+    await app.ready();
+    const port = app.connect();
+    port.receive(app.startScope("ocr-recovery-claim-failed", "visible", job));
+    const done = await app.waitFor("scope_done", port);
+
+    assert.deepStrictEqual(
+      port.sent.filter((event) => event.type === "translation").map((event) => event.block_id),
+      ["old"],
+    );
+    assert.ok(port.sent.some((event) => event.type === "job_error" && event.code === "cache_full"));
+    assert.deepStrictEqual(
+      { ocr: server.counts.ocr, text: server.counts.translate, failed: done.failed },
+      { ocr: 0, text: 0, failed: 1 },
+    );
+    assert.strictEqual(storage.rows[`mt:ocr-recovery:${keys.ocrKey}`], undefined);
+    assert.strictEqual(app.page(keys.pageArtifactKey).ocr_done, false);
+    assert.deepStrictEqual(app.page(keys.pageArtifactKey).manifest_ids, ["old"]);
   });
 
   await scenario("OCR block failure keeps valid translated blocks", async () => {
@@ -1282,6 +4217,11 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
 
   await scenario("warm OCR sibling supplies decoded dimensions before full-page request", async () => {
     const server = createFakeServer();
+    server.setOcrRows("warm-sibling", [
+      { type: "analysis_ready", image_w: 321, image_h: 654 },
+      { type: "ocr_block", block_id: "warm-b1", bbox: [1, 2, 3, 4], src_text: "warm" },
+      { type: "image_done", recognized: 1, failed: 0 },
+    ]);
     server.holdTranslation("vi");
     const app = createBackgroundApp({ server });
     await app.ready();
@@ -1290,24 +4230,28 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const sibling = await app.keysFor({ ...job, reading_direction: "rtl" }, "ja", "en");
     const timestamp = Date.now();
     app.storage.rows[`mt:page:${sibling.pageArtifactKey}`] = {
-      schema_version: "page-v1",
+      schema_version: "page-v2",
       page_artifact_key: sibling.pageArtifactKey,
       analysis_key: sibling.analysisKey,
       ocr_key: sibling.ocrKey,
-      overlay_key: sibling.overlayKey,
+      render_artifact_key: sibling.renderArtifactKey,
+      source_content_hash: sourceIdentityFor(job.source_url).sourceContentHash,
       source_url: job.source_url,
       crop: "full",
       natural_width: 999,
       natural_height: 777,
       src_lang: "ja",
       dst_lang: "en",
+      reading_direction: "rtl",
       versions: app.server.versions,
+      patch_versions: app.server.patchVersions,
       state: "partial",
       analysis_known: false,
       ocr_done: true,
       image_w: 321,
       image_h: 654,
-      blocks: [{ block_id: "warm-b1", bbox: [1, 2, 3, 4], src_text: "warm", trans_text: null, state: "ocr_complete" }],
+      blocks: [{ block_id: "warm-b1", bbox: [1, 2, 3, 4], src_text: "warm", trans_text: null, kind: "text", vertical: false, reading_order: 0, state: "ocr_complete" }],
+      manifest_mismatch_count: 0,
       created_at: timestamp,
       updated_at: timestamp,
       last_accessed_at: timestamp,
@@ -1320,9 +4264,11 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       { page_width: server.translationBodies[0].page_width, page_height: server.translationBodies[0].page_height },
       { page_width: 321, page_height: 654 }
     );
+    // Mutation caught: warm OCR reuse still starts from a verified current
+    // source hash; only detector/recognizer calls are skipped.
     assert.deepStrictEqual(
       { source: server.counts.source, ocr: server.counts.ocr },
-      { source: 0, ocr: 0 }
+      { source: 1, ocr: 0 }
     );
     server.releaseTranslation("vi");
     await app.waitFor("scope_done", port);
@@ -1349,6 +4295,29 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     assert.strictEqual(row.job_id, "job-1");
     assert.strictEqual(row.analysis_ms, 0);
     assert.strictEqual(row.analysis_cache_hit, false);
+    assert.deepStrictEqual({
+      overlay_semantics: row.overlay_semantics,
+      partial_replay: row.partial_replay,
+      cache_hit: row.cache_hit,
+      render_coverage: row.render_coverage,
+      render_reason_counts: row.render_reason_counts,
+      manifest_mismatch: row.manifest_mismatch,
+      source_unavailable: row.source_unavailable,
+      painted: row.painted,
+      error_code: row.error_code,
+    }, {
+      overlay_semantics: "atomic_patch_v1",
+      partial_replay: false,
+      cache_hit: false,
+      render_coverage: null,
+      render_reason_counts: {},
+      manifest_mismatch: false,
+      source_unavailable: false,
+      painted: null,
+      error_code: null,
+    });
+    assert.ok(Number.isFinite(row.render_wait_after_translation_ms));
+    assert.strictEqual(Object.hasOwn(row, "render_ready_ms"), false);
     assert.ok(Number.isFinite(row.ocr_done_ms));
     assert.ok(Number.isFinite(row.final_translation_ms));
     assert.deepStrictEqual(row.translation_batches[0].block_ids, ["b1", "b2", "b3"]);
@@ -1382,17 +4351,57 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const lateJob = app.job("late-job", "https://x/late.jpg");
     port.receive(app.startScope("late-metrics", "visible", lateJob));
     await waitUntil(() => port.sent.some((event) => event.type === "scope_done" && event.request_id === "late-metrics"), "late metric scope completion");
-    port.receive({ type: "render_metric", request_id: "late-metrics", job_id: "late-job", first_overlay_ms: 7 });
+    port.receive({ type: "render_metric", request_id: "late-metrics", job_id: "late-job", first_overlay_ms: 7, cache_hit: true, partial_replay: true, analysis_cache_hit: true });
     port.receive({ type: "render_metric", request_id: "late-metrics", job_id: "stale-job", first_overlay_ms: 0 });
     const lateSample = JSON.parse(vm.runInContext("JSON.stringify(metricSamplesByRequest.get('late-metrics'))", app.context));
     assert.strictEqual(lateSample.first_overlay_ms, 7);
     assert.deepStrictEqual(lateSample.page_metrics.map((row) => [row.job_id, row.first_overlay_ms]), [["late-job", 7]]);
+    assert.deepStrictEqual(
+      lateSample.page_metrics.map((row) => [row.cache_hit, row.partial_replay, row.analysis_cache_hit]),
+      [[false, false, null]],
+    );
+  });
+
+  await scenario("atomic benchmark summary flattens only strict page metric cohorts", async () => {
+    const app = createBackgroundApp();
+    await app.ready();
+    app.context.__samples = [
+      { first_overlay_ms: 1, page_metrics: [
+        { overlay_semantics: "atomic_patch_v1", cache_hit: false, partial_replay: false, analysis_cache_hit: false, first_overlay_ms: 40, render_wait_after_translation_ms: 9 },
+        { overlay_semantics: "atomic_patch_v1", cache_hit: false, partial_replay: false, analysis_cache_hit: false, first_overlay_ms: null, render_wait_after_translation_ms: 99 },
+        { overlay_semantics: "atomic_patch_v1", cache_hit: null, partial_replay: false, analysis_cache_hit: false, first_overlay_ms: 1, render_wait_after_translation_ms: 1 },
+      ] },
+      { first_overlay_ms: 2, page_metrics: [
+        { overlay_semantics: "atomic_patch_v1", cache_hit: true, partial_replay: false, analysis_cache_hit: false, first_overlay_ms: 8, render_wait_after_translation_ms: null },
+        { overlay_semantics: "atomic_patch_v1", cache_hit: false, partial_replay: true, analysis_cache_hit: false, first_overlay_ms: 2, render_wait_after_translation_ms: 2 },
+        { overlay_semantics: "atomic_patch_v1", cache_hit: false, partial_replay: false, analysis_cache_hit: true, first_overlay_ms: 3, render_wait_after_translation_ms: 3 },
+        { cache_hit: false, partial_replay: false, analysis_cache_hit: false, first_overlay_ms: 4, render_wait_after_translation_ms: 4 },
+      ] },
+    ];
+    vm.runInContext("metricSamples.length = 0; metricSamples.push(...__samples)", app.context);
+    const summary = JSON.parse(JSON.stringify(await app.message({ type: "benchmarkSummary" })));
+    assert.deepStrictEqual(summary.atomic_patch_v1, {
+      warm: { sample_count: 1, first_overlay_ms: { p50: 8, p95: 8 } },
+      cold: {
+        sample_count: 1,
+        first_overlay_ms: { p50: 40, p95: 40 },
+        render_wait_after_translation_ms: { p50: 9, p95: 9 },
+      },
+    });
+
+    vm.runInContext("metricSamples.length = 0; metricSamples.push({ page_metrics: [{ overlay_semantics: 'atomic_patch_v1', cache_hit: null, partial_replay: false, analysis_cache_hit: false, first_overlay_ms: 1 }] })", app.context);
+    const empty = JSON.parse(JSON.stringify(await app.message({ type: "benchmarkSummary" }))).atomic_patch_v1.cold;
+    assert.deepStrictEqual(empty, {
+      sample_count: 0,
+      first_overlay_ms: { p50: null, p95: null },
+      render_wait_after_translation_ms: { p50: null, p95: null },
+    });
   });
 
   await scenario("producer accepted offsets preserve zero and shared negative values", async () => {
     let tick = 0;
     const server = createFakeServer();
-    server.holdSource("shared-offset");
+    server.holdOcrAfterFirst("shared-offset");
     const app = createBackgroundApp({ server, clock: { now: () => tick } });
     await app.ready();
     const first = app.connect();
@@ -1402,7 +4411,9 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     const second = app.connect();
     second.receive(app.startScope("offset-second", "visible", app.job("offset-second-job", "https://x/shared-offset.jpg")));
     await app.waitFor("page_job_accepted", second);
-    server.releaseSource("shared-offset");
+    // Mutation caught: recreating an exact in-flight producer for the late
+    // consumer loses the original accepted timestamp and negative offset.
+    server.releaseOcr("shared-offset");
     const firstDone = await app.waitFor("scope_done", first);
     const secondDone = await app.waitFor("scope_done", second);
     assert.strictEqual(firstDone.page_metrics[0].accepted_offset_ms, 0);
@@ -1441,7 +4452,14 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       { images: 2, translated: 1, failed: 1 }
     );
     assert.strictEqual(app.page(goodKeys.pageArtifactKey).state, "complete");
-    assert.strictEqual(app.page(brokenKeys.pageArtifactKey).state, "failed");
+    assert.strictEqual(app.page(brokenKeys.pageArtifactKey), undefined);
+    assert.strictEqual(done.page_metrics.find((row) => row.job_id === "broken-image").error_code, "source_unavailable");
+    server.allowSource("broken");
+    const retry = app.connect();
+    retry.receive(app.startScope("broken-retry", "visible", app.job("broken-retry-job", broken.source_url)));
+    const retried = await app.waitFor("scope_done", retry);
+    assert.deepStrictEqual({ translated: retried.translated, failed: retried.failed }, { translated: 1, failed: 0 });
+    assert.strictEqual(app.page(brokenKeys.pageArtifactKey).state, "complete");
   });
 
   await scenario("failed translation batch preserves a later valid batch", async () => {
@@ -1498,9 +4516,9 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
   await scenario("translation IDs are exact and a later click can retry", async () => {
     const server = createFakeServer();
     const invalidReplies = [
-      [{ id: "b2", translation: "two" }],
-      [{ id: "b2", translation: "two" }, { id: "foreign", translation: "wrong" }],
-      [{ id: "b2", translation: "two" }, { id: "b2", translation: "duplicate" }],
+      [{ id: "b2", kind: "text", translation: "two" }],
+      [{ id: "b2", kind: "text", translation: "two" }, { id: "foreign", kind: "text", translation: "wrong" }],
+      [{ id: "b2", kind: "text", translation: "two" }, { id: "b2", kind: "text", translation: "duplicate" }],
     ];
     for (let index = 0; index < invalidReplies.length; index++) {
       server.setOcrRows(`invalid-ids-${index}`, [
@@ -1633,7 +4651,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
 
   await scenario("target replacement retires old unsent translation but shares OCR", async () => {
     const server = createFakeServer();
-    server.holdSource("replace-target");
+    server.holdOcrAfterFirst("replace-target");
     const app = createBackgroundApp({ server });
     await app.ready();
     const port = app.connect();
@@ -1641,6 +4659,12 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     port.receive(app.startScope("old-target", "visible", app.job("old-target-job", source)));
     await app.waitFor("page_job_accepted", port);
     await waitUntil(() => server.counts.source === 1, "old target source fetch");
+    await waitUntil(
+      () => vm.runInContext("[...producers.values()].some((producer) => producer.page.blocks.length === 1)", app.context),
+      "old target first OCR block",
+    );
+    // Mutation caught: retiring the old OCR stage before the target-language
+    // replacement attaches forces a second recognition pass.
     port.receive({
       ...app.startScope("new-target", "visible", app.job("new-target-job", source), "old-target"),
       dst_lang: "en",
@@ -1650,7 +4674,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       "new target acceptance"
     );
     await waitUntil(() => app.storedJob("old-target-job") === undefined, "old target ledger removal");
-    server.releaseSource("replace-target");
+    server.releaseOcr("replace-target");
     await waitUntil(
       () => port.sent.some((event) => event.type === "scope_done" && event.request_id === "new-target"),
       "new target completion"
@@ -1664,6 +4688,50 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
       port.sent.some((event) => event.type === "translation" && event.request_id === "old-target"),
       false
     );
+  });
+
+  await scenario("multi-page target replacement attaches every shared OCR stage before release", async () => {
+    // Mutation caught: releasing the whole old request after only the first
+    // matching row retires the second page's OCR stage and recognizes it twice.
+    const server = createFakeServer();
+    server.holdOcrAfterFirst("replace-many-a");
+    server.holdOcrAfterFirst("replace-many-b");
+    const app = createBackgroundApp({ server });
+    await app.ready();
+    const port = app.connect();
+    const jobs = ["a", "b"].map((suffix) =>
+      app.job(`replace-many-old-${suffix}`, `https://x/replace-many-${suffix}.jpg`));
+    port.receive({ ...app.startScope("replace-many-old", "visible"), jobs });
+    await waitUntil(
+      () => server.counts.ocr === 2 && vm.runInContext(
+        "[...producers.values()].filter((producer) => producer.page.blocks.length === 1).length === 2",
+        app.context,
+      ),
+      "two old OCR stages",
+    );
+
+    port.receive({
+      ...app.startScope("replace-many-new", "visible", undefined, "replace-many-old"),
+      dst_lang: "en",
+      jobs: ["a", "b"].map((suffix) =>
+        app.job(`replace-many-new-${suffix}`, `https://x/replace-many-${suffix}.jpg`)),
+    });
+    await waitUntil(
+      () => port.sent.filter((event) =>
+        event.type === "page_job_accepted" && event.request_id === "replace-many-new").length === 2,
+      "two replacement acceptances",
+    );
+    server.releaseOcr("replace-many-a");
+    server.releaseOcr("replace-many-b");
+    await waitUntil(
+      () => port.sent.some((event) => event.type === "scope_done" && event.request_id === "replace-many-new"),
+      "multi-page replacement completion",
+    );
+    assert.deepStrictEqual(
+      { source: server.counts.source, ocr: server.counts.ocr, translate: server.counts.translate },
+      { source: 2, ocr: 2, translate: 2 },
+    );
+    assert.ok(server.translationRequests.every((row) => row.dst_lang === "en"));
   });
 
   await scenario("target replacement replays OCR blocks emitted before it attached", async () => {
@@ -1866,7 +4934,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
 
   await scenario("recognizer replacement keeps cold analysis owner alive", async () => {
     const server = createFakeServer();
-    server.holdSource("replace-recognizer");
+    server.holdOcrAfterFirst("replace-recognizer");
     const app = createBackgroundApp({ server });
     await app.ready();
     const port = app.connect();
@@ -1874,6 +4942,9 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     port.receive(app.startScope("old-recognizer", "visible", app.job("old-recognizer-job", source)));
     await app.waitFor("page_job_accepted", port);
     await waitUntil(() => server.counts.source === 1, "recognizer source fetch");
+    await waitUntil(() => server.counts.coldOcr === 1, "cold recognizer OCR");
+    // Mutation caught: retiring the cold recognizer before the replacement
+    // attaches aborts the shared analysis owner needed by the warm recognizer.
     port.receive({
       ...app.startScope(
         "new-recognizer",
@@ -1891,7 +4962,7 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     await flush();
     assert.strictEqual(server.counts.source, 1);
     assert.strictEqual(server.counts.aborted, 0);
-    server.releaseSource("replace-recognizer");
+    server.releaseOcr("replace-recognizer");
     await waitUntil(
       () => port.sent.some((event) => event.type === "scope_done" && event.request_id === "new-recognizer"),
       "new recognizer completion"
@@ -1908,10 +4979,11 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
   });
 
   const versions = {
-    detector: "d1", dedupe: "dd1", prep: "p1",
+    detector: "d1", dedupe: "dd1", prep: "p1", region_resolver: "rr1",
     recognizers: { ja: "r-ja", es: "r-latin", pt: "r-latin" },
-    translator_model: "g1", prompt: "pr1", policy: "po1", layout_order: "reading-order-v1", page_schema: "page-v1",
+    translator_model: "g1", prompt: "pr1", policy: "po1", layout_order: "reading-order-v1", page_schema: "page-v2",
   };
+  const patchVersions = { cleaner: "c1", render_encoding: "png-rgba-v1", render_schema: "render-v1" };
   const job = {
     source_url: "https://x/page.jpg?token=secret",
     crop: null,
@@ -1921,12 +4993,35 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     dst_lang: "vi",
     reading_direction: "rtl",
   };
-  const vi = await context.buildKeys(job, versions);
-  const en = await context.buildKeys({ ...job, dst_lang: "en" }, versions);
-  const es = await context.buildKeys({ ...job, src_lang: "es" }, versions);
-  const pt = await context.buildKeys({ ...job, src_lang: "pt" }, versions);
-  const ltr = await context.buildKeys({ ...job, reading_direction: "ltr" }, versions);
-  const oldLayout = await context.buildKeys(job, { ...versions, layout_order: "reading-order-v0" });
+  const sourceIdentity = sourceIdentityFor(job.source_url, Buffer.from([0, 1, 2, 255]));
+  const vi = await context.buildKeys(job, sourceIdentity, versions, patchVersions);
+  const restoredFull = await context.buildKeys({ ...job, crop: "full" }, sourceIdentity, versions, patchVersions);
+  const otherUrl = await context.buildKeys({ ...job, source_url: "https://other/page.jpg" }, sourceIdentity, versions, patchVersions);
+  const changedBytes = await context.buildKeys(job, sourceIdentityFor(job.source_url, Buffer.from([0, 1, 3, 255])), versions, patchVersions);
+  const en = await context.buildKeys({ ...job, dst_lang: "en" }, sourceIdentity, versions, patchVersions);
+  const es = await context.buildKeys({ ...job, src_lang: "es" }, sourceIdentity, versions, patchVersions);
+  const pt = await context.buildKeys({ ...job, src_lang: "pt" }, sourceIdentity, versions, patchVersions);
+  const ltr = await context.buildKeys({ ...job, reading_direction: "ltr" }, sourceIdentity, versions, patchVersions);
+  const oldLayout = await context.buildKeys(job, sourceIdentity, { ...versions, layout_order: "reading-order-v0" }, patchVersions);
+  const resolverBump = await context.buildKeys(job, sourceIdentity, { ...versions, region_resolver: "rr2" }, patchVersions);
+  const promptBump = await context.buildKeys(job, sourceIdentity, { ...versions, prompt: "pr2" }, patchVersions);
+  const modelBump = await context.buildKeys(job, sourceIdentity, { ...versions, translator_model: "g2" }, patchVersions);
+  const cleanerBump = await context.buildKeys(job, sourceIdentity, versions, { ...patchVersions, cleaner: "c2" });
+  const hashJson = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+  const expectedAnalysis = hashJson([sourceIdentity.sourceContentHash, "full", "d1", "dd1", "p1", "rr1"]);
+  const expectedOcr = hashJson([expectedAnalysis, "ja", "r-ja"]);
+  const expectedPage = hashJson([expectedOcr, "vi", "rtl", "reading-order-v1", "g1", "pr1", "po1", "page-v2"]);
+  const expectedRender = hashJson([expectedAnalysis, "c1", "png-rgba-v1", "render-v1"]);
+  assert.deepStrictEqual(
+    { analysis: vi.analysisKey, ocr: vi.ocrKey, page: vi.pageArtifactKey, render: vi.renderArtifactKey },
+    { analysis: expectedAnalysis, ocr: expectedOcr, page: expectedPage, render: expectedRender },
+  );
+  // Mutation caught: PageCache persists an omitted crop as the canonical
+  // "full" sentinel, which must retain the same analysis identity on restart.
+  assert.strictEqual(restoredFull.analysisKey, vi.analysisKey);
+  assert.strictEqual(vi.analysisKey, otherUrl.analysisKey);
+  assert.notStrictEqual(vi.analysisKey, changedBytes.analysisKey);
+  assert.notStrictEqual(vi.analysisKey, resolverBump.analysisKey);
   assert.strictEqual(vi.analysisKey, en.analysisKey);
   assert.strictEqual(vi.ocrKey, en.ocrKey);
   assert.notStrictEqual(vi.pageArtifactKey, en.pageArtifactKey);
@@ -1935,10 +5030,14 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
   assert.notStrictEqual(es.ocrKey, pt.ocrKey);
   assert.strictEqual(vi.analysisKey, ltr.analysisKey);
   assert.strictEqual(vi.ocrKey, ltr.ocrKey);
-  assert.notStrictEqual(vi.overlayKey, ltr.overlayKey);
+  assert.notStrictEqual(vi.pageArtifactKey, ltr.pageArtifactKey);
   assert.strictEqual(vi.analysisKey, oldLayout.analysisKey);
   assert.strictEqual(vi.ocrKey, oldLayout.ocrKey);
-  assert.notStrictEqual(vi.overlayKey, oldLayout.overlayKey);
+  assert.notStrictEqual(vi.pageArtifactKey, oldLayout.pageArtifactKey);
+  assert.strictEqual(vi.renderArtifactKey, en.renderArtifactKey);
+  assert.strictEqual(vi.renderArtifactKey, promptBump.renderArtifactKey);
+  assert.strictEqual(vi.renderArtifactKey, modelBump.renderArtifactKey);
+  assert.notStrictEqual(vi.renderArtifactKey, cleanerBump.renderArtifactKey);
 
   const blocks = [
     { block_id: "b2", src_text: "second" },
@@ -1950,7 +5049,9 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
   const layoutTranslationKey = await context.translationKeyForBatch({ ...producer, page: { versions: { ...versions, layout_order: "reading-order-v0" } } }, blocks, blocks[0]);
   const promptTranslationKey = await context.translationKeyForBatch({ ...producer, page: { versions: { ...versions, prompt: "pr2" } } }, blocks, blocks[0]);
   const policyTranslationKey = await context.translationKeyForBatch({ ...producer, page: { versions: { ...versions, policy: "po2" } } }, blocks, blocks[0]);
+  const renderVersionTranslationKey = await context.translationKeyForBatch({ ...producer, page: { versions, patch_versions: { cleaner: "c2", render_encoding: "png-rgba-v2", render_schema: "render-v2" } } }, blocks, blocks[0]);
   assert.strictEqual(new Set([translationKey, ltrTranslationKey, layoutTranslationKey, promptTranslationKey, policyTranslationKey]).size, 5);
+  assert.strictEqual(renderVersionTranslationKey, translationKey);
 
   const parsed = [];
   for await (const row of context.readNdjson(
@@ -2062,8 +5163,4 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
   assert.strictEqual(request.outstanding, 0);
   assert.strictEqual(request.pendingJobs.length, 0);
   assert.strictEqual(foregroundRequest.outstanding, 0);
-  console.log("background-progressive.test.js transport OK");
-})().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
 });

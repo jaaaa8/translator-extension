@@ -1,3 +1,5 @@
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import replace
 from hashlib import sha256
 from math import ceil, floor
 from threading import Lock
@@ -5,7 +7,16 @@ from threading import Lock
 import cv2
 import numpy as np
 
-from .artifacts import AnalysisArtifact, BoundedLru, OcrArtifact, PreparedRegion, stable_block_id
+from .artifacts import (
+    AnalysisArtifact,
+    BoundedLru,
+    OcrArtifact,
+    PreparedFragment,
+    PreparedRegion,
+    stable_block_id,
+)
+from .region_resolver import resolve_regions
+from .rendering import build_render_artifact
 
 _MIN_CROP_H = 48
 ANALYSIS_MAX_BYTES = 128 * 1024 * 1024
@@ -33,6 +44,26 @@ def _dedupe_regions(regions: list) -> list:
         if not any(_iou(region.bbox, k.bbox) > _DEDUPE_IOU for k in kept):
             kept.append(region)
     return kept
+
+
+def _clamp_bbox(bbox, width, height):
+    x, y, box_width, box_height = bbox
+    left, top = max(0, x), max(0, y)
+    right, bottom = min(width, x + box_width), min(height, y + box_height)
+    return left, top, max(0, right - left), max(0, bottom - top)
+
+
+def _offset_bbox(bbox, offset_x, offset_y):
+    x, y, box_width, box_height = bbox
+    return offset_x + x, offset_y + y, box_width, box_height
+
+
+def _region_byte_size(region):
+    arrays = [region.source_rgb, region.raw_mask, region.refined_mask]
+    if region.container_mask is not None:
+        arrays.append(region.container_mask)
+    arrays.extend(fragment.crop_rgb for fragment in region.fragments)
+    return sum(array.nbytes for array in arrays)
 
 
 def _prep_crop(crop_rgb: np.ndarray) -> np.ndarray:
@@ -65,12 +96,21 @@ class Pipeline:
         self.translator = translator
         # ponytail: shared ML models run serially; split locks only if measured throughput needs it
         self._ocr_lock = Lock()
+        self._analysis_lock = Lock()
         self._analysis_cache = BoundedLru(
-            max_items=32,
+            max_items=8,
             max_bytes=ANALYSIS_MAX_BYTES,
             size_of=lambda artifact: artifact.byte_size,
         )
         self._ocr_cache = BoundedLru(max_items=256)
+        self._render_cache = BoundedLru(
+            max_items=32,
+            max_bytes=128 * 1024 * 1024,
+            size_of=lambda artifact: artifact.byte_size,
+        )
+        self._render_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="render")
+        self._render_futures = {}
+        self._render_futures_lock = Lock()
 
     @property
     def langs(self) -> list[str]:
@@ -78,6 +118,46 @@ class Pipeline:
 
     def get_analysis(self, key):
         return self._analysis_cache.get(key)
+
+    def get_render(self, key):
+        return self._render_cache.get(key)
+
+    def ensure_render(self, analysis_key, render_key, *, analysis=None):
+        if analysis is not None and analysis.key != analysis_key:
+            raise ValueError("analysis_key_mismatch")
+        cached = self.get_render(render_key)
+        if cached is not None:
+            future = Future()
+            future.set_result(cached)
+            return future
+        with self._render_futures_lock:
+            cached = self.get_render(render_key)
+            if cached is not None:
+                future = Future()
+                future.set_result(cached)
+                return future
+            future = self._render_futures.get(render_key)
+            if future is not None:
+                return future
+            if analysis is None:
+                analysis = self.get_analysis(analysis_key)
+            if analysis is None:
+                raise KeyError("analysis_missing")
+            future = self._render_executor.submit(self._build_render, analysis, render_key)
+            self._render_futures[render_key] = future
+            return future
+
+    def _build_render(self, analysis, render_key):
+        # Wait until ensure_render has registered this worker as the singleflight owner.
+        with self._render_futures_lock:
+            pass
+        try:
+            artifact = build_render_artifact(analysis, render_key)
+            self._render_cache.put(render_key, artifact)
+            return artifact
+        finally:
+            with self._render_futures_lock:
+                self._render_futures.pop(render_key, None)
 
     def _decode_crop(self, image_bytes, crop):
         arr = np.frombuffer(image_bytes, np.uint8)
@@ -106,34 +186,51 @@ class Pipeline:
         cached = self.get_analysis(analysis_key)
         if cached is not None:
             return cached, True
-        with self._ocr_lock:
+        with self._analysis_lock:
             cached = self.get_analysis(analysis_key)
             if cached is not None:
                 return cached, True
             img, image_w, image_h, work, offset_x, offset_y = self._decode_crop(image_bytes, crop)
             work_h, work_w = work.shape[:2]
-            regions = sorted(
-                _dedupe_regions(self.detector.detect(work)),
-                key=lambda region: (-region.bbox[2] * region.bbox[3], *region.bbox),
-            )
-            seen_bboxes = set()
+            detection = self.detector.detect(work)
+            deduped = _dedupe_regions(list(detection.regions))
+            resolved = resolve_regions(work, replace(detection, regions=tuple(deduped)))
             prepared = []
-            for region in regions:
-                x, y, bw, bh = region.bbox
-                x2, y2 = min(work_w, x + bw), min(work_h, y + bh)
-                x, y = max(0, x), max(0, y)
-                if x2 <= x or y2 <= y:
+            seen_bboxes = set()
+            for region in resolved:
+                union_bbox = _clamp_bbox(region.bbox, work_w, work_h)
+                if not union_bbox[2] or not union_bbox[3]:
                     continue
-                bbox = (offset_x + x, offset_y + y, x2 - x, y2 - y)
-                if bbox in seen_bboxes:
+                page_bbox = _offset_bbox(union_bbox, offset_x, offset_y)
+                if page_bbox in seen_bboxes:
                     continue
-                seen_bboxes.add(bbox)
-                crop_rgb = cv2.cvtColor(work[y:y2, x:x2], cv2.COLOR_BGR2RGB)
+                seen_bboxes.add(page_bbox)
+                fragments = []
+                for fragment in region.fragments:
+                    fragment_bbox = _clamp_bbox(fragment.bbox, work_w, work_h)
+                    if not fragment_bbox[2] or not fragment_bbox[3]:
+                        continue
+                    fragments.append(
+                        PreparedFragment(
+                            _offset_bbox(fragment_bbox, offset_x, offset_y),
+                            _prep_crop(cv2.cvtColor(fragment.crop_bgr, cv2.COLOR_BGR2RGB)),
+                            fragment.vertical,
+                        )
+                    )
+                if not fragments:
+                    continue
                 prepared.append(
                     PreparedRegion(
-                        stable_block_id(analysis_key, bbox, 0),
-                        bbox,
-                        _prep_crop(crop_rgb),
+                        stable_block_id(analysis_key, page_bbox, 0),
+                        page_bbox,
+                        _offset_bbox(region.source_bbox, offset_x, offset_y),
+                        tuple(fragments),
+                        cv2.cvtColor(region.source_bgr, cv2.COLOR_BGR2RGB),
+                        region.raw_mask.copy(),
+                        region.refined_mask.copy(),
+                        region.container_mask,
+                        region.vertical,
+                        region.bounded,
                     )
                 )
             artifact = AnalysisArtifact(
@@ -141,7 +238,7 @@ class Pipeline:
                 image_w,
                 image_h,
                 tuple(prepared),
-                sum(region.crop_rgb.nbytes for region in prepared),
+                sum(_region_byte_size(region) for region in prepared),
             )
             self._analysis_cache.put(analysis_key, artifact)
             return artifact, False
@@ -179,12 +276,42 @@ class Pipeline:
                 continue
             if cancelled():
                 return
-            try:
-                with self._ocr_lock:
-                    if cancelled():
-                        return
-                    text = engine.read(region.crop_rgb).strip()
-            except Exception:
+            texts = []
+            failed = False
+            fragments = sorted(
+                region.fragments,
+                key=(
+                    (lambda fragment: (-fragment.bbox[0], fragment.bbox[1]))
+                    if region.vertical
+                    else (lambda fragment: (fragment.bbox[1], fragment.bbox[0]))
+                ),
+            )
+            for fragment in fragments:
+                if cancelled():
+                    return
+                try:
+                    with self._ocr_lock:
+                        if cancelled():
+                            return
+                        text = engine.read(fragment.crop_rgb).strip()
+                except Exception:
+                    failed = True
+                    continue
+                if text and not any(
+                    text == existing_text or _iou(fragment.bbox, existing_bbox) > _DEDUPE_IOU
+                    for existing_text, existing_bbox in texts
+                ):
+                    texts.append((text, fragment.bbox))
+            if texts:
+                block = {
+                    "block_id": region.block_id,
+                    "bbox": list(region.bbox),
+                    "src_text": "\n".join(text for text, _ in texts),
+                    "vertical": region.vertical,
+                }
+                record.blocks[region.block_id] = block
+                yield {"type": "ocr_block", "ocr_key": ocr_key, **block}
+            if failed:
                 record.failures[region.block_id] = "recognizer_failed"
                 yield {
                     "type": "ocr_block_error",
@@ -195,14 +322,6 @@ class Pipeline:
                 continue
             record.completed_ids.add(region.block_id)
             record.failures.pop(region.block_id, None)
-            if text:
-                block = {
-                    "block_id": region.block_id,
-                    "bbox": list(region.bbox),
-                    "src_text": text,
-                }
-                record.blocks[region.block_id] = block
-                yield {"type": "ocr_block", "ocr_key": ocr_key, **block}
 
         record.complete = len(record.completed_ids) == len(analysis.regions)
         yield {

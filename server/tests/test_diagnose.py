@@ -2,18 +2,18 @@ import json
 
 import numpy as np
 
+from server.detector import DetectionResult, TextRegion
 from server.diagnose import _configure_device, _parse_args, _write_manifest_candidate, diagnose_image
 
 
-class _FakeRegion:
-    def __init__(self, bbox):
-        self.bbox = bbox
-        self.vertical = False
+def _detection(image, *regions):
+    raw = np.zeros(image.shape[:2], np.uint8)
+    return DetectionResult(raw, raw.copy(), tuple(regions))
 
 
 class _FakeDetector:
     def detect(self, img):
-        return [_FakeRegion((10, 10, 40, 20)), _FakeRegion((60, 60, 40, 20))]
+        return _detection(img, TextRegion((10, 10, 40, 20), False), TextRegion((60, 60, 40, 20), False))
 
 
 class _FakeEngine:
@@ -38,7 +38,9 @@ def test_diagnose_rows_and_colors():
 
 def test_diagnose_preserves_raw_bbox_when_crop_is_clamped():
     img = np.full((50, 50, 3), 255, np.uint8)
-    detector = type("Detector", (), {"detect": lambda self, _: [_FakeRegion((-10, 10, 40, 20))]})()
+    detector = type(
+        "Detector", (), {"detect": lambda self, image: _detection(image, TextRegion((-10, 10, 40, 20), False))}
+    )()
 
     _, rows = diagnose_image(img, detector, _FakeEngine(["Hola"]))
 
@@ -47,7 +49,9 @@ def test_diagnose_preserves_raw_bbox_when_crop_is_clamped():
 
 def test_diagnose_prepares_crop_before_ocr():
     engine = _FakeEngine(["Hola"])
-    detector = type("Detector", (), {"detect": lambda self, _: [_FakeRegion((10, 10, 40, 20))]})()
+    detector = type(
+        "Detector", (), {"detect": lambda self, image: _detection(image, TextRegion((10, 10, 40, 20), False))}
+    )()
 
     diagnose_image(np.full((100, 100, 3), 255, np.uint8), detector, engine)
 

@@ -1,0 +1,35 @@
+{
+  "schema_version": "sfx-fixtures-v1",
+  "fixtures": [
+    {
+      "id": "s-manga_ja_sfx",
+      "image": "s-manga_ja_sfx.png",
+      "sha256": "233ced826f1a06dbdc5d950cde0fa2697647f20a38aef3c8322c79f5caabc423",
+      "width": 1102,
+      "height": 863,
+      "src_lang": "ja",
+      "reading_direction": "rtl",
+      "expected_page_kind": "mixed"
+    },
+    {
+      "id": "sfx_1",
+      "image": "sfx_1.jpg",
+      "sha256": "3c5507f72a2cc7d8b630c6f3f9c5c0279cc7fdc1b57ac7771911230ba9eaceee",
+      "width": 483,
+      "height": 685,
+      "src_lang": "ja",
+      "reading_direction": "rtl",
+      "expected_page_kind": "sfx_only"
+    },
+    {
+      "id": "sfx_2",
+      "image": "sfx_2.jpg",
+      "sha256": "d8d8f9b3fb37b41f430b12dd638c8492a40bf7d6b30fd5d4d0146d2970ace63f",
+      "width": 537,
+      "height": 800,
+      "src_lang": "ja",
+      "reading_direction": "rtl",
+      "expected_page_kind": "sfx_only"
+    }
+  ]
+}

@@ -3,18 +3,12 @@
   z-index: 2147483000;
   pointer-events: none;
 }
-.mt-bubble {
+.mt-render-block { position: absolute; overflow: visible; background: transparent; }
+.mt-clean-patch { position: absolute; pointer-events: none; }
+.mt-translated-text {
   position: absolute;
-  background: #fff;
+  overflow: visible;
+  background: transparent;
   color: #111;
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  overflow: hidden;
   font-family: "Segoe UI", Arial, sans-serif;
-  line-height: 1.15;
-  padding: 2px;
-  box-sizing: border-box;
 }

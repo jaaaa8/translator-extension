@@ -33,7 +33,8 @@ order, no extra text.
 ITEM_PROMPT = """You are translating comic/manga dialogue from {src} to {dst}.
 All items belong to one page and are already sorted in reading order. Use the
 page context and neighboring bubbles to keep pronouns, politeness, terminology,
-and tone consistent. Do not reorder or omit items.
+and tone consistent. Classify sound-effect lettering as "sfx" and dialogue and
+narration as "text". Do not reorder or omit items.
 
 Page context JSON:
 {page_context}
@@ -42,8 +43,9 @@ Input items JSON:
 {items}
 
 Return ONLY a JSON array of objects with exactly these keys:
-{{"id":"the input id","translation":"translated text"}}.
-Return each input id exactly once; do not invent ids."""
+{{"id":"the input id","kind":"text"|"sfx","translation":"translated text or null"}}.
+Return each input id exactly once; do not invent ids. Use null only when kind is sfx.
+For text, translation must be a non-empty string."""
 
 
 def _decode_items(raw, expected_ids):
@@ -56,15 +58,27 @@ def _normalize_items(out, expected_ids):
         raise ValueError("expected an array")
     rows = {}
     for item in out:
-        if not isinstance(item, dict) or set(item) != {"id", "translation"}:
+        if not isinstance(item, dict) or set(item) != {"id", "kind", "translation"}:
             raise ValueError("invalid translation item")
-        item_id = str(item["id"])
+        kind = item["kind"]
+        translation = item["translation"]
+        if kind == "text":
+            if not isinstance(translation, str) or not translation.strip():
+                raise ValueError("text translation must be a non-empty string")
+        elif kind == "sfx":
+            if translation is not None:
+                raise ValueError("sfx translation must be null")
+        else:
+            raise ValueError("invalid translation kind")
+        item_id = item["id"]
+        if not isinstance(item_id, str):
+            raise ValueError("translation id must be a string")
         if item_id in rows:
             raise ValueError(f"duplicate id: {item_id}")
-        rows[item_id] = str(item["translation"])
+        rows[item_id] = {"kind": kind, "translation": translation}
     if set(rows) != set(expected_ids):
         raise ValueError("translation id set mismatch")
-    return [{"id": item_id, "translation": rows[item_id]} for item_id in expected_ids]
+    return [{"id": item_id, **rows[item_id]} for item_id in expected_ids]
 
 
 class GeminiTranslator:
@@ -106,7 +120,7 @@ class GeminiTranslator:
     ) -> list[dict]:
         if not items:
             return []
-        ids = [str(item["id"]) for item in items]
+        ids = [item["id"] for item in items]
         if len(ids) != len(set(ids)):
             raise TranslateError("duplicate input id")
         prompt_items = [

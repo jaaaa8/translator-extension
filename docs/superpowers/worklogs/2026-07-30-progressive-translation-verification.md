@@ -1,3 +1,16 @@
+---
+title: Progressive translation verification
+note_type: artifact
+artifact_type: verification
+work_item: progressive-translation
+date_start: 2026-07-30
+date_end: 2026-07-30
+status: done
+versions:
+  - "[[feat-v2]]"
+tags:
+  - mangatranslator/artifact
+---
 # Progressive translation verification — 2026-07-30
 
 ## Revision and automated evidence

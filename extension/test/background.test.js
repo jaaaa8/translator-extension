@@ -1,6 +1,7 @@
 const assert = require("assert");
 const fs = require("fs");
 const vm = require("vm");
+const { webcrypto } = require("crypto");
 
 const timeouts = [];
 const ocrPosts = [];
@@ -28,19 +29,34 @@ class FakeFormData {
   append(name, value) { this.fields.push([name, value]); }
 }
 
+async function waitUntil(check, label, timeout = 2000) {
+  const deadline = Date.now() + timeout;
+  while (!check()) {
+    if (Date.now() >= deadline) assert.fail(`timed out waiting for ${label}`);
+    await new Promise(setImmediate);
+  }
+}
+
 const context = {
   Promise,
   JSON,
+  crypto: webcrypto,
+  AbortController,
+  setTimeout: (_callback, ms) => (timeouts.push(ms), ms),
+  clearTimeout: () => {},
   importScripts: () => {},
   FormData: FakeFormData,
-  AbortSignal: { timeout: (ms) => (timeouts.push(ms), { ms }) },
   fetch: async (url, options) => {
-    if (!options) {
+    if (!url.startsWith("http://127.0.0.1:8910/")) {
       sourceFetches.push(url);
-      return { ok: true, blob: async () => ({ url }) };
+      const bytes = Buffer.from(url);
+      return { ok: true, blob: async () => ({
+        url,
+        arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+      }) };
     }
     if (url.endsWith("/ocr")) {
-      ocrPosts.push({ url, body: options.body, timeout: options.signal.ms });
+      ocrPosts.push({ url, body: options.body, timeout: timeouts.at(-1) });
       if (holdQueuedOcr) {
         queuedStarts.push(options.body.fields[0][1].url);
         await new Promise((resolve) => queuedReleases.push(resolve));
@@ -59,7 +75,7 @@ const context = {
       }
       return { ok: true, json: async () => ({ blocks: [] }) };
     }
-    translationPosts.push({ url, timeout: options.signal.ms });
+    translationPosts.push({ url, timeout: timeouts.at(-1) });
     if (failNextTranslation) {
       failNextTranslation = false;
       return { ok: false, status: 500, json: async () => ({ error: "failed" }) };
@@ -79,6 +95,7 @@ const context = {
 };
 
 vm.createContext(context);
+vm.runInContext(fs.readFileSync("extension/source-fetch.js", "utf8"), context);
 vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
 
 (async () => {
@@ -148,10 +165,10 @@ vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), context);
     assert.strictEqual(runtimeListener({ type: "ocrImage", url, srcLang: "ja" }, {}, resolve), true);
   }));
   assert.deepStrictEqual(sourceFetches.slice(-2), queuedUrls.slice(0, 2));
-  while (queuedStarts.length < 2) await Promise.resolve();
+  await waitUntil(() => queuedStarts.length >= 2, "first two queued OCR starts");
   assert.deepStrictEqual(queuedStarts, queuedUrls.slice(0, 2));
   queuedReleases.shift()();
-  while (queuedStarts.length < 3) await Promise.resolve();
+  await waitUntil(() => queuedStarts.length >= 3, "third queued OCR start");
   assert.deepStrictEqual(queuedStarts, queuedUrls);
   queuedReleases.splice(0).forEach((release) => release());
   await Promise.all(queuedResponses);

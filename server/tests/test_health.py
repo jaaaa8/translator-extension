@@ -13,5 +13,11 @@ def test_health():
     assert body["langs"] == ["ja", "es", "pt"]
     assert "device" in body
     assert body["versions"] == config.PIPELINE_VERSIONS
+    assert body["patch_versions"] == config.PATCH_VERSIONS
+    assert body["versions"]["region_resolver"] == "light-component-v1"
+    assert body["versions"]["prompt"] == "comic-page-items-v3"
+    assert body["versions"]["page_schema"] == "page-v2"
     assert all(lang in body["versions"]["recognizers"] for lang in body["langs"])
     assert body["versions"]["recognizers"]["es"] == body["versions"]["recognizers"]["pt"]
+    assert set(body["patch_versions"]) == {"cleaner", "render_encoding", "render_schema"}
+    assert not {"translator_model", "prompt", "recognizers"} & set(body["patch_versions"])

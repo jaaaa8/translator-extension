@@ -1,17 +1,26 @@
 const assert = require("assert");
 const fs = require("fs");
+const test = require("node:test");
 const vm = require("vm");
 const { webcrypto } = require("crypto");
 
 const versions = {
-  detector: "d1", dedupe: "dd1", prep: "p1",
+  detector: "d1", dedupe: "dd1", prep: "p1", region_resolver: "rr1",
   recognizers: { ja: "ja1", es: "es1" },
-  translator_model: "g1", prompt: "p1", policy: "batch1", layout_order: "reading-order-v1", page_schema: "page-v1",
+  translator_model: "g1", prompt: "p1", policy: "batch1", layout_order: "reading-order-v1", page_schema: "page-v2",
 };
+const patchVersions = { cleaner: "c1", render_encoding: "png-rgba-v1", render_schema: "render-v1" };
 
 function eventTarget() {
   const listeners = [];
   return { addListener(fn) { listeners.push(fn); }, emit(...values) { for (const fn of listeners) fn(...values); } };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
 }
 
 function portPair() {
@@ -24,7 +33,9 @@ function portPair() {
   const left = { name: "translation", onMessage: leftMessages, onDisconnect: disconnected,
     postMessage(message) { if (!active) return; trace.push(["content", structuredClone(message)]); queueMicrotask(() => { if (active) rightMessages.emit(pair.toBackground(message)); }); } };
   const right = { name: "translation", onMessage: rightMessages, onDisconnect: disconnected,
-    postMessage(message) { if (!active) return; trace.push(["background", structuredClone(message)]); queueMicrotask(() => { if (active) leftMessages.emit(pair.toContent(message)); }); } };
+    // Mutation caught by the integration assertions: collapsing distinct Port
+    // deliveries into one microtask drain lets scope_done beat resolved decode().
+    postMessage(message) { if (!active) return; trace.push(["background", structuredClone(message)]); setImmediate(() => { if (active) leftMessages.emit(pair.toContent(message)); }); } };
   return Object.assign(pair, {
     content: left, background: right, trace,
     disconnect: () => disconnected.emit(),
@@ -53,35 +64,78 @@ function ndjson(rows, onDone = () => {}) {
 }
 
 function createServer() {
-  const calls = { source: 0, ocrStream: 0, translate: 0, activeSource: 0, peakSource: 0 };
+  const calls = { source: 0, ocrStream: 0, renderArtifact: 0, renderKey: 0, renderBlob: 0, translate: 0, activeSource: 0, peakSource: 0 };
   const held = new Map();
   const heldSource = new Map();
   const heldTranslation = new Map();
+  const heldRender = new Map();
   const faults = { source: new Set(), ocr: new Set(), translation: new Set() };
   const events = [];
+  const renderCompletions = [];
+  const translationCompletions = [];
   const translationBodies = [];
+  const ocrForms = [];
+  const renderPages = new Map();
   const server = {
     calls,
     events,
+    renderCompletions,
+    translationCompletions,
     translationBodies,
+    ocrForms,
     clone: structuredClone,
     async fetch(url, options = {}) {
-      if (url.endsWith("/health")) return { ok: true, json: async () => server.clone({ versions }) };
+      if (url.endsWith("/health")) return { ok: true, json: async () => server.clone({ versions, patch_versions: patchVersions }) };
       if (url.endsWith("/ocr-stream")) {
         calls.ocrStream++;
+        ocrForms.push(options.body);
         const source = options.body.get("image") ? await options.body.get("image").text() : "A.jpg";
         const name = /\/([A-D])\.jpg/.exec(source)?.[1] || "A";
+        renderPages.set(options.body.get("render_artifact_key"), name);
         if (held.has(name)) await held.get(name).promise;
         if (faults.ocr.has(name)) return ndjson([
-          { type: "analysis_ready", image_w: 1000, image_h: 1600, analysis_ms: 7 },
+          { type: "analysis_ready", image_w: 1000, image_h: 1600, analysis_ms: 7, analysis_cache_hit: false },
           { type: "ocr_block_error", block_id: `${name}-bad`, stage: "ocr", code: "injected_ocr" },
           { type: "image_done" },
         ], () => events.push(["image_done", name]));
         return ndjson([
-          { type: "analysis_ready", image_w: 1000, image_h: 1600, analysis_ms: 7 },
-          { type: "ocr_block", block_id: `${name}-b1`, bbox: [10, 20, 100, 40], src_text: name },
+          { type: "analysis_ready", image_w: 1000, image_h: 1600, analysis_ms: 7, analysis_cache_hit: false },
+          { type: "ocr_block", block_id: `${name}-b1`, bbox: [10, 20, 100, 40], src_text: name, kind: "text", vertical: false },
           { type: "image_done" },
         ], () => events.push(["image_done", name]));
+      }
+      if (url.endsWith("/render-artifact")) {
+        calls.renderArtifact++;
+        const image = options.body.get("image");
+        if (image) calls.renderBlob++;
+        else calls.renderKey++;
+        const renderKey = options.body.get("render_artifact_key");
+        let name = renderPages.get(renderKey);
+        if (image) {
+          name = /\/([A-D])\.jpg/.exec(await image.text())?.[1] || "A";
+          renderPages.set(renderKey, name);
+        }
+        if (!name) return { ok: false, status: 409, json: async () => server.clone({ error: "artifact_missing" }) };
+        if (heldRender.has(name)) await heldRender.get(name).promise;
+        renderCompletions.push(name);
+        const blockId = `${name}-b1`;
+        return { ok: true, status: 200, json: async () => server.clone({
+          schema_version: "render-v1",
+          render_artifact_key: renderKey,
+          analysis_key: options.body.get("analysis_key"),
+          image_w: 1000,
+          image_h: 1600,
+          blocks: [{
+            block_id: blockId,
+            patch_id: `patch-${blockId}`,
+            patch_bbox: [10, 20, 100, 40],
+            clean_region: [10, 20, 100, 40],
+            fit_bbox: [10, 20, 100, 40],
+            patch_mime: "image/png",
+            patch_rgba: Buffer.from(`patch:${blockId}`).toString("base64"),
+            reason: null,
+          }],
+        }) };
       }
       if (url.endsWith("/translate-items")) {
         calls.translate++;
@@ -105,7 +159,8 @@ function createServer() {
         if (body.items.some((item) => faults.translation.has(item.text))) {
           return { ok: false, status: 500, json: async () => server.clone({ error: "injected translation failure" }) };
         }
-        return { ok: true, json: async () => server.clone({ items: body.items.map((item) => ({ id: item.id, translation: `${item.text} translated` })) }) };
+        translationCompletions.push(translationName);
+        return { ok: true, json: async () => server.clone({ items: body.items.map((item) => ({ id: item.id, kind: "text", translation: `${item.text} translated` })) }) };
       }
       if (url.endsWith("/ocr")) {
         return { ok: true, json: async () => server.clone({ image_w: 1000, image_h: 1600, blocks: [] }) };
@@ -134,9 +189,15 @@ function createServer() {
       const promise = new Promise((done) => { resolve = done; });
       heldTranslation.set(name, { promise, resolve });
     },
+    holdRender(name) {
+      let resolve;
+      const promise = new Promise((done) => { resolve = done; });
+      heldRender.set(name, { promise, resolve });
+    },
     finishPage(name) { held.get(name)?.resolve(); held.delete(name); },
     finishSource(name) { heldSource.get(name)?.resolve(); heldSource.delete(name); },
     finishTranslation(name) { heldTranslation.get(name)?.resolve(); heldTranslation.delete(name); },
+    finishRender(name) { heldRender.get(name)?.resolve(); heldRender.delete(name); },
     fail(stage, name) { faults[stage].add(name); },
   };
   return server;
@@ -151,9 +212,10 @@ async function eventually(predicate, label) {
   throw new Error(`timed out: ${label}`);
 }
 
-function createIntegration({ server = createServer(), session = storageSession(), clock = performance, pages = [{ name: "A", rect: { left: 0, top: 0, right: 500, bottom: 600, width: 500, height: 600 } }] } = {}) {
+function createIntegration({ server = createServer(), session = storageSession(), clock = performance, decode = async () => {}, onAppend = () => {}, idStart = 0, pages = [{ name: "A", rect: { left: 0, top: 0, right: 500, bottom: 600, width: 500, height: 600 } }] } = {}) {
   const pair = portPair();
   let workerAlive = true;
+  let cloneStorageRead = (value) => value;
   const runtimeMessages = eventTarget();
   const connects = eventTarget();
   const background = {
@@ -168,12 +230,20 @@ function createIntegration({ server = createServer(), session = storageSession()
     },
     chrome: {
       storage: { session: Object.fromEntries(["get", "set", "remove", "getBytesInUse"].map((method) => [
-        method, (...args) => workerAlive ? session[method](...args) : Promise.resolve(method === "getBytesInUse" ? 0 : {}),
+        method, async (...args) => {
+          if (!workerAlive) return method === "getBytesInUse" ? 0 : {};
+          const value = await session[method](...args);
+          return method === "get" ? cloneStorageRead(value) : value;
+        },
       ])) }, action: { setBadgeText() {}, setBadgeBackgroundColor() {} },
       runtime: { onMessage: runtimeMessages, onConnect: connects },
     },
   };
   vm.createContext(background);
+  cloneStorageRead = (value) => {
+    background.__storageJson = JSON.stringify(value);
+    return vm.runInContext("JSON.parse(__storageJson)", background);
+  };
   background.__wire = {};
   pair.toBackground = (message) => {
     background.__wire.json = JSON.stringify(message);
@@ -182,21 +252,45 @@ function createIntegration({ server = createServer(), session = storageSession()
   server.clone = pair.toBackground;
   vm.runInContext(fs.readFileSync("extension/page-cache.js", "utf8"), background);
   vm.runInContext(fs.readFileSync("extension/reading-order.js", "utf8"), background);
+  if (fs.existsSync("extension/source-fetch.js")) {
+    vm.runInContext(fs.readFileSync("extension/source-fetch.js", "utf8"), background);
+  }
   vm.runInContext(fs.readFileSync("extension/background.js", "utf8"), background);
   connects.emit(pair.background);
 
-  let id = 0;
+  let id = idStart;
   const images = pages.map((page) => ({ src: `https://reader/${page.name}.jpg`, currentSrc: "", complete: true,
     naturalWidth: 1000, naturalHeight: 1600, isConnected: true, baseURI: "https://reader/", parentElement: null,
     rect: page.rect, getAttribute: () => "", getBoundingClientRect() { return this.rect; }, getClientRects() { return [this.rect]; } }));
   const rendered = [];
+  const createElement = (tagName) => {
+    const element = {
+      tagName: String(tagName).toUpperCase(), className: "", textContent: "", style: {}, children: [], appendCalls: [], removed: false, parentElement: null,
+      appendChild(node) { node.parentElement = this; this.children.push(node); this.appendCalls.push(node); if (node.className === "mt-render-block") onAppend(node); return node; },
+      remove() { this.removed = true; if (this.parentElement) this.parentElement.children = this.parentElement.children.filter((child) => child !== this); this.children.forEach((child) => child.remove()); },
+    };
+    Object.defineProperties(element, {
+      clientWidth: { get() { return Number.parseFloat(this.style.width) || 0; } },
+      clientHeight: { get() { return Number.parseFloat(this.style.height) || 0; } },
+      scrollWidth: { get() { return this.clientWidth; } },
+      scrollHeight: { get() { return this.clientHeight; } },
+    });
+    if (element.tagName === "IMG") element.decode = () => decode(element);
+    return element;
+  };
+  const descendants = () => {
+    const found = [];
+    const visit = (node) => { found.push(node); node.children.forEach(visit); };
+    rendered.filter((node) => !node.removed).forEach(visit);
+    return found;
+  };
   const content = {
     console, URL, Promise, Map, WeakMap, Set, performance: clock, queueMicrotask,
     crypto: { randomUUID: () => `id-${++id}` }, innerWidth: 800, innerHeight: 600, scrollX: 0, scrollY: 0,
     requestAnimationFrame(fn) { fn(); return 1; },
     document: {
       body: { appendChild(node) { rendered.push(node); } }, documentElement: {}, querySelectorAll: () => images,
-      createElement: () => ({ style: {}, children: [], appendChild(node) { this.children.push(node); }, remove() { this.removed = true; } }),
+      createElement,
     },
     window: { addEventListener() {} }, MutationObserver: class { observe() {} },
     ResizeObserver: class { observe() {} disconnect() {} },
@@ -222,17 +316,75 @@ function createIntegration({ server = createServer(), session = storageSession()
     click: () => content.translatePage("visible", "ja", "vi"),
     clickLoaded: () => content.translatePage("loaded", "ja", "vi"),
     navigate(source, nextRect = images[0].rect) { images[0].src = `https://reader/${source}.jpg`; images[0].rect = nextRect; content.pruneOverlays(); },
-    text: () => rendered.flatMap((node) => node.children).filter((node) => !node.removed).map((node) => node.textContent).join(" "),
+    text: () => descendants().filter((node) => !node.removed && node.className === "mt-translated-text").map((node) => node.textContent).join(" "),
+    renderBlocks: () => descendants().filter((node) => !node.removed && node.className === "mt-render-block"),
+    renderMetrics: () => pair.trace.filter(([side, event]) => side === "content" && event.type === "render_metric").map(([, event]) => event),
+    startAtomicRender() {
+      content.__atomicImage = images[0];
+      return vm.runInContext(`(() => {
+        const img = __atomicImage;
+        const event = {
+          type: "translation", request_id: "atomic-request", job_id: "atomic-job",
+          page_artifact_key: "atomic-page", render_artifact_key: "atomic-render",
+          layout_fit_version: "dom-fit-10px-v1", block_id: "atomic-block",
+          image_w: 1000, image_h: 1600, patch_id: "atomic-patch",
+          patch_bbox: [10, 20, 100, 40], fit_bbox: [10, 20, 100, 40],
+          patch_mime: "image/png", patch_rgba: "cG5n", trans_text: "atomic text",
+          vertical: false, layout_hint: null,
+        };
+        const startedAt = performance.now();
+        const binding = {
+          requestId: event.request_id, img, source: sourceForScope(img, "visible"),
+          sourceSignature: sourceSignature(img), cropSignature: "null", scope: "visible",
+          srcLang: "ja", dstLang: "vi", startedAt, firstOverlayMs: null,
+        };
+        imageRequests.set(img, event.request_id);
+        jobBindings.set(event.job_id, binding);
+        pendingScopes.set(event.request_id, {
+          startedAt, firstOverlayByJob: new Map(), firstOverlayMs: null,
+        });
+        return upsertOverlayBlock(img, binding, event);
+      })()`, content);
+    },
     summary: () => new Promise((resolve) => runtimeMessages.emit({ type: "benchmarkSummary" }, {}, resolve)),
+    metricSample(requestId) {
+      background.__metricRequestId = requestId;
+      return JSON.parse(vm.runInContext("JSON.stringify(metricSamplesByRequest.get(__metricRequestId) || null)", background));
+    },
     pageStatus: () => new Promise((resolve) => runtimeMessages.emit({ type: "pageStatus" }, {}, resolve)),
     legacyOcr(name) { return new Promise((resolve) => runtimeMessages.emit({ type: "ocrImage", url: `https://reader/${name}.jpg`, srcLang: "ja" }, {}, resolve)); },
     sendRenderMetric(requestId, jobId, value) { pair.content.postMessage({ type: "render_metric", request_id: requestId, job_id: jobId, first_overlay_ms: value }); },
   };
 }
 
-(async () => {
+test("first overlay timing starts at scope acceptance and waits for atomic patch commit", async () => {
+  let now = 100;
+  const patchDecode = deferred();
+  const app = createIntegration({
+    clock: { now: () => now },
+    decode: () => patchDecode.promise,
+    onAppend: () => { now = 137; },
+  });
+
+  const render = app.startAtomicRender();
+  await Promise.resolve();
+  assert.strictEqual(app.renderBlocks().length, 0);
+  assert.strictEqual(app.renderMetrics().length, 0);
+
+  now = 120;
+  patchDecode.resolve();
+  await render;
+  assert.strictEqual(app.renderBlocks().length, 1);
+  assert.deepStrictEqual(
+    { painted: app.renderMetrics()[0].painted, first_overlay_ms: app.renderMetrics()[0].first_overlay_ms },
+    { painted: true, first_overlay_ms: 37 },
+  );
+});
+
+test("progressive integration", { timeout: 10000 }, async () => {
   const app = createIntegration();
   const result = await app.click();
+  assert.match(app.server.ocrForms[0].get("render_artifact_key"), /^[0-9a-f]{64}$/);
   assert.deepStrictEqual(app.server.translationBodies[0], {
     src_lang: "ja",
     dst_lang: "vi",
@@ -244,6 +396,9 @@ function createIntegration({ server = createServer(), session = storageSession()
   assert.deepStrictEqual(app.server.events.slice(0, 2), [["image_done", "A"], ["translate", "A"]]);
   const coldStart = app.trace.find(([side, event]) => side === "content" && event.type === "start_scope")[1];
   const coldRequestId = coldStart.request_id;
+  const coldTranslation = app.trace.find(([side, event]) => side === "background" && event.type === "translation")[1];
+  // Mutation caught: dropping render_artifact_key from any renderable translation prevents content from posting an identity-complete render_metric.
+  assert.strictEqual(coldTranslation.render_artifact_key, app.server.ocrForms[0].get("render_artifact_key"));
   assert.strictEqual(app.text(), "A translated");
   assert.ok(Number.isFinite(result.first_overlay_ms));
   assert.strictEqual(result.firstOverlayMs, undefined);
@@ -252,10 +407,28 @@ function createIntegration({ server = createServer(), session = storageSession()
   ]);
   assert.ok(Object.values(result.metrics).every((value) => value === null || Number.isFinite(value)));
   assert.deepEqual(result.page_metrics.map((row) => [row.job_id, row.first_overlay_ms]), [[coldStart.jobs[0].job_id, result.first_overlay_ms]]);
+  const coldPageMetric = result.page_metrics[0];
+  assert.strictEqual(coldPageMetric.overlay_semantics, "atomic_patch_v1");
+  assert.strictEqual(coldPageMetric.cache_hit, false);
+  assert.strictEqual(coldPageMetric.partial_replay, false);
+  assert.strictEqual(coldPageMetric.analysis_cache_hit, false);
+  assert.ok(Number.isFinite(coldPageMetric.render_wait_after_translation_ms));
+  assert.strictEqual(coldPageMetric.render_coverage, null);
+  assert.deepStrictEqual(Object.keys(coldPageMetric.render_reason_counts), []);
+  assert.strictEqual(coldPageMetric.manifest_mismatch, false);
+  assert.strictEqual(coldPageMetric.source_unavailable, false);
+  assert.strictEqual(coldPageMetric.painted, null);
+  assert.strictEqual(coldPageMetric.error_code, null);
+  const completedColdMetric = await eventually(() => {
+    const row = app.metricSample(coldRequestId)?.page_metrics?.[0];
+    return row?.painted === true ? row : null;
+  }, "cold atomic render metric");
+  assert.strictEqual(completedColdMetric.render_coverage, 1);
+  assert.deepStrictEqual(completedColdMetric.render_reason_counts, {});
 
   const summary = await app.summary();
   assert.deepStrictEqual(Object.keys(summary).sort(), [
-    "cancel_latency_ms", "counters", "first_overlay_ms", "first_translation_ms", "total_ms",
+    "atomic_patch_v1", "cancel_latency_ms", "counters", "first_overlay_ms", "first_translation_ms", "total_ms",
   ]);
   assert.ok(Number.isFinite(summary.first_overlay_ms.p50));
   assert.ok(summary.counters.translation_calls <= 100);
@@ -264,9 +437,34 @@ function createIntegration({ server = createServer(), session = storageSession()
 
   const beforeReplay = { ...app.server.calls };
   const replay = await app.click();
-  assert.deepStrictEqual(app.server.calls, beforeReplay);
+  assert.strictEqual(app.server.calls.source, beforeReplay.source + 1);
+  assert.strictEqual(app.server.calls.ocrStream, beforeReplay.ocrStream);
+  assert.strictEqual(app.server.calls.translate, beforeReplay.translate);
+  assert.strictEqual(app.server.calls.renderKey, beforeReplay.renderKey + 1);
+  assert.strictEqual(app.server.calls.renderBlob, beforeReplay.renderBlob);
   assert.strictEqual(replay.cacheHit, true);
   assert.strictEqual(app.text(), "A translated");
+
+  const renderJoinServer = createServer();
+  renderJoinServer.holdRender("A");
+  const renderJoin = createIntegration({ server: renderJoinServer });
+  const renderJoined = renderJoin.click();
+  await eventually(() => renderJoinServer.calls.renderArtifact === 1, "held render artifact");
+  await eventually(() => renderJoinServer.translationCompletions.includes("A"), "translation completed while render held");
+  assert.strictEqual(renderJoin.text(), "");
+  renderJoinServer.finishRender("A");
+  await renderJoined;
+  assert.strictEqual(renderJoin.text(), "A translated");
+
+  const translationJoinServer = createServer();
+  translationJoinServer.holdTranslation("A");
+  const translationJoin = createIntegration({ server: translationJoinServer });
+  const translationJoined = translationJoin.click();
+  await eventually(() => translationJoinServer.renderCompletions.includes("A"), "render completed while translation held");
+  assert.strictEqual(translationJoin.text(), "");
+  translationJoinServer.finishTranslation("A");
+  await translationJoined;
+  assert.strictEqual(translationJoin.text(), "A translated");
 
   for (let index = 0; index < 100; index++) await app.click();
   const warmSummary = await app.summary();
@@ -301,11 +499,16 @@ function createIntegration({ server = createServer(), session = storageSession()
   const replacement = createIntegration({ server: replacementServer });
   const replaced = replacement.click();
   await eventually(() => replacementServer.calls.source === 1, "deferred source fetch");
+  // Mutation caught: waiting for the replacement source before releasing the
+  // superseded request prevents prompt cancellation and leaks its acquisition.
   const latest = replacement.click();
   assert.strictEqual((await replaced).ok, false);
-  const statusBefore = await replacement.pageStatus();
+  const statusBefore = await eventually(async () => {
+    const status = await replacement.pageStatus();
+    return status.background === 1 ? status : null;
+  }, "replacement ledger handoff");
   const statusAfterReopen = await replacement.pageStatus();
-  assert.ok(statusBefore.background >= 1);
+  assert.strictEqual(statusBefore.background, 1);
   assert.deepStrictEqual(statusAfterReopen, statusBefore);
   await eventually(async () => Number.isFinite((await replacement.summary()).cancel_latency_ms.p50), "replacement cancellation telemetry");
   replacementServer.finishSource("A");
@@ -328,7 +531,10 @@ function createIntegration({ server = createServer(), session = storageSession()
   const replacementVisible = cancelled.click();
   assert.strictEqual((await cancelledLoaded).ok, false);
   await replacementVisible;
-  assert.ok((await cancelled.summary()).counters.stale_work >= 1);
+  // Mutation caught: a cancelled pre-identity acquisition reaching OCR would
+  // turn prompt cancellation into stale producer work.
+  assert.strictEqual(cancelledServer.calls.ocrStream, 1);
+  assert.strictEqual((await cancelled.summary()).counters.stale_work, 0);
 
   let tick = 0;
   const agedServer = createServer();
@@ -350,7 +556,7 @@ function createIntegration({ server = createServer(), session = storageSession()
   void beforeRestart.click();
   await eventually(() => restartServer.calls.translate === 1, "translation before worker restart");
   beforeRestart.killWorker();
-  const afterRestart = createIntegration({ server: restartServer, session: sharedSession });
+  const afterRestart = createIntegration({ server: restartServer, session: sharedSession, idStart: 100 });
   const resumed = afterRestart.click();
   await eventually(() => restartServer.calls.translate >= 2, "translation resumed by restarted worker");
   restartServer.finishTranslation("A");
@@ -379,6 +585,8 @@ function createIntegration({ server = createServer(), session = storageSession()
   faultServer.fail("translation", "D");
   const sameRect = { left: 0, top: 0, right: 500, bottom: 600, width: 500, height: 600 };
   const faults = createIntegration({ server: faultServer, pages: ["A", "B", "C", "D"].map((name) => ({ name, rect: sameRect })) });
+  // Mutation caught: observing a later eager source rejection only when its
+  // ordered row is reached crashes the worker as an unhandled rejection.
   const partial = await faults.click();
   assert.deepStrictEqual({ blocks: partial.blocks, failed: partial.failed }, { blocks: 1, failed: 3 });
   assert.strictEqual(faults.text(), "A translated");
@@ -406,11 +614,12 @@ function createIntegration({ server = createServer(), session = storageSession()
   const legacyMixed = [mixed.legacyOcr("C"), mixed.legacyOcr("D")];
   await Promise.resolve();
   await Promise.resolve();
+  // Mutation caught: letting legacy source fetches bypass the shared pool
+  // raises the mixed progressive/legacy source peak above two.
   assert.ok(mixedServer.calls.peakSource <= 2, `mixed OCR peak ${mixedServer.calls.peakSource}`);
   for (const name of ["A", "B"]) mixedServer.finishSource(name);
   await eventually(() => mixedServer.calls.source === 4, "legacy fetches after progressive slots");
   for (const name of ["C", "D"]) mixedServer.finishSource(name);
   assert.strictEqual((await progressiveMixed).blocks, 2);
   assert.ok((await Promise.all(legacyMixed)).every((row) => row.ok));
-  console.log("progressive-integration.test.js OK");
-})().catch((error) => { console.error(error); process.exitCode = 1; });
+});
