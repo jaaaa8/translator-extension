@@ -1249,7 +1249,7 @@ Record evidence for:
 
 - renderable text: no original ink, no rectangular white box, no visible seam;
 - scale/zoom: patch and text share geometry, no 1px clipping;
-- long text: shrinks no lower than 10px; overflow case leaves original unchanged;
+- long text: shrinks to exactly 10px inside the speech bubble, with `scrollWidth <= clientWidth` and `scrollHeight <= clientHeight`; keep `fit_failed` as a unit-level defensive check, not a visual acceptance fixture;
 - SFX: original remains and no translated text/patch appears;
 - partial replay followed by recovery failure: mounted overlay remains;
 - all-SFX cache hit: `image_done` precedes `scope_done` and translated count is 0.

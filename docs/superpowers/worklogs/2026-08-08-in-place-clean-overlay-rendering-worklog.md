@@ -512,6 +512,6 @@ Nếu sau này cần trả lời câu hỏi chẩn đoán server “render artif
 ### Review và trạng thái Git
 
 - Review toàn diff và current CodeGraph call paths không có finding: mọi production binding đi qua `translatePage` nên có timestamp hữu hạn; late metric backfill được sau cleanup; hai block cùng job không phát trùng latency; route ảnh fixture không ghi acceptance counters và dùng `no-store`.
-- Evidence JSON: [Task 15 Gate A–G artifact](file:///D:/MangaTranslator/.worktrees/spec-c-in-place-overlay-rendering/docs/superpowers/worklogs/2026-08-09-in-place-clean-overlay-rendering.json).
+- Evidence JSON: [Task 15 Gate A–G artifact](2026-08-09-in-place-clean-overlay-rendering.json).
 - Code, spec và evidence của Task 15 còn **uncommitted**; không stage, commit hoặc push khi chưa có yêu cầu người dùng.
 - Known late-consumer limitation giữ nguyên: consumer gắn giữa final `applyTranslation` và persist/finish có thể nhận `translated=0`; cache-hit visit kế tiếp phục hồi. Spec C không thêm ACK protocol.

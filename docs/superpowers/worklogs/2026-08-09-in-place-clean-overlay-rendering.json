@@ -1,0 +1,221 @@
+{
+  "spec": "in-place-clean-overlay-rendering",
+  "captured_at": "2026-08-14T20:26:27.9440041+07:00",
+  "status": "passed",
+  "branch": "feat/v5",
+  "commit": "6770d742cfb9a6ff10662c471edd40836421fe69",
+  "worktree": "D:\\MangaTranslator\\.worktrees\\spec-c-in-place-overlay-rendering",
+  "extension": {
+    "loaded_from": "D:\\MangaTranslator\\.worktrees\\spec-c-in-place-overlay-rendering\\extension",
+    "source": "user-confirmed Chrome unpacked-extension details",
+    "invalid_initial_attempt": {
+      "loaded_from": "D:\\MangaTranslator\\extension",
+      "result": "1 image, 0 translated, 1 failed",
+      "included_in_gate_evidence": false
+    },
+    "final_popup": {
+      "cold": "1 image, 1 translated, 0 failed; background 0, cached 21, failed 0",
+      "warm": "restored from cache; background 0, cached 21, failed 0"
+    }
+  },
+  "runtime": {
+    "python_executable": "D:\\MangaTranslator\\venv\\Scripts\\python.exe",
+    "python_version": "3.12.13",
+    "node_version": "v24.15.0",
+    "acceptance_url": "http://127.0.0.1:8910/fixture.html?benchmark=cold",
+    "acceptance_process": {
+      "launcher_pid": 11480,
+      "listener_pid": 23080,
+      "health": "ok",
+      "stopped_by_task": true,
+      "port_released": true
+    },
+    "health_versions": {
+      "detector": "comic-text-detector-v1",
+      "dedupe": "iou-0.5-area-clamp-exact-v3",
+      "prep": "upscale48-border8-v1",
+      "region_resolver": "light-component-v1",
+      "recognizers": {
+        "ja": "manga-ocr-v1",
+        "es": "paddleocr-latin-ppocrv6-v1",
+        "pt": "paddleocr-latin-ppocrv6-v1"
+      },
+      "translator_model": "gemini-flash-lite-latest",
+      "prompt": "comic-page-items-v3",
+      "policy": "full-page-v1",
+      "layout_order": "reading-order-v1",
+      "page_schema": "page-v2"
+    },
+    "health_patch_versions": {
+      "cleaner": "telea3-feather2-v1",
+      "render_encoding": "png-rgba-v1",
+      "render_schema": "render-v1"
+    }
+  },
+  "commands": {
+    "server": {
+      "command": "& 'D:\\MangaTranslator\\venv\\Scripts\\python.exe' -m pytest server/tests --ignore=server/tests/test_ocr.py -q",
+      "result": "273 passed, 0 failed, 2 dependency warnings in 26.98s",
+      "test_ocr": "explicitly excluded and not run"
+    },
+    "extension": {
+      "command": "node --test --test-concurrency=1 extension/test/*.test.js",
+      "result": "50 passed, 0 failed in 3.07s"
+    },
+    "focused_fixture_route": {
+      "command": "& 'D:\\MangaTranslator\\venv\\Scripts\\python.exe' -m pytest server/tests/test_acceptance_app.py::test_health_fixture_and_assets_are_isolated_and_deterministic -q",
+      "red": "1 failed because /ja_page.png and /es_page.png returned 404",
+      "green": "1 passed, 1 dependency warning"
+    },
+    "telemetry_race": {
+      "command": "node --test --test-concurrency=1 extension/test/content.test.js",
+      "red": "0 finite late first-overlay samples instead of exactly 1",
+      "green": "1 passed"
+    }
+  },
+  "history": {
+    "initial_visual_fail_stop": {
+      "captured_at": "2026-08-14T08:31:05.0789335+07:00",
+      "status": "failed_visual_gate_b",
+      "symptom": "page A exposed original ink and an opaque rectangular white patch",
+      "root_cause": "the original acceptance source ink, declared bbox and 1x1 opaque patch were not geometrically honest",
+      "resolution": "replace the synthetic source with an exact speech-bubble raster, generate a transparent 240x120 clean patch with an exact 3px erase envelope, and freeze pixel-level source/patch/composite tests"
+    },
+    "long_text_fixture_correction": {
+      "symptom": "the original D fixture forced fit_failed by putting text outside the speech bubble",
+      "resolution": "use a bubble-safe 200x100 fit bbox and require the long translation to fit at the 10px floor; retain fit_failed only as a defensive unit-level case"
+    },
+    "warm_first_overlay_race": {
+      "before": "21 warm image jobs rendered but only 14 had finite first_overlay_ms",
+      "root_cause": "scope_done removed pendingScopes before patch.decode completed, so the late visible commit could not recover its start timestamp",
+      "resolution": "retain startedAt and the first-overlay marker on each job binding; late render_metric backfills the recorded page metric without delaying scope_done",
+      "duplicate_guard": "two concurrently decoding blocks for one job emit exactly one finite first_overlay_ms"
+    },
+    "fixture_image_routes": {
+      "before": "ja_page.png and es_page.png completed with naturalWidth 0",
+      "resolution": "serve both existing fixture PNGs explicitly as image/png with Cache-Control no-store",
+      "after": "both fixture images and the benchmark reader loaded as 800x1200"
+    }
+  },
+  "visual_qa": {
+    "method": "tool-assisted Chrome inspection after manual popup actions by the user",
+    "fixture_ids": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "partial-replay-recovery-failure",
+      "all-sfx-cache-hit"
+    ],
+    "page_a": {
+      "result": "pass",
+      "observed": "one atomic overlay and one translated block; original ink no longer visible; no exposed rectangular patch or visible seam",
+      "final_dom": {
+        "benchmark_status": "COMPLETE",
+        "overlay_count": 1,
+        "render_block_count": 1,
+        "translated_text": "vi:A:block-1"
+      }
+    },
+    "pages_b_c": {
+      "result": "pass",
+      "observed": "no translated overlay; original non-renderable content remains"
+    },
+    "page_d": {
+      "result": "pass",
+      "observed": "long translation remains inside the speech bubble at the 10px floor without horizontal or vertical overflow"
+    },
+    "partial_replay_recovery_failure": {
+      "result": "pass",
+      "observed": "the already mounted overlay remains visible after recovery failure"
+    },
+    "all_sfx_cache_hit": {
+      "result": "pass",
+      "observed": "no translated text or patch; translated count remains 0 and terminal accounting completes"
+    }
+  },
+  "metrics": {
+    "source": "atomic_patch_v1 page_metrics[] only",
+    "atomic_patch_v1": {
+      "warm": {
+        "sample_count": 21,
+        "first_overlay_ms": {
+          "p50": 17,
+          "p95": 34
+        }
+      },
+      "cold": {
+        "sample_count": 20,
+        "first_overlay_ms": {
+          "p50": 26,
+          "p95": 44
+        },
+        "render_wait_after_translation_ms": {
+          "p50": 0,
+          "p95": 0
+        }
+      }
+    },
+    "warm_backend_counts": {
+      "page_load": 0,
+      "source": 0,
+      "ocr_stream": 0,
+      "translation": 0,
+      "source_aborted": 0,
+      "ocr_aborted": 0,
+      "active_source": 0,
+      "peak_source": 0
+    },
+    "status": "pass"
+  },
+  "gates": {
+    "A": {
+      "status": "pass",
+      "evidence": "273-test server gate and exact source/bbox/patch pixel tests"
+    },
+    "B": {
+      "status": "pass",
+      "evidence": "page A atomic clean overlay, shared geometry, D 10px fit and browser visual QA"
+    },
+    "C": {
+      "status": "pass",
+      "evidence": "strict translation/page-v2 tests plus B/C and all-SFX visual outcomes"
+    },
+    "D": {
+      "status": "pass",
+      "evidence": "source/key/version/cache suites and acceptance health parity"
+    },
+    "E": {
+      "status": "pass",
+      "evidence": "manifest and recovery-breaker integration coverage"
+    },
+    "F": {
+      "status": "pass",
+      "evidence": "delivery, partial replay, rehydrate suites and partial-replay browser case"
+    },
+    "G": {
+      "status": "pass",
+      "evidence": "warm sample_count 21 with p95 34ms; cold sample_count 20 with render-wait p95 0ms"
+    }
+  },
+  "review": {
+    "result": "pass",
+    "findings": [],
+    "evidence": "full changed-code diff, current CodeGraph call paths, git diff --check, browser DOM and zero-call warm backend"
+  },
+  "known_late_consumer_limitation": "A consumer attaching between the final applyTranslation and persist/finish may receive no translation event and translated=0; the next cache-hit visit recovers. Spec C intentionally does not add an ACK protocol.",
+  "spec_status_updated": true,
+  "scope_control": {
+    "unrelated_files_modified": false,
+    "model_files_modified": false,
+    "debug_pngs_created": false,
+    "patch_bitmap_cache_data_created": false,
+    "staged": false,
+    "committed": false,
+    "pushed": false
+  },
+  "remaining_scope": {
+    "production_real_page_coordinate_qa": "deferred by explicit user decision; it is rollout QA outside the acceptance fixture required by Task 15",
+    "git_integration": "Task 15 code and evidence remain uncommitted until the user explicitly requests staging or commit"
+  }
+}
