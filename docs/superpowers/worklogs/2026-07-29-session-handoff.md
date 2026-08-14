@@ -1,11 +1,18 @@
 ---
 title: MangaTranslator session handoff
+note_type: artifact
+artifact_type: handoff
+work_item: viewport-ocr-prewarm-gemini-failover
 date: 2026-07-29
+date_start: 2026-07-29
+date_end: 2026-07-29
+status: paused
+versions:
+  - "[[feat-v2]]"
 tags:
   - mangatranslator
   - worklog
   - handoff
-status: paused
 ---
 
 # Session handoff — 2026-07-29
@@ -59,4 +66,4 @@ Next steps:
 
 ## Obsidian vault status
 
-The Obsidian desktop app is running at `C:\Users\DELL G3\AppData\Local\Programs\Obsidian\Obsidian.exe`, but the required `obsidian` CLI is absent from PATH. The vault was therefore not updated through Obsidian. Once the CLI is enabled/installed, append this handoff to the intended vault worklog and link it to [[MangaTranslator]].
+The Obsidian desktop app is running at `C:\Users\DELL G3\AppData\Local\Programs\Obsidian\Obsidian.exe`, but the required `obsidian` CLI is absent from PATH. The vault was therefore not updated through Obsidian. Once the CLI is enabled/installed, append this handoff to the intended vault worklog and link it to [[Tiến độ MangaTranslator|MangaTranslator]].
