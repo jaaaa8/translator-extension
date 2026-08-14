@@ -70,9 +70,10 @@ Do not use the system `python` or `pytest` for verification. It may lack project
 - Markdown and notes: `obsidian:obsidian-markdown`.
 - Vault CLI, note creation, moves, and search: `obsidian:obsidian-cli`.
 - Canvas `.canvas`: `obsidian:json-canvas`; Bases `.base`: `obsidian:obsidian-bases`.
-- Before appending progress or session history, read `docs/obsidian_rule.md`; route detailed evidence to the owning canonical worklog and keep the living index compact.
 
 Skip the skill only when the user explicitly asks for direct file operations.
+
+Before appending progress or session history — including direct file operations — read `docs/obsidian_rule.md`; route detailed evidence to the owning canonical worklog and keep the living index compact.
 
 ## Git
 

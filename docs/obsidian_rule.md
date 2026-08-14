@@ -27,6 +27,7 @@ tags:
 ## Cách append một mốc lịch sử
 
 - Dùng H2 mới theo mẫu `## YYYY-MM-DD — <phạm vi>: <mốc>` và đặt sau toàn bộ nội dung cũ.
+- Cập nhật `date_end` của canonical worklog thành ngày của mốc vừa append. Chỉ đổi `status` khi có evidence thực sự đóng hoặc mở lại work item, và chỉ dùng enum đóng `done | incomplete | paused | superseded` trong design archive; focused test xanh không đủ để chuyển sang `done` nếu browser/manual gate còn mở.
 - Không sửa lại prose, heading, checklist hoặc evidence của phiên trước. Không normalize whitespace lịch sử.
 - Ghi theo mạch có thể kiểm chứng: bối cảnh/trạng thái → triệu chứng hoặc vấn đề → root cause → quyết định/fix nhỏ nhất → RED → GREEN → review → phạm vi còn mở.
 - Chỉ ghi lệnh, số test, commit và trạng thái đã quan sát thật. Focused test xanh không tự động đóng browser/manual QA hoặc gate ngoài phạm vi.

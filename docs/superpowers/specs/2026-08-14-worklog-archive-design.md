@@ -430,6 +430,7 @@ Hai entry này là Markdown relative link hoạt động trong Git/GitHub/VS Cod
 
 ### Gate 7 — Git và định dạng
 
+- `MOVE_COMMIT` là commit duy nhất có subject chính xác `docs: move Obsidian vault to docs`; `SPLIT_COMMIT` là commit duy nhất có subject chính xác `docs: split MangaTranslator worklog archive`.
 - `git diff --check MOVE_COMMIT SPLIT_COMMIT` được phép exit `2` chỉ với closed allowlist đúng 12 warning header dưới đây; phải so tập chính xác, không được bỏ qua toàn bộ output:
   - `trailing whitespace` tại `docs/superpowers/worklogs/2026-07-29-progressive-translation-worklog.md:197` và `docs/superpowers/worklogs/2026-07-29-progressive-translation-worklog.md:198`; hai dòng payload `+` phải khớp nguyên văn source blob L542–543, gồm hai dấu cách Markdown hard line break cuối dòng;
   - `new blank line at EOF` tại đúng mười file/line:
