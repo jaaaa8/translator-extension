@@ -430,7 +430,20 @@ Hai entry này là Markdown relative link hoạt động trong Git/GitHub/VS Cod
 
 ### Gate 7 — Git và định dạng
 
-- `git diff --check` phải sạch.
+- `git diff --check MOVE_COMMIT SPLIT_COMMIT` được phép exit `2` chỉ với closed allowlist đúng 12 warning header dưới đây; phải so tập chính xác, không được bỏ qua toàn bộ output:
+  - `trailing whitespace` tại `docs/superpowers/worklogs/2026-07-29-progressive-translation-worklog.md:197` và `docs/superpowers/worklogs/2026-07-29-progressive-translation-worklog.md:198`; hai dòng payload `+` phải khớp nguyên văn source blob L542–543, gồm hai dấu cách Markdown hard line break cuối dòng;
+  - `new blank line at EOF` tại đúng mười file/line:
+    - `docs/superpowers/worklogs/2026-07-21-manga-translator-foundation-worklog.md:166`;
+    - `docs/superpowers/worklogs/2026-07-23-in-bubble-ocr-recall-worklog.md:156`;
+    - `docs/superpowers/worklogs/2026-07-23-layout-translation-actions-worklog.md:110`;
+    - `docs/superpowers/worklogs/2026-07-29-progressive-translation-worklog.md:400`;
+    - `docs/superpowers/worklogs/2026-07-29-viewport-ocr-prewarm-gemini-failover-worklog.md:86`;
+    - `docs/superpowers/worklogs/2026-07-30-browser-acceptance-harness-worklog.md:99`;
+    - `docs/superpowers/worklogs/2026-07-31-cold-benchmark-fixture-worklog.md:92`;
+    - `docs/superpowers/worklogs/2026-08-01-telemetry-real-fixture-quality-gate-worklog.md:281`;
+    - `docs/superpowers/worklogs/2026-08-03-paced-quality-gate-rerun-worklog.md:46`;
+    - `docs/superpowers/worklogs/2026-08-04-reading-order-full-page-translation-worklog.md:196`.
+- Mười blank-line warning là dòng trống cuối source slice mà từng file sở hữu; hai trailing-whitespace warning cũng là payload lịch sử. Bất kỳ warning mới, warning bị thiếu, hoặc thay đổi path/line/message/payload nào đều làm Gate 7 fail.
 - Diff từng commit chỉ chứa đúng phạm vi đã định nghĩa.
 - Commit snapshot không chứa design/move/split.
 - Commit move giữ note chính byte-for-byte và đủ similarity để `git log --follow` nối lịch sử.
