@@ -116,19 +116,23 @@ async function unchanged(app, event) {
   const slowPending = slow.context.translatePage("visible");
   const slowStart = slow.ports()[0].sent[0];
   slow.ports()[0].emit(translation(slowStart, "slow but current"));
-  slow.ports()[0].emit({ type: "scope_done", request_id: slowStart.request_id, images: 1, translated: 1, failed: 0 });
+  slow.ports()[0].emit({ ...translation(slowStart, "second slow block"), render_artifact_key: "render-2", block_id: "b2", patch_id: "patch-b2" });
+  slow.ports()[0].emit({ type: "scope_done", request_id: slowStart.request_id, images: 1, translated: 2, failed: 0 });
   await slowPending;
   slowDecode.resolve();
   await settle();
   // Mutation caught: treating terminal producer accounting as stale UI identity drops a valid late decode and its collector outcome.
-  assert.strictEqual(slow.blocks().length, 1);
+  assert.strictEqual(slow.blocks().length, 2);
   assert.deepStrictEqual(slow.blocks()[0].children.map((child) => child.className), ["mt-clean-patch", "mt-translated-text"]);
-  assert.strictEqual(slow.live()[0].appendCalls.length, 1);
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(slow.messages.find((message) => message.type === "render_metric"))), {
+  assert.strictEqual(slow.live()[0].appendCalls.length, 2);
+  const slowMetrics = slow.messages.filter((message) => message.type === "render_metric");
+  assert.strictEqual(slowMetrics.filter((message) => Number.isFinite(message.first_overlay_ms)).length, 1, "late render must retain exactly one first-overlay sample per job");
+  assert.deepStrictEqual(JSON.parse(JSON.stringify({ ...slowMetrics.find((message) => message.block_id === "b1"), first_overlay_ms: Number.isFinite(slowMetrics.find((message) => message.block_id === "b1").first_overlay_ms) })), {
     type: "render_metric", request_id: slowStart.request_id, job_id: slowStart.jobs[0].job_id,
     page_artifact_key: "page-1", render_artifact_key: "render-1", layout_fit_version: "dom-fit-10px-v1",
-    block_id: "b1", painted: true, reason: null, layout_profile: { font_px: 18, line_height: 1.2 },
+    block_id: "b1", painted: true, reason: null, layout_profile: { font_px: 18, line_height: 1.2 }, first_overlay_ms: true,
   });
+  assert.strictEqual(Object.hasOwn(slowMetrics.find((message) => message.block_id === "b2"), "first_overlay_ms"), false);
 
   const staleDecode = deferred();
   const staleAsync = createApp([image()], { decode: () => staleDecode.promise });

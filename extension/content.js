@@ -99,7 +99,12 @@ function translatePage(scope, requestSrcLang = srcLang, requestDstLang = dstLang
   let jobs;
   try { jobs = snapshotJobs(scope, requestId, srcLang, dstLang); }
   catch (error) { return Promise.resolve({ ok: false, error: error.message || String(error) }); }
-  const done = new Promise((resolve) => pendingScopes.set(requestId, { resolve, startedAt: performance.now(), firstOverlayMs: null, firstOverlayByJob: new Map() }));
+  const startedAt = performance.now();
+  for (const job of jobs) {
+    const binding = jobBindings.get(job.job_id);
+    if (binding) Object.assign(binding, { startedAt, firstOverlayMs: null });
+  }
+  const done = new Promise((resolve) => pendingScopes.set(requestId, { resolve, startedAt, firstOverlayMs: null, firstOverlayByJob: new Map() }));
   const message = { type: "start_scope", request_id: requestId, replaces_request_id: replacesRequestId, scope, src_lang: srcLang, dst_lang: dstLang, reading_direction: requestReadingDirection, jobs };
   activeScopeMessages.set(requestId, message);
   translationPort().postMessage(message);
@@ -245,10 +250,13 @@ async function upsertOverlayBlock(img, binding, event) {
   overlay.blocks.set(event.block_id, block);
   const pending = pendingScopes.get(binding.requestId);
   let firstOverlayMs = null;
-  if (pending && !pending.firstOverlayByJob.has(event.job_id)) {
-    firstOverlayMs = Math.round(performance.now() - pending.startedAt);
-    pending.firstOverlayByJob.set(event.job_id, firstOverlayMs);
-    if (pending.firstOverlayMs == null || firstOverlayMs < pending.firstOverlayMs) pending.firstOverlayMs = firstOverlayMs;
+  if (binding.firstOverlayMs == null) {
+    firstOverlayMs = Math.round(performance.now() - binding.startedAt);
+    binding.firstOverlayMs = firstOverlayMs;
+    if (pending) {
+      pending.firstOverlayByJob.set(event.job_id, firstOverlayMs);
+      if (pending.firstOverlayMs == null || firstOverlayMs < pending.firstOverlayMs) pending.firstOverlayMs = firstOverlayMs;
+    }
   }
   postRenderMetric(binding, event, true, null, profile, firstOverlayMs);
 }

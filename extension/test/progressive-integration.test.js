@@ -332,15 +332,16 @@ function createIntegration({ server = createServer(), session = storageSession()
           patch_mime: "image/png", patch_rgba: "cG5n", trans_text: "atomic text",
           vertical: false, layout_hint: null,
         };
+        const startedAt = performance.now();
         const binding = {
           requestId: event.request_id, img, source: sourceForScope(img, "visible"),
           sourceSignature: sourceSignature(img), cropSignature: "null", scope: "visible",
-          srcLang: "ja", dstLang: "vi",
+          srcLang: "ja", dstLang: "vi", startedAt, firstOverlayMs: null,
         };
         imageRequests.set(img, event.request_id);
         jobBindings.set(event.job_id, binding);
         pendingScopes.set(event.request_id, {
-          startedAt: performance.now(), firstOverlayByJob: new Map(), firstOverlayMs: null,
+          startedAt, firstOverlayByJob: new Map(), firstOverlayMs: null,
         });
         return upsertOverlayBlock(img, binding, event);
       })()`, content);
