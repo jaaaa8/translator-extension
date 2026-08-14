@@ -66,7 +66,7 @@ Type dùng trong repo này: `feat`, `fix`, `docs`, `test`, `chore`, `refactor`, 
 - Model và weight: `server/models/`, `server/vendor/`, `*.pt`, `*.onnx`.
 - State/cache của tool: `.claude/`, `.codegraph/`, `.codex/`, `.tokensave/`, `graphify-out/`, `.superpowers/sdd/`.
 - Log và thư mục tạm: `log.txt`, `.tmp-task10-browser/`, `.worktrees/`.
-- UI state của Obsidian: `MangaTranslatorBrowser/.obsidian/workspace.json`.
+- UI state của Obsidian: `docs/.obsidian/workspace.json`.
 
 Nội dung vault Obsidian (các file `.md`) **có** được track — đó là tài liệu dự án.
 
