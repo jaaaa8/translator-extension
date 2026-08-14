@@ -324,7 +324,7 @@ $jsonCount = [int]((obsidian vault=docs files folder=superpowers/worklogs ext=js
 if ($jsonCount -ne 4) { throw "Obsidian JSON count=$jsonCount, expected 4" }
 ```
 
-Expected: exact vault path và đúng bốn JSON. Chưa yêu cầu unresolved=0 ở commit move vì alias `MangaTranslator` được thêm trong Task 3.
+Expected: exact vault path và đúng bốn JSON. Chưa chạy unresolved exact-set gate ở commit move vì split chưa retarget link nội bộ trong session handoff; gate cuối sau split cho phép chính xác hai external-root Markdown link đã khai báo trong design spec.
 
 ---
 
@@ -789,9 +789,21 @@ $supportFiles = @(
   'docs/superpowers/worklogs/2026-07-29-session-handoff.md',
   'docs/superpowers/worklogs/2026-07-30-progressive-translation-verification.md'
 )
+$supportRewrites = @{
+  'docs/superpowers/worklogs/2026-07-29-session-handoff.md' = @{
+    Old = '[[MangaTranslator]]'
+    New = '[[Tiến độ MangaTranslator|MangaTranslator]]'
+  }
+}
 foreach ($relativePath in $supportFiles) {
   $beforeBody = Remove-Frontmatter (Read-Blob $relativePath)
   $afterBody = Remove-Frontmatter (Read-WorkspaceFile $relativePath)
+  if ($supportRewrites.ContainsKey($relativePath)) {
+    $rewrite = $supportRewrites[$relativePath]
+    if ((Count-Literal $beforeBody $rewrite.Old) -ne 1) { throw "support rewrite source count is not 1: $relativePath" }
+    $beforeBody = $beforeBody.Replace($rewrite.Old, $rewrite.New)
+    if ((Count-Literal $afterBody $rewrite.Old) -ne 0) { throw "support rewrite source remains: $relativePath" }
+  }
   if ($beforeBody -ne $afterBody) { throw "support body changed: $relativePath" }
 }
 
@@ -991,14 +1003,24 @@ if ($vaultPath -ne 'D:\MangaTranslator\docs') { throw "wrong vault: $vaultPath" 
 $jsonCount = [int]((obsidian vault=docs files folder=superpowers/worklogs ext=json total | Out-String).Trim())
 if ($jsonCount -ne 4) { throw "JSON count=$jsonCount" }
 
-$unresolved = (obsidian vault=docs unresolved total | Out-String).Trim()
-if ($unresolved -ne '0') { throw "unresolved total=$unresolved" }
-
 $evidenceDir = 'D:\MangaTranslator\.superpowers\sdd\worklog-archive'
-obsidian vault=docs unresolved verbose format=json | Tee-Object -FilePath "$evidenceDir\unresolved-final.json"
+$unresolvedJson = (obsidian vault=docs unresolved verbose format=json | Out-String).Trim()
+$unresolvedJson | Tee-Object -FilePath "$evidenceDir\unresolved-final.json"
+$expected = @(
+  '../../../ocr-manga-extension-roadmap-revised-2026-07-30|superpowers/specs/2026-07-30-progressive-translation-workflow-design.md',
+  '../../../work-flow|superpowers/specs/2026-07-30-progressive-translation-workflow-design.md'
+) | Sort-Object
+$actual = @(
+  ($unresolvedJson | ConvertFrom-Json) |
+    ForEach-Object { "$($_.link)|$($_.sources)" } |
+    Sort-Object
+)
+if (($actual -join "`n") -ne ($expected -join "`n")) {
+  throw "unresolved set mismatch: $($actual -join ', ')"
+}
 ```
 
-Expected: exact path, JSON count 4, unresolved total 0. Evidence nằm trong ignored tool-state directory, không stage.
+Expected: exact path, JSON count 4 và unresolved set khớp đúng hai external-root Markdown link đã allowlist, gồm cả linkpath và source file. Evidence nằm trong ignored tool-state directory, không stage.
 
 - [ ] **Step 10: Kiểm tra manual bốn backtick anchors**
 
@@ -1087,9 +1109,9 @@ Khi bàn giao implementation, báo đúng các dữ kiện sau:
 
 - SHA ba implementation commits: snapshot, move, split.
 - `git show --summary --find-renames=100%` của move commit.
-- Lossless summary: 15 ranges, 1.702 lines, 6 rewrites, 2 support bodies, 4 JSON hashes.
-- Link summary: 0 basename duplicate, 60 timeline anchors, 0 unresolved file/anchor, 0 root-doc wikilink.
-- Obsidian evidence: exact vault path, 4 JSON, unresolved total 0, kết quả click bốn backtick anchors.
+- Lossless summary: 15 ranges, 1.702 lines, 6 source-note rewrites, 1 support target rewrite, 2 support bodies, 4 JSON hashes.
+- Link summary: 0 basename duplicate, 60 timeline anchors, 0 unresolved raw wikilink/file/anchor trong validator, 0 root-doc wikilink; hai external-root Markdown link được kiểm bằng allowlist riêng.
+- Obsidian evidence: exact vault path, 4 JSON, unresolved set đúng hai external-root Markdown link đã allowlist, kết quả click bốn backtick anchors.
 - Version facts: 33/66/72/8/25 non-merge; v4 checkpoint; v5/Spec C Task 15 còn mở.
 - `git status --short --branch` sau commit.
 

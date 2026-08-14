@@ -105,7 +105,7 @@ Hai plan lịch sử ngày 2026-08-02 và 2026-08-03 có nhắc path cũ nhưng 
 
 ### 4.1 Tài liệu lịch sử đã có
 
-Với specs, plans và hai Markdown artifact hiện có, chỉ được thêm/sửa frontmatter hoặc alias. Prose, heading và path trong thân bài giữ nguyên, kể cả khi phát biểu lịch sử không còn đúng ở hiện tại.
+Với specs, plans và hai Markdown artifact hiện có, chỉ được thêm/sửa frontmatter hoặc alias. Prose, heading và path trong thân bài giữ nguyên, kể cả khi phát biểu lịch sử không còn đúng ở hiện tại, ngoại trừ đúng một target wikilink được nêu tên và đóng phạm vi trong mục 4.2.
 
 Note tiến độ là ngoại lệ có kiểm soát:
 
@@ -120,8 +120,10 @@ Hai Markdown artifact giữ nguyên body:
 
 | File | `work_item` | `artifact_type` | Thao tác |
 |---|---|---|---|
-| `2026-07-29-session-handoff.md` | `viewport-ocr-prewarm-gemini-failover` | `handoff` | Giữ body, chuẩn hóa frontmatter |
+| `2026-07-29-session-handoff.md` | `viewport-ocr-prewarm-gemini-failover` | `handoff` | Giữ body ngoài một target wikilink được allowlist; chuẩn hóa frontmatter |
 | `2026-07-30-progressive-translation-verification.md` | `progressive-translation` | `verification` | Chỉ thêm frontmatter |
+
+Ngoại lệ đóng duy nhất cho artifact: trong `2026-07-29-session-handoff.md`, đổi target đúng một wikilink `[[MangaTranslator]]` thành `[[Tiến độ MangaTranslator|MangaTranslator]]`. Display label `MangaTranslator` giữ nguyên; phần body còn lại phải byte-identical. Ngoại lệ này không mở rộng sang artifact còn lại hoặc bất kỳ prose/heading/path nào khác.
 
 Bốn JSON giữ nguyên tên, nội dung và vị trí:
 
@@ -239,7 +241,7 @@ Các trạng thái bắt buộc phải nói rõ:
 
 `docs/Tiến độ MangaTranslator.md` sở hữu phần đầu L1–14 của snapshot và trở thành living index.
 
-Frontmatter mới gồm `note_type: index`, `status: active` và alias `MangaTranslator`. Alias là bắt buộc để prose wikilink `[[MangaTranslator]]` trong session handoff tiếp tục resolve sau khi vault chuyển sang `docs/`.
+Frontmatter mới gồm `note_type: index`, `status: active` và alias `MangaTranslator`. Alias phục vụ quick switcher và search, nhưng không tham gia wikilink resolution của Obsidian. Vì vậy link trong session handoff phải dùng target tường minh `[[Tiến độ MangaTranslator|MangaTranslator]]` theo ngoại lệ đóng tại mục 4.2.
 
 Trong body:
 
@@ -420,7 +422,11 @@ Nếu Obsidian thực tế không resolve một backtick anchor, thêm block ID 
 
 - Xác nhận đúng sáu link lịch sử có target cuối trong mục 8 và không có historical wikilink nào khác bị sửa.
 - Xác nhận `AGENTS.md`, `CLAUDE.md` và `workflow-guide.md` chỉ xuất hiện dưới dạng inline-code path, không phải wikilink.
-- Chạy resolver Obsidian cuối cùng và giữ `unresolved total = 0`.
+- Chạy resolver Obsidian cuối cùng và yêu cầu unresolved set khớp chính xác hai external-root Markdown link được allowlist dưới đây, gồm cả linkpath và source file; bất kỳ unresolved entry mới nào cũng làm gate fail:
+  - `../../../ocr-manga-extension-roadmap-revised-2026-07-30` từ `superpowers/specs/2026-07-30-progressive-translation-workflow-design.md`;
+  - `../../../work-flow` từ `superpowers/specs/2026-07-30-progressive-translation-workflow-design.md`.
+
+Hai entry này là Markdown relative link hoạt động trong Git/GitHub/VS Code nhưng trỏ ra ngoài vault root `docs/`; chúng không phải historical wikilink của mục 8 và không mở rộng quy tắc nguồn ngoài vault ở mục 3.2.
 
 ### Gate 7 — Git và định dạng
 
